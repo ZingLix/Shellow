@@ -1,0 +1,15 @@
+* text=auto
+
+*.sh text eol=lf
+gradlew text eol=lf
+*.bat text eol=crlf
+
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.webp binary
+*.ttf binary
+*.a binary
+*.so binary
+*.xcframework binary
+*.jar binary

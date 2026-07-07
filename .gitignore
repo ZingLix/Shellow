@@ -1,0 +1,60 @@
+# macOS / editor noise
+.DS_Store
+*.swp
+*.swo
+*.iml
+.idea/
+
+# Local environment and secrets
+.env
+.env.*
+!.env.example
+local.properties
+**/local.properties
+keystore.properties
+signing.properties
+*.jks
+*.keystore
+*.p12
+*.cer
+*.crt
+*.der
+*.pem
+*.key
+*.p8
+*.csr
+*.certSigningRequest
+*.mobileprovision
+*.provisionprofile
+id_rsa*
+id_ed25519*
+
+# Rust / Zig build outputs
+/target/
+/work/
+**/zig-cache*/
+**/zig-global-cache*/
+
+# Generated native mobile artifacts
+/apps/android/app/src/main/jniLibs/
+/apps/ios/Frameworks/
+
+# Android / Gradle build outputs
+**/.gradle/
+**/build/
+**/.cxx/
+**/.externalNativeBuild/
+**/captures/
+
+# Xcode / SwiftPM build outputs
+DerivedData/
+*.xcuserstate
+xcuserdata/
+.build/
+.swiftpm/
+*.moved-aside
+
+# Logs and reports generated during local debugging
+*.log
+*.trace
+*.xcresult/

@@ -1,0 +1,405 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 56;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		8B0E6E0B2D2A000100000001 /* ShellowApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8B0E6DFD2D2A000100000001 /* ShellowApp.swift */; };
+		8B0E6E0C2D2A000100000001 /* AppShell.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8B0E6DFE2D2A000100000001 /* AppShell.swift */; };
+		8B0E6E0D2D2A000100000001 /* AppTab.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8B0E6DFF2D2A000100000001 /* AppTab.swift */; };
+		8B0E6E0E2D2A000100000001 /* HostProfile.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8B0E6E002D2A000100000001 /* HostProfile.swift */; };
+		8B0E6E152D2A000100000001 /* SSHSecretStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8B0E6E162D2A000100000001 /* SSHSecretStore.swift */; };
+		8B0E6E0F2D2A000100000001 /* ShellowSettings.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8B0E6E012D2A000100000001 /* ShellowSettings.swift */; };
+		8B0E6E102D2A000100000001 /* TerminalSession.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8B0E6E022D2A000100000001 /* TerminalSession.swift */; };
+		8B0E6E112D2A000100000001 /* HostsScreen.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8B0E6E032D2A000100000001 /* HostsScreen.swift */; };
+		8B0E6E122D2A000100000001 /* SettingsScreen.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8B0E6E042D2A000100000001 /* SettingsScreen.swift */; };
+		8B0E6E132D2A000100000001 /* TerminalScreen.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8B0E6E052D2A000100000001 /* TerminalScreen.swift */; };
+		8B0E6E142D2A000100000001 /* TerminalMetalGridSurface.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8B0E6E062D2A000100000001 /* TerminalMetalGridSurface.swift */; };
+		8B0E6E302D2A000100000001 /* ShellowCoreBridge.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8B0E6E2E2D2A000100000001 /* ShellowCoreBridge.swift */; };
+		8B0E6E312D2A000100000001 /* ShellowCore.xcframework in Frameworks */ = {isa = PBXBuildFile; fileRef = 8B0E6E2F2D2A000100000001 /* ShellowCore.xcframework */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXFileReference section */
+		8B0E6DEB2D2A000100000001 /* Shellow.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Shellow.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		8B0E6DFD2D2A000100000001 /* ShellowApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShellowApp.swift; sourceTree = "<group>"; };
+		8B0E6DFE2D2A000100000001 /* AppShell.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppShell.swift; sourceTree = "<group>"; };
+		8B0E6DFF2D2A000100000001 /* AppTab.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppTab.swift; sourceTree = "<group>"; };
+		8B0E6E002D2A000100000001 /* HostProfile.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HostProfile.swift; sourceTree = "<group>"; };
+		8B0E6E162D2A000100000001 /* SSHSecretStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SSHSecretStore.swift; sourceTree = "<group>"; };
+		8B0E6E012D2A000100000001 /* ShellowSettings.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShellowSettings.swift; sourceTree = "<group>"; };
+		8B0E6E022D2A000100000001 /* TerminalSession.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalSession.swift; sourceTree = "<group>"; };
+		8B0E6E032D2A000100000001 /* HostsScreen.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HostsScreen.swift; sourceTree = "<group>"; };
+		8B0E6E042D2A000100000001 /* SettingsScreen.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsScreen.swift; sourceTree = "<group>"; };
+		8B0E6E052D2A000100000001 /* TerminalScreen.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalScreen.swift; sourceTree = "<group>"; };
+		8B0E6E062D2A000100000001 /* TerminalMetalGridSurface.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalMetalGridSurface.swift; sourceTree = "<group>"; };
+		8B0E6E2E2D2A000100000001 /* ShellowCoreBridge.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShellowCoreBridge.swift; sourceTree = "<group>"; };
+		8B0E6E2F2D2A000100000001 /* ShellowCore.xcframework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.xcframework; path = ShellowCore.xcframework; sourceTree = "<group>"; };
+/* End PBXFileReference section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		8B0E6DE82D2A000100000001 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				8B0E6E312D2A000100000001 /* ShellowCore.xcframework in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		8B0E6DE22D2A000100000001 = {
+			isa = PBXGroup;
+			children = (
+				8B0E6DFB2D2A000100000001 /* Shellow */,
+				8B0E6E322D2A000100000001 /* Frameworks */,
+				8B0E6DEC2D2A000100000001 /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		8B0E6DEC2D2A000100000001 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				8B0E6DEB2D2A000100000001 /* Shellow.app */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+		8B0E6DFB2D2A000100000001 /* Shellow */ = {
+			isa = PBXGroup;
+			children = (
+				8B0E6DFD2D2A000100000001 /* ShellowApp.swift */,
+				8B0E6DFE2D2A000100000001 /* AppShell.swift */,
+				8B0E6DFF2D2A000100000001 /* AppTab.swift */,
+				8B0E6E332D2A000100000001 /* Bridge */,
+				8B0E6E202D2A000100000001 /* Models */,
+				8B0E6E212D2A000100000001 /* Views */,
+			);
+			path = Shellow;
+			sourceTree = "<group>";
+		};
+		8B0E6E202D2A000100000001 /* Models */ = {
+			isa = PBXGroup;
+			children = (
+				8B0E6E002D2A000100000001 /* HostProfile.swift */,
+				8B0E6E162D2A000100000001 /* SSHSecretStore.swift */,
+				8B0E6E012D2A000100000001 /* ShellowSettings.swift */,
+				8B0E6E022D2A000100000001 /* TerminalSession.swift */,
+			);
+			path = Models;
+			sourceTree = "<group>";
+		};
+		8B0E6E212D2A000100000001 /* Views */ = {
+			isa = PBXGroup;
+			children = (
+				8B0E6E032D2A000100000001 /* HostsScreen.swift */,
+				8B0E6E042D2A000100000001 /* SettingsScreen.swift */,
+				8B0E6E052D2A000100000001 /* TerminalScreen.swift */,
+				8B0E6E062D2A000100000001 /* TerminalMetalGridSurface.swift */,
+			);
+			path = Views;
+			sourceTree = "<group>";
+		};
+		8B0E6E322D2A000100000001 /* Frameworks */ = {
+			isa = PBXGroup;
+			children = (
+				8B0E6E2F2D2A000100000001 /* ShellowCore.xcframework */,
+			);
+			path = Frameworks;
+			sourceTree = "<group>";
+		};
+		8B0E6E332D2A000100000001 /* Bridge */ = {
+			isa = PBXGroup;
+			children = (
+				8B0E6E2E2D2A000100000001 /* ShellowCoreBridge.swift */,
+			);
+			path = Bridge;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		8B0E6DEA2D2A000100000001 /* Shellow */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 8B0E6DF82D2A000100000001 /* Build configuration list for PBXNativeTarget "Shellow" */;
+			buildPhases = (
+				8B0E6DE72D2A000100000001 /* Sources */,
+				8B0E6DE82D2A000100000001 /* Frameworks */,
+				8B0E6DE92D2A000100000001 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = Shellow;
+			productName = Shellow;
+			productReference = 8B0E6DEB2D2A000100000001 /* Shellow.app */;
+			productType = "com.apple.product-type.application";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		8B0E6DE32D2A000100000001 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = 1;
+				LastSwiftUpdateCheck = 2640;
+				LastUpgradeCheck = 2640;
+				TargetAttributes = {
+					8B0E6DEA2D2A000100000001 = {
+						CreatedOnToolsVersion = 26.4.1;
+					};
+				};
+			};
+			buildConfigurationList = 8B0E6DE62D2A000100000001 /* Build configuration list for PBXProject "Shellow" */;
+			compatibilityVersion = "Xcode 14.0";
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				en,
+				Base,
+			);
+			mainGroup = 8B0E6DE22D2A000100000001;
+			productRefGroup = 8B0E6DEC2D2A000100000001 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				8B0E6DEA2D2A000100000001 /* Shellow */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		8B0E6DE92D2A000100000001 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		8B0E6DE72D2A000100000001 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				8B0E6E0B2D2A000100000001 /* ShellowApp.swift in Sources */,
+				8B0E6E0C2D2A000100000001 /* AppShell.swift in Sources */,
+				8B0E6E0D2D2A000100000001 /* AppTab.swift in Sources */,
+				8B0E6E0E2D2A000100000001 /* HostProfile.swift in Sources */,
+				8B0E6E152D2A000100000001 /* SSHSecretStore.swift in Sources */,
+				8B0E6E0F2D2A000100000001 /* ShellowSettings.swift in Sources */,
+				8B0E6E102D2A000100000001 /* TerminalSession.swift in Sources */,
+				8B0E6E112D2A000100000001 /* HostsScreen.swift in Sources */,
+				8B0E6E122D2A000100000001 /* SettingsScreen.swift in Sources */,
+				8B0E6E132D2A000100000001 /* TerminalScreen.swift in Sources */,
+				8B0E6E142D2A000100000001 /* TerminalMetalGridSurface.swift in Sources */,
+				8B0E6E302D2A000100000001 /* ShellowCoreBridge.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin XCBuildConfiguration section */
+		8B0E6DF62D2A000100000001 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++20";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				GCC_DYNAMIC_NO_PIC = NO;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"DEBUG=1",
+					"$(inherited)",
+				);
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				LOCALIZATION_PREFERS_STRING_CATALOGS = YES;
+				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+				MTL_FAST_MATH = YES;
+				ONLY_ACTIVE_ARCH = YES;
+				SDKROOT = iphoneos;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "DEBUG $(inherited)";
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+			};
+			name = Debug;
+		};
+		8B0E6DF72D2A000100000001 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++20";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				ENABLE_NS_ASSERTIONS = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				LOCALIZATION_PREFERS_STRING_CATALOGS = YES;
+				MTL_ENABLE_DEBUG_INFO = NO;
+				MTL_FAST_MATH = YES;
+				SDKROOT = iphoneos;
+				SWIFT_COMPILATION_MODE = wholemodule;
+				VALIDATE_PRODUCT = YES;
+			};
+			name = Release;
+		};
+		8B0E6DF92D2A000100000001 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = "";
+				ENABLE_PREVIEWS = YES;
+				FRAMEWORK_SEARCH_PATHS = "$(PROJECT_DIR)/Frameworks";
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_CFBundleDisplayName = Shellow;
+				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.utilities";
+				INFOPLIST_KEY_NSLocalNetworkUsageDescription = "Shellow connects to SSH hosts on your local network.";
+				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
+				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
+				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
+				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				MARKETING_VERSION = 0.1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = xyz.zinglix.shellow;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
+		8B0E6DFA2D2A000100000001 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = "";
+				ENABLE_PREVIEWS = YES;
+				FRAMEWORK_SEARCH_PATHS = "$(PROJECT_DIR)/Frameworks";
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_CFBundleDisplayName = Shellow;
+				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.utilities";
+				INFOPLIST_KEY_NSLocalNetworkUsageDescription = "Shellow connects to SSH hosts on your local network.";
+				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
+				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
+				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
+				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				MARKETING_VERSION = 0.1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = xyz.zinglix.shellow;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		8B0E6DE62D2A000100000001 /* Build configuration list for PBXProject "Shellow" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				8B0E6DF62D2A000100000001 /* Debug */,
+				8B0E6DF72D2A000100000001 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		8B0E6DF82D2A000100000001 /* Build configuration list for PBXNativeTarget "Shellow" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				8B0E6DF92D2A000100000001 /* Debug */,
+				8B0E6DFA2D2A000100000001 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+/* End XCConfigurationList section */
+	};
+	rootObject = 8B0E6DE32D2A000100000001 /* Project object */;
+}

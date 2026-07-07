@@ -1,0 +1,9 @@
+.gradle/
+build/
+captures/
+.externalNativeBuild/
+.cxx/
+local.properties
+
+app/build/
+app/src/main/jniLibs/

@@ -1,0 +1,4 @@
+module ShellowCore {
+  header "ShellowCore.h"
+  export *
+}

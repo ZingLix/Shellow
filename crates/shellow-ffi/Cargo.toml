@@ -1,0 +1,18 @@
+[package]
+name = "shellow-ffi"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lib]
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[features]
+default = []
+native-integrations = ["shellow-core/native-integrations"]
+
+[dependencies]
+shellow-core = { path = "../shellow-core" }
+serde.workspace = true
+serde_json.workspace = true

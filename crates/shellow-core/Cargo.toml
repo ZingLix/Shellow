@@ -1,0 +1,32 @@
+[package]
+name = "shellow-core"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[features]
+default = ["demo", "official-libghostty-vt-rs"]
+demo = []
+ghostty-vt = ["official-libghostty-vt-rs"]
+libghostty-vt = ["official-libghostty-vt-rs"]
+libghostty-vt-link = ["official-libghostty-vt-rs"]
+official-libghostty-vt-rs = ["dep:libghostty-vt"]
+native-integrations = [
+    "dep:fontdue",
+    "dep:russh",
+    "dep:rustybuzz",
+    "dep:tokio",
+    "dep:wgpu",
+    "official-libghostty-vt-rs",
+]
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+fontdue = { version = "0.9", optional = true }
+libghostty-vt = { version = "0.2.0", optional = true, default-features = false }
+russh = { version = "0.62.2", optional = true, default-features = true }
+rustybuzz = { version = "0.20", optional = true }
+tokio = { version = "1.48.0", optional = true, features = ["rt-multi-thread", "net", "time", "sync", "io-util"] }
+wgpu = { version = "30.0.0", optional = true, default-features = false, features = ["std", "metal", "vulkan", "wgsl"] }
