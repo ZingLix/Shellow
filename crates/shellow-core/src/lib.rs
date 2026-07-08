@@ -2,6 +2,11 @@ use std::cell::RefCell;
 
 use serde::{Deserialize, Serialize};
 
+#[cfg(not(feature = "native-integrations"))]
+compile_error!(
+    "shellow-core requires the native-integrations feature; fallback builds are unsupported."
+);
+
 pub mod ghostty_adapter;
 pub mod integrations;
 pub mod renderer;
@@ -254,7 +259,7 @@ pub struct ShellowEngine {
     #[cfg(feature = "native-integrations")]
     live_shell: Option<ssh::LiveShellHandle>,
     #[cfg(feature = "native-integrations")]
-    live_buffer: Vec<u8>,
+    live_terminal: Option<ghostty_adapter::LiveTerminalState>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -446,7 +451,7 @@ impl ShellowEngine {
             #[cfg(feature = "native-integrations")]
             live_shell: None,
             #[cfg(feature = "native-integrations")]
-            live_buffer: Vec::new(),
+            live_terminal: None,
         }
     }
 
@@ -488,9 +493,7 @@ impl ShellowEngine {
         first_row: u32,
         row_count: u32,
     ) -> renderer::TerminalRenderFrame {
-        let grid = self
-            .grid_snapshot()
-            .map(|grid| viewport_grid_snapshot(grid, first_row as usize, row_count as usize));
+        let grid = self.grid_snapshot_viewport(first_row as usize, row_count as usize);
         self.renderer.borrow_mut().render_frame(
             grid.as_ref(),
             &self.rows,
@@ -502,8 +505,33 @@ impl ShellowEngine {
         )
     }
 
+    pub fn render_surface_frame_presented(
+        &self,
+        width_px: u32,
+        height_px: u32,
+        first_row: u32,
+        row_count: u32,
+    ) -> bool {
+        self.render_frame_viewport(width_px, height_px, first_row, row_count)
+            .native_surface_terminal_frame_presented_this_frame
+    }
+
     pub fn renderer_info(&self) -> renderer::TerminalRendererInfo {
         self.renderer.borrow().info()
+    }
+
+    pub fn live_shell_event_revision(&self) -> u64 {
+        #[cfg(feature = "native-integrations")]
+        {
+            self.live_shell
+                .as_ref()
+                .map_or(0, ssh::LiveShellHandle::event_revision)
+        }
+
+        #[cfg(not(feature = "native-integrations"))]
+        {
+            0
+        }
     }
 
     pub fn set_renderer_overlay(
@@ -575,21 +603,7 @@ impl ShellowEngine {
         self.rows
             .push(TerminalRow::command(format!("ssh {}", self.host)));
         self.rows
-            .push(TerminalRow::muted("russh session actor: configured"));
-        self.rows.push(TerminalRow::muted(format!(
-            "auth={:?}  pty=xterm-256color  terminal={}",
-            profile.authentication, self.integration.terminal_backend
-        )));
-        self.rows
-            .push(TerminalRow::muted(profile.host_key_status()));
-        self.rows
-            .push(TerminalRow::muted(ssh::keepalive_policy_summary(
-                Some(ssh::DEFAULT_LIVE_KEEPALIVE_INTERVAL_SECS),
-                ssh::DEFAULT_KEEPALIVE_MAX,
-            )));
-        self.rows.push(TerminalRow::success(
-            "demo transport attached; russh SessionActor is compiled for live SSH",
-        ));
+            .push(TerminalRow::success("Preview terminal ready"));
         self.rows.push(TerminalRow::prompt());
         self.state = ConnectionState::Connected;
         self.cursor_column = 0;
@@ -622,10 +636,7 @@ impl ShellowEngine {
         self.clear_demo_grid();
         self.rows
             .push(TerminalRow::command(format!("ssh {}", self.host)));
-        self.rows
-            .push(TerminalRow::muted("russh password authentication starting"));
-        self.rows
-            .push(TerminalRow::muted(profile.host_key_status()));
+        self.rows.push(TerminalRow::muted("Connecting..."));
         self.rows
             .push(TerminalRow::command(format!("exec {}", command.trim())));
 
@@ -652,14 +663,13 @@ impl ShellowEngine {
 
         match result {
             Ok(output) => {
-                self.rows
-                    .push(TerminalRow::success("russh command completed"));
+                self.rows.push(TerminalRow::success("Command completed"));
                 let output_rows = self.terminal_rows_from_remote_output(&output);
                 self.rows.extend(output_rows);
                 self.state = ConnectionState::Connected;
             }
             Err(error) => {
-                self.rows.push(TerminalRow::warning("russh command failed"));
+                self.rows.push(TerminalRow::warning("Command failed"));
                 self.rows.push(TerminalRow::muted(error));
                 self.state = ConnectionState::Disconnected;
             }
@@ -695,46 +705,41 @@ impl ShellowEngine {
         self.clear_demo_grid();
         self.rows
             .push(TerminalRow::command(format!("ssh {}", self.host)));
-        self.rows
-            .push(TerminalRow::muted("russh live shell starting"));
-        self.rows.push(TerminalRow::muted(format!(
-            "pty=xterm-256color  terminal={}",
-            self.integration.terminal_backend
-        )));
-        self.rows
-            .push(TerminalRow::muted(profile.host_key_status()));
-        self.rows
-            .push(TerminalRow::muted(ssh::keepalive_policy_summary(
-                Some(ssh::DEFAULT_LIVE_KEEPALIVE_INTERVAL_SECS),
-                ssh::DEFAULT_KEEPALIVE_MAX,
-            )));
+        self.rows.push(TerminalRow::muted("Connecting..."));
 
         #[cfg(feature = "native-integrations")]
         {
-            self.live_buffer.clear();
-            match ssh::LiveShellHandle::spawn_password(ssh::RusshConnectOptions {
-                host: profile.host,
-                port: profile.port,
-                username: profile.username,
-                auth: ssh::RusshAuthMethod::Password(password),
-                expected_host_key_sha256: profile.trusted_host_key_sha256,
-                keepalive_interval_secs: Some(ssh::DEFAULT_LIVE_KEEPALIVE_INTERVAL_SECS),
-                keepalive_max: ssh::DEFAULT_KEEPALIVE_MAX,
-                cols: self.terminal_cols,
-                rows: self.terminal_rows,
-                inactivity_timeout_secs: 3_600,
-            }) {
-                Ok(handle) => {
-                    self.live_shell = Some(handle);
-                    self.rows
-                        .push(TerminalRow::success("russh live shell actor spawned"));
+            self.live_terminal =
+                ghostty_adapter::LiveTerminalState::new(self.terminal_cols, self.terminal_rows);
+            if self.live_terminal.is_none() {
+                self.rows
+                    .push(TerminalRow::warning("libghostty-vt live terminal failed"));
+                self.state = ConnectionState::Disconnected;
+            } else {
+                match ssh::LiveShellHandle::spawn_password(ssh::RusshConnectOptions {
+                    host: profile.host,
+                    port: profile.port,
+                    username: profile.username,
+                    auth: ssh::RusshAuthMethod::Password(password),
+                    expected_host_key_sha256: profile.trusted_host_key_sha256,
+                    keepalive_interval_secs: Some(ssh::DEFAULT_LIVE_KEEPALIVE_INTERVAL_SECS),
+                    keepalive_max: ssh::DEFAULT_KEEPALIVE_MAX,
+                    cols: self.terminal_cols,
+                    rows: self.terminal_rows,
+                    inactivity_timeout_secs: 3_600,
+                }) {
+                    Ok(handle) => {
+                        self.live_shell = Some(handle);
+                        self.rows.push(TerminalRow::success("Connected"));
+                    }
+                    Err(error) => {
+                        self.live_terminal = None;
+                        self.rows.push(TerminalRow::warning("Connection failed"));
+                        self.rows.push(TerminalRow::muted(error));
+                        self.state = ConnectionState::Disconnected;
+                    }
                 }
-                Err(error) => {
-                    self.rows.push(TerminalRow::warning("russh shell failed"));
-                    self.rows.push(TerminalRow::muted(error));
-                    self.state = ConnectionState::Disconnected;
-                }
-            }
+            };
         }
 
         #[cfg(not(feature = "native-integrations"))]
@@ -776,55 +781,49 @@ impl ShellowEngine {
         self.clear_demo_grid();
         self.rows
             .push(TerminalRow::command(format!("ssh {}", self.host)));
-        self.rows.push(TerminalRow::muted(
-            "russh private-key authentication starting",
-        ));
-        self.rows.push(TerminalRow::muted(format!(
-            "pty=xterm-256color  terminal={}",
-            self.integration.terminal_backend
-        )));
-        self.rows
-            .push(TerminalRow::muted(profile.host_key_status()));
-        self.rows
-            .push(TerminalRow::muted(ssh::keepalive_policy_summary(
-                Some(ssh::DEFAULT_LIVE_KEEPALIVE_INTERVAL_SECS),
-                ssh::DEFAULT_KEEPALIVE_MAX,
-            )));
+        self.rows.push(TerminalRow::muted("Connecting..."));
 
         #[cfg(feature = "native-integrations")]
         {
-            self.live_buffer.clear();
+            self.live_terminal =
+                ghostty_adapter::LiveTerminalState::new(self.terminal_cols, self.terminal_rows);
             let private_key_result =
                 ssh::validate_private_key_auth(&private_key_pem, passphrase.as_deref());
 
-            match private_key_result.and_then(|_| {
-                ssh::LiveShellHandle::spawn(ssh::RusshConnectOptions {
-                    host: profile.host,
-                    port: profile.port,
-                    username: profile.username,
-                    auth: ssh::RusshAuthMethod::PrivateKey {
-                        private_key_pem,
-                        passphrase,
-                    },
-                    expected_host_key_sha256: profile.trusted_host_key_sha256,
-                    keepalive_interval_secs: Some(ssh::DEFAULT_LIVE_KEEPALIVE_INTERVAL_SECS),
-                    keepalive_max: ssh::DEFAULT_KEEPALIVE_MAX,
-                    cols: self.terminal_cols,
-                    rows: self.terminal_rows,
-                    inactivity_timeout_secs: 3_600,
-                })
-            }) {
-                Ok(handle) => {
-                    self.live_shell = Some(handle);
-                    self.rows
-                        .push(TerminalRow::success("russh live shell actor spawned"));
+            if self.live_terminal.is_none() {
+                self.rows
+                    .push(TerminalRow::warning("libghostty-vt live terminal failed"));
+                self.state = ConnectionState::Disconnected;
+            } else {
+                match private_key_result.and_then(|_| {
+                    ssh::LiveShellHandle::spawn(ssh::RusshConnectOptions {
+                        host: profile.host,
+                        port: profile.port,
+                        username: profile.username,
+                        auth: ssh::RusshAuthMethod::PrivateKey {
+                            private_key_pem,
+                            passphrase,
+                        },
+                        expected_host_key_sha256: profile.trusted_host_key_sha256,
+                        keepalive_interval_secs: Some(ssh::DEFAULT_LIVE_KEEPALIVE_INTERVAL_SECS),
+                        keepalive_max: ssh::DEFAULT_KEEPALIVE_MAX,
+                        cols: self.terminal_cols,
+                        rows: self.terminal_rows,
+                        inactivity_timeout_secs: 3_600,
+                    })
+                }) {
+                    Ok(handle) => {
+                        self.live_shell = Some(handle);
+                        self.rows.push(TerminalRow::success("Connected"));
+                    }
+                    Err(error) => {
+                        self.live_terminal = None;
+                        self.rows.push(TerminalRow::warning("Connection failed"));
+                        self.rows.push(TerminalRow::muted(error));
+                        self.state = ConnectionState::Disconnected;
+                    }
                 }
-                Err(error) => {
-                    self.rows.push(TerminalRow::warning("russh shell failed"));
-                    self.rows.push(TerminalRow::muted(error));
-                    self.state = ConnectionState::Disconnected;
-                }
-            }
+            };
         }
 
         #[cfg(not(feature = "native-integrations"))]
@@ -845,8 +844,10 @@ impl ShellowEngine {
         {
             let poll = self.live_shell.as_ref().map(ssh::LiveShellHandle::poll);
             if let Some(poll) = poll {
-                self.apply_vt_side_effects(&poll.output);
-                self.live_buffer.extend_from_slice(&poll.output);
+                if let Some(live_terminal) = self.live_terminal.as_mut() {
+                    live_terminal.write(&poll.output);
+                }
+                self.apply_live_vt_side_effects(&poll.output);
                 self.rebuild_live_shell_rows(&poll.status);
             }
         }
@@ -993,6 +994,11 @@ impl ShellowEngine {
                 self.cursor_column = 0;
                 return self.snapshot();
             }
+            if let Some(live_terminal) = self.live_terminal.as_mut() {
+                if !live_terminal.resize(cols, rows) {
+                    self.live_terminal = ghostty_adapter::LiveTerminalState::new(cols, rows);
+                }
+            }
             return self.poll_live_shell();
         }
 
@@ -1018,7 +1024,12 @@ impl ShellowEngine {
                 && !self.demo_mouse_active
                 && self.demo_tui.is_none()
             {
-                self.live_buffer.clear();
+                if self.live_shell.is_some() {
+                    self.live_terminal = ghostty_adapter::LiveTerminalState::new(
+                        self.terminal_cols,
+                        self.terminal_rows,
+                    );
+                }
             }
         }
         self.last_grid_signature.replace(None);
@@ -1040,7 +1051,12 @@ impl ShellowEngine {
         self.cursor_column = 0;
         #[cfg(feature = "native-integrations")]
         {
-            self.live_buffer.clear();
+            if self.live_shell.is_some() {
+                self.live_terminal =
+                    ghostty_adapter::LiveTerminalState::new(self.terminal_cols, self.terminal_rows);
+            } else {
+                self.live_terminal = None;
+            }
         }
         self.last_grid_signature.replace(None);
         self.renderer.borrow_mut().invalidate();
@@ -1582,13 +1598,12 @@ impl ShellowEngine {
             if let Some(handle) = self.live_shell.take() {
                 handle.disconnect();
             }
-            self.live_buffer.clear();
+            self.live_terminal = None;
         }
     }
 
     #[cfg(feature = "native-integrations")]
     fn rebuild_live_shell_rows(&mut self, status: &ssh::LiveShellStatus) {
-        let live_output = self.live_buffer.clone();
         self.rows.clear();
         self.rows
             .push(TerminalRow::command(format!("ssh {}", self.host)));
@@ -1596,8 +1611,7 @@ impl ShellowEngine {
         match status {
             ssh::LiveShellStatus::Connecting => {
                 self.state = ConnectionState::Connecting;
-                self.rows
-                    .push(TerminalRow::muted("russh live shell connecting"));
+                self.rows.push(TerminalRow::muted("Connecting..."));
             }
             ssh::LiveShellStatus::Connected {
                 observed_host_key_sha256,
@@ -1623,15 +1637,27 @@ impl ShellowEngine {
             }
         }
 
-        let live_rows = self.terminal_rows_from_live_output(&live_output);
-        self.rows.extend(live_rows);
         self.rows.push(TerminalRow::prompt());
         self.cursor_column = 0;
     }
 
     #[cfg(feature = "native-integrations")]
-    fn terminal_rows_from_live_output(&mut self, output: &[u8]) -> Vec<TerminalRow> {
-        ghostty_adapter::terminal_rows_from_vt_output(output)
+    fn apply_live_vt_side_effects(&mut self, output: &[u8]) {
+        if let Some(live_terminal) = &self.live_terminal {
+            self.bell_count += live_terminal.take_bell_count();
+            if let Some(title) = live_terminal.title() {
+                self.title = title;
+            }
+        } else {
+            self.bell_count += ghostty_adapter::terminal_bell_count_from_vt_bytes(output);
+            if let Some(title) = ghostty_adapter::terminal_title_from_vt_bytes(output) {
+                self.title = title;
+            }
+        }
+        if let Some(clipboard_text) = ghostty_adapter::terminal_clipboard_from_vt_bytes(output) {
+            self.clipboard_sequence = self.clipboard_sequence.saturating_add(1);
+            self.pending_clipboard_text = Some(clipboard_text);
+        }
     }
 
     fn apply_vt_side_effects(&mut self, output: &[u8]) {
@@ -2151,16 +2177,13 @@ impl ShellowEngine {
             ))
         } else {
             #[cfg(feature = "native-integrations")]
-            if !self.live_buffer.is_empty() {
-                let snapshot = ghostty_adapter::terminal_grid_from_vt_bytes(
-                    &self.live_buffer,
-                    self.terminal_cols,
-                    self.terminal_rows,
-                );
-                if snapshot.has_visible_content()
-                    || snapshot.active_screen == TerminalScreenKind::Alternate
-                {
-                    return Some(self.annotate_dirty_rows(snapshot));
+            if let Some(live_terminal) = &self.live_terminal {
+                if let Some(snapshot) = live_terminal.snapshot() {
+                    if snapshot.has_visible_content()
+                        || snapshot.active_screen == TerminalScreenKind::Alternate
+                    {
+                        return Some(self.annotate_dirty_rows(snapshot));
+                    }
                 }
             }
 
@@ -2174,6 +2197,37 @@ impl ShellowEngine {
                 None
             }
         }
+    }
+
+    fn grid_snapshot_viewport(
+        &self,
+        requested_first_row: usize,
+        requested_row_count: usize,
+    ) -> Option<TerminalGridSnapshot> {
+        #[cfg(feature = "native-integrations")]
+        {
+            let live_terminal_is_primary_source = !self.demo_editor_active
+                && !self.demo_pager_active
+                && !self.demo_mouse_active
+                && self.demo_tui.is_none()
+                && self.demo_grid_bytes.is_none();
+            if live_terminal_is_primary_source {
+                if let Some(live_terminal) = &self.live_terminal {
+                    if let Some(snapshot) =
+                        live_terminal.snapshot_viewport(requested_first_row, requested_row_count)
+                    {
+                        if snapshot.has_visible_content()
+                            || snapshot.active_screen == TerminalScreenKind::Alternate
+                        {
+                            return Some(snapshot);
+                        }
+                    }
+                }
+            }
+        }
+
+        self.grid_snapshot()
+            .map(|grid| viewport_grid_snapshot(grid, requested_first_row, requested_row_count))
     }
 
     fn annotate_dirty_rows(&self, mut snapshot: TerminalGridSnapshot) -> TerminalGridSnapshot {
@@ -2888,7 +2942,7 @@ mod tests {
     }
 
     #[test]
-    fn preview_reports_pinned_host_key_status() {
+    fn preview_uses_compact_terminal_output() {
         let mut engine = ShellowEngine::new();
         let snapshot = engine.connect_preview(HostProfile {
             name: "Pinned".to_string(),
@@ -2903,14 +2957,14 @@ mod tests {
             snapshot
                 .rows
                 .iter()
-                .any(|row| { row.text == "host-key=pinned SHA256:abcDEF012+/=" })
+                .any(|row| { row.text == "Preview terminal ready" })
         );
-        assert!(
-            snapshot
-                .rows
-                .iter()
-                .any(|row| { row.text == "keepalive=30s max-missed=3" })
-        );
+        assert!(snapshot.rows.iter().all(|row| {
+            !row.text.contains("host-key=")
+                && !row.text.contains("keepalive=")
+                && !row.text.contains("auth=")
+                && !row.text.contains("russh")
+        }));
     }
 
     #[test]
@@ -2955,7 +3009,7 @@ mod tests {
             snapshot
                 .rows
                 .iter()
-                .any(|row| row.text == "russh shell failed")
+                .any(|row| row.text == "Connection failed")
         );
         assert!(
             snapshot
@@ -2963,12 +3017,7 @@ mod tests {
                 .iter()
                 .any(|row| { row.text.contains("private key parse failed") })
         );
-        assert!(
-            snapshot
-                .rows
-                .iter()
-                .all(|row| row.text != "russh live shell actor spawned")
-        );
+        assert!(snapshot.rows.iter().all(|row| row.text != "Connected"));
     }
 
     #[test]
@@ -3466,6 +3515,35 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "native-integrations")]
+    #[test]
+    fn live_terminal_state_applies_incremental_vt_output() {
+        let mut state = ghostty_adapter::LiveTerminalState::new(40, 8)
+            .expect("libghostty-vt live terminal should initialize");
+
+        state.write(b"\x1b]2;Live Shell\x1b\\one\r\n");
+        state.write(b"two\x07");
+
+        assert_eq!(state.title().as_deref(), Some("Live Shell"));
+        assert_eq!(state.take_bell_count(), 1);
+        assert_eq!(state.take_bell_count(), 0);
+
+        let grid = state
+            .snapshot()
+            .expect("live terminal should expose a grid snapshot");
+        assert_eq!(grid.cols, 40);
+        assert_eq!(grid.rows, 8);
+        assert!(grid.lines.iter().any(|line| line.contains("one")));
+        assert!(grid.lines.iter().any(|line| line.contains("two")));
+
+        assert!(state.resize(50, 10));
+        let grid = state
+            .snapshot()
+            .expect("resized live terminal should expose a grid snapshot");
+        assert_eq!(grid.cols, 50);
+        assert_eq!(grid.rows, 10);
+    }
+
     #[test]
     fn resize_updates_snapshot_terminal_size() {
         let mut engine = ShellowEngine::new();
@@ -3778,6 +3856,86 @@ mod tests {
                     .any(|run| run.text.contains("inverse") && run.style.inverse)
             );
         }
+    }
+
+    #[test]
+    fn vt_grid_preserves_foreground_background_and_text_attributes() {
+        let grid = ghostty_adapter::terminal_grid_from_vt_bytes(
+            b"\x1b[31mred8\x1b[0m \
+              \x1b[38;5;45mfg256\x1b[0m \
+              \x1b[38;2;12;34;56mfgtrue\x1b[0m\r\n\
+              \x1b[48;5;196mbg256\x1b[0m \
+              \x1b[48;2;90;45;210mbgtrue\x1b[0m \
+              \x1b[7minverse\x1b[0m\r\n\
+              \x1b[1mbold\x1b[0m \
+              \x1b[4munder\x1b[0m \
+              \x1b[9mstrike\x1b[0m",
+            96,
+            8,
+        );
+
+        #[cfg(feature = "official-libghostty-vt-rs")]
+        {
+            let runs = grid
+                .styled_lines
+                .iter()
+                .flat_map(|line| line.runs.iter())
+                .collect::<Vec<_>>();
+
+            assert!(
+                runs.iter()
+                    .any(|run| run.text.contains("red8") && run.style.fg.is_some())
+            );
+            assert!(
+                runs.iter()
+                    .any(|run| run.text.contains("fg256") && run.style.fg.is_some())
+            );
+            assert!(runs.iter().any(|run| {
+                run.text.contains("fgtrue")
+                    && run.style.fg
+                        == Some(TerminalGridColor {
+                            r: 12,
+                            g: 34,
+                            b: 56,
+                        })
+            }));
+            assert!(
+                runs.iter()
+                    .any(|run| run.text.contains("bg256") && run.style.bg.is_some())
+            );
+            assert!(runs.iter().any(|run| {
+                run.text.contains("bgtrue")
+                    && run.style.bg
+                        == Some(TerminalGridColor {
+                            r: 90,
+                            g: 45,
+                            b: 210,
+                        })
+            }));
+            assert!(
+                runs.iter()
+                    .any(|run| run.text.contains("inverse") && run.style.inverse)
+            );
+            assert!(
+                runs.iter()
+                    .any(|run| run.text.contains("bold") && run.style.bold)
+            );
+            assert!(
+                runs.iter()
+                    .any(|run| run.text.contains("under") && run.style.underline)
+            );
+            assert!(
+                runs.iter()
+                    .any(|run| run.text.contains("strike") && run.style.strikethrough)
+            );
+        }
+
+        #[cfg(not(feature = "official-libghostty-vt-rs"))]
+        assert!(
+            grid.lines
+                .iter()
+                .any(|line| line.contains("red8") && line.contains("fg256"))
+        );
     }
 
     #[test]

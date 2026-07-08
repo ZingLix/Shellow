@@ -18,6 +18,7 @@ struct TerminalMetalGridSurface: UIViewRepresentable {
 
     let viewportFirstRow: Int
     let viewportRowCount: Int
+    let renderTick: Int
     let rendererOverlayJSON: String
     let attachRendererSurface: (UInt64, Int, Int) -> Void
     let setRendererOverlay: (String) -> Void
@@ -49,7 +50,8 @@ struct TerminalMetalGridSurface: UIViewRepresentable {
         context.coordinator.update(
             TerminalMetalGridState(
                 viewportFirstRow: viewportFirstRow,
-                viewportRowCount: viewportRowCount
+                viewportRowCount: viewportRowCount,
+                renderTick: renderTick
             )
         )
         context.coordinator.attachIfNeeded(
@@ -76,6 +78,7 @@ struct TerminalMetalGridSurface: UIViewRepresentable {
         private var state: TerminalMetalGridState?
         private var lastSurfaceSignature: String?
         private var overlayJSON = #"{"ranges":[]}"#
+        private var lastAppliedOverlayJSON: String?
         private var attachRendererSurface: ((UInt64, Int, Int) -> Void)?
         private var setRendererOverlay: ((String) -> Void)?
         private var renderRendererSurface: ((Int, Int, Int, Int) -> Bool)?
@@ -129,6 +132,7 @@ struct TerminalMetalGridSurface: UIViewRepresentable {
             guard lastSurfaceSignature != nil else { return }
             detachRendererSurface?()
             lastSurfaceSignature = nil
+            lastAppliedOverlayJSON = nil
         }
 
         fileprivate func update(_ state: TerminalMetalGridState) {
@@ -174,7 +178,10 @@ struct TerminalMetalGridSurface: UIViewRepresentable {
             let width = size.width
             let height = size.height
             guard width > 0, height > 0 else { return false }
-            setRendererOverlay?(overlayJSON)
+            if overlayJSON != lastAppliedOverlayJSON {
+                setRendererOverlay?(overlayJSON)
+                lastAppliedOverlayJSON = overlayJSON
+            }
             return renderRendererSurface(
                 width,
                 height,
@@ -198,4 +205,5 @@ struct TerminalMetalGridSurface: UIViewRepresentable {
 private struct TerminalMetalGridState {
     let viewportFirstRow: Int
     let viewportRowCount: Int
+    let renderTick: Int
 }

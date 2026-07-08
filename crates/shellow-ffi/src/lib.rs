@@ -55,8 +55,38 @@ pub extern "C" fn shellow_engine_render_frame_viewport_json(
 }
 
 #[unsafe(no_mangle)]
+pub extern "C" fn shellow_engine_render_surface_frame_presented(
+    engine: *const ShellowEngine,
+    width_px: u32,
+    height_px: u32,
+    first_row: u32,
+    row_count: u32,
+) -> bool {
+    if engine.is_null() {
+        return false;
+    }
+
+    catch_unwind(AssertUnwindSafe(|| unsafe {
+        (*engine).render_surface_frame_presented(width_px, height_px, first_row, row_count)
+    }))
+    .unwrap_or(false)
+}
+
+#[unsafe(no_mangle)]
 pub extern "C" fn shellow_engine_renderer_info_json(engine: *const ShellowEngine) -> *mut c_char {
     with_engine(engine, |engine| encode_json(&engine.renderer_info()))
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn shellow_engine_live_shell_event_revision(engine: *const ShellowEngine) -> u64 {
+    if engine.is_null() {
+        return 0;
+    }
+
+    catch_unwind(AssertUnwindSafe(|| unsafe {
+        (*engine).live_shell_event_revision()
+    }))
+    .unwrap_or(0)
 }
 
 #[unsafe(no_mangle)]

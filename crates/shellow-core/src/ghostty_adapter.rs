@@ -164,6 +164,9 @@ impl ActiveVtBackend {
 }
 
 #[cfg(feature = "official-libghostty-vt-rs")]
+pub(crate) use libghostty_vt_backend::LiveTerminalState;
+
+#[cfg(feature = "official-libghostty-vt-rs")]
 mod libghostty_vt_backend {
     use super::{
         TerminalCursorShape, TerminalGridLine, TerminalGridRun, TerminalGridSnapshot,
@@ -177,11 +180,98 @@ mod libghostty_vt_backend {
         style::{PaletteIndex, RgbColor, Style, StyleColor, Underline},
         terminal::{Mode, Point, PointCoordinate},
     };
-    use std::cell::Cell as CounterCell;
+    use std::{
+        cell::Cell as CounterCell,
+        sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        },
+    };
 
     const DEFAULT_COLS: u16 = 80;
     const DEFAULT_ROWS: u16 = 24;
+    const DEFAULT_CELL_WIDTH_PX: u32 = 8;
+    const DEFAULT_CELL_HEIGHT_PX: u32 = 16;
     const MAX_SCROLLBACK: usize = 10_000;
+
+    pub(crate) struct LiveTerminalState {
+        terminal: Terminal<'static, 'static>,
+        bell_count: Arc<AtomicUsize>,
+        cols: u16,
+        rows: u16,
+    }
+
+    impl LiveTerminalState {
+        pub(crate) fn new(cols: u32, rows: u32) -> Option<Self> {
+            let cols = clamp_cols(cols);
+            let rows = clamp_rows(rows);
+            let bell_count = Arc::new(AtomicUsize::new(0));
+            let mut terminal = new_terminal(cols as u32, rows as u32)?;
+            terminal
+                .on_bell({
+                    let bell_count = Arc::clone(&bell_count);
+                    move |_| {
+                        bell_count.fetch_add(1, Ordering::Relaxed);
+                    }
+                })
+                .ok()?;
+
+            Some(Self {
+                terminal,
+                bell_count,
+                cols,
+                rows,
+            })
+        }
+
+        pub(crate) fn write(&mut self, bytes: &[u8]) {
+            self.terminal.vt_write(bytes);
+        }
+
+        pub(crate) fn resize(&mut self, cols: u32, rows: u32) -> bool {
+            let cols = clamp_cols(cols);
+            let rows = clamp_rows(rows);
+            if self
+                .terminal
+                .resize(cols, rows, DEFAULT_CELL_WIDTH_PX, DEFAULT_CELL_HEIGHT_PX)
+                .is_err()
+            {
+                return false;
+            }
+            self.cols = cols;
+            self.rows = rows;
+            true
+        }
+
+        pub(crate) fn snapshot(&self) -> Option<TerminalGridSnapshot> {
+            terminal_grid_from_terminal(&self.terminal, self.cols, self.rows)
+        }
+
+        pub(crate) fn snapshot_viewport(
+            &self,
+            first_row: usize,
+            row_count: usize,
+        ) -> Option<TerminalGridSnapshot> {
+            terminal_grid_viewport_from_terminal(
+                &self.terminal,
+                self.cols,
+                self.rows,
+                first_row,
+                row_count,
+            )
+        }
+
+        pub(crate) fn title(&self) -> Option<String> {
+            self.terminal
+                .title()
+                .ok()
+                .and_then(super::sanitize_terminal_title)
+        }
+
+        pub(crate) fn take_bell_count(&self) -> usize {
+            self.bell_count.swap(0, Ordering::Relaxed)
+        }
+    }
 
     pub(super) fn demo_terminal_summary() -> String {
         let mut terminal = match new_terminal(DEFAULT_COLS as u32, 5) {
@@ -237,7 +327,7 @@ mod libghostty_vt_backend {
         rows: u32,
     ) -> TerminalGridSnapshot {
         terminal_grid_from_vt_bytes_inner(bytes, cols, rows)
-            .unwrap_or_else(|| super::adapter_terminal_grid_from_vt_bytes(bytes, cols, rows))
+            .unwrap_or_else(|| empty_terminal_grid_snapshot(clamp_cols(cols), clamp_rows(rows)))
     }
 
     pub(super) fn render_vt_plain_text(output: &str) -> String {
@@ -271,7 +361,38 @@ mod libghostty_vt_backend {
         })
         .ok()?;
         terminal.vt_write(bytes);
+        terminal_grid_from_terminal(&terminal, cols_u16, rows_u16)
+    }
 
+    fn terminal_grid_from_terminal(
+        terminal: &Terminal<'_, '_>,
+        cols_u16: u16,
+        rows_u16: u16,
+    ) -> Option<TerminalGridSnapshot> {
+        terminal_grid_from_terminal_range(terminal, cols_u16, rows_u16, None)
+    }
+
+    fn terminal_grid_viewport_from_terminal(
+        terminal: &Terminal<'_, '_>,
+        cols_u16: u16,
+        rows_u16: u16,
+        requested_first_row: usize,
+        requested_row_count: usize,
+    ) -> Option<TerminalGridSnapshot> {
+        terminal_grid_from_terminal_range(
+            terminal,
+            cols_u16,
+            rows_u16,
+            Some((requested_first_row, requested_row_count)),
+        )
+    }
+
+    fn terminal_grid_from_terminal_range(
+        terminal: &Terminal<'_, '_>,
+        cols_u16: u16,
+        rows_u16: u16,
+        requested_viewport: Option<(usize, usize)>,
+    ) -> Option<TerminalGridSnapshot> {
         let active_screen = match terminal.active_screen().ok()? {
             Screen::Primary => TerminalScreenKind::Primary,
             Screen::Alternate => TerminalScreenKind::Alternate,
@@ -281,6 +402,8 @@ mod libghostty_vt_backend {
             .total_rows()
             .unwrap_or(rows_u16 as usize)
             .max(rows_u16 as usize);
+        let (first_row, end_row) =
+            terminal_snapshot_row_range(active_screen, total_rows, rows_u16, requested_viewport);
         let cursor_row_offset = if active_screen == TerminalScreenKind::Primary {
             scrollback_len as u32
         } else {
@@ -289,7 +412,7 @@ mod libghostty_vt_backend {
         let metadata = render_metadata(&terminal, cursor_row_offset as usize, rows_u16 as usize);
         let palette = terminal.color_palette().ok();
 
-        let styled_lines = (0..total_rows)
+        let styled_lines = (first_row..end_row)
             .map(|row| {
                 styled_line_from_terminal_row(&terminal, row as u32, cols_u16, palette.as_ref())
             })
@@ -298,13 +421,39 @@ mod libghostty_vt_backend {
             .iter()
             .map(|line| line.runs.iter().map(|run| run.text.as_str()).collect())
             .collect();
+        let mut cursor_row = terminal.cursor_y().unwrap_or(0) as u32 + cursor_row_offset;
+        let mut cursor_visible = metadata.cursor_visible;
+        if requested_viewport.is_some() {
+            let absolute_cursor_row = cursor_row as usize;
+            if absolute_cursor_row >= first_row && absolute_cursor_row < end_row {
+                cursor_row = absolute_cursor_row.saturating_sub(first_row) as u32;
+            } else {
+                cursor_row = 0;
+                cursor_visible = false;
+            }
+        }
+        let dirty_rows = if requested_viewport.is_some() {
+            metadata
+                .dirty_rows
+                .into_iter()
+                .filter_map(|row| {
+                    if row >= first_row && row < end_row {
+                        Some(row - first_row)
+                    } else {
+                        None
+                    }
+                })
+                .collect()
+        } else {
+            metadata.dirty_rows
+        };
 
         Some(TerminalGridSnapshot {
             cols: cols_u16 as u32,
             rows: rows_u16 as u32,
             cursor_column: terminal.cursor_x().unwrap_or(0) as u32,
-            cursor_row: terminal.cursor_y().unwrap_or(0) as u32 + cursor_row_offset,
-            cursor_visible: metadata.cursor_visible,
+            cursor_row,
+            cursor_visible,
             cursor_shape: metadata.cursor_shape,
             active_screen,
             scrollback_len,
@@ -316,8 +465,61 @@ mod libghostty_vt_backend {
             sgr_mouse: terminal.mode(Mode::SGR_MOUSE).unwrap_or(false),
             lines,
             styled_lines,
-            dirty_rows: metadata.dirty_rows,
+            dirty_rows,
         })
+    }
+
+    fn terminal_snapshot_row_range(
+        active_screen: TerminalScreenKind,
+        total_rows: usize,
+        rows_u16: u16,
+        requested_viewport: Option<(usize, usize)>,
+    ) -> (usize, usize) {
+        let Some((requested_first_row, requested_row_count)) = requested_viewport else {
+            return (0, total_rows);
+        };
+        if total_rows == 0 {
+            return (0, 0);
+        }
+
+        let row_count = requested_row_count
+            .max(1)
+            .min(total_rows)
+            .max(rows_u16 as usize)
+            .min(total_rows);
+        let first_row = if active_screen == TerminalScreenKind::Alternate {
+            0
+        } else {
+            requested_first_row.min(total_rows.saturating_sub(row_count))
+        };
+        let end_row = first_row.saturating_add(row_count).min(total_rows);
+        (first_row, end_row)
+    }
+
+    fn empty_terminal_grid_snapshot(cols: u16, rows: u16) -> TerminalGridSnapshot {
+        let lines = vec![String::new(); rows as usize];
+        let styled_lines = (0..rows as usize)
+            .map(|_| TerminalGridLine { runs: Vec::new() })
+            .collect();
+
+        TerminalGridSnapshot {
+            cols: cols as u32,
+            rows: rows as u32,
+            cursor_column: 0,
+            cursor_row: 0,
+            cursor_visible: false,
+            cursor_shape: TerminalCursorShape::Block,
+            active_screen: TerminalScreenKind::Primary,
+            scrollback_len: 0,
+            bracketed_paste: false,
+            application_cursor_keys: false,
+            mouse_reporting: false,
+            mouse_drag_reporting: false,
+            sgr_mouse: false,
+            lines,
+            styled_lines,
+            dirty_rows: Vec::new(),
+        }
     }
 
     fn render_metadata(
@@ -814,6 +1016,7 @@ pub(crate) fn terminal_grid_from_vt_bytes(
     active_backend().terminal_grid_from_vt_bytes(bytes, cols, rows)
 }
 
+#[cfg(not(feature = "official-libghostty-vt-rs"))]
 fn adapter_terminal_grid_from_vt_bytes(bytes: &[u8], cols: u32, rows: u32) -> TerminalGridSnapshot {
     let text = strip_vt_sequences(bytes);
     let all_lines = text
@@ -854,6 +1057,7 @@ fn adapter_terminal_grid_from_vt_bytes(bytes: &[u8], cols: u32, rows: u32) -> Te
     }
 }
 
+#[cfg(not(feature = "official-libghostty-vt-rs"))]
 fn terminal_screen_kind_from_private_modes(bytes: &[u8]) -> Option<TerminalScreenKind> {
     let mut active_screen = None;
     let mut index = 0;
@@ -895,6 +1099,7 @@ fn terminal_screen_kind_from_private_modes(bytes: &[u8]) -> Option<TerminalScree
     active_screen
 }
 
+#[cfg(not(feature = "official-libghostty-vt-rs"))]
 fn terminal_private_mode_enabled(bytes: &[u8], modes: &[u32]) -> bool {
     let mut enabled = false;
     let mut index = 0;
@@ -933,6 +1138,7 @@ fn terminal_private_mode_enabled(bytes: &[u8], modes: &[u32]) -> bool {
     enabled
 }
 
+#[cfg(not(feature = "official-libghostty-vt-rs"))]
 fn terminal_cursor_shape_from_bytes(bytes: &[u8]) -> TerminalCursorShape {
     let mut shape = TerminalCursorShape::Block;
     let mut index = 0;

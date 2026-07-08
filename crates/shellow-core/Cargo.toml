@@ -6,7 +6,7 @@ license.workspace = true
 rust-version.workspace = true
 
 [features]
-default = ["demo", "official-libghostty-vt-rs"]
+default = ["demo", "native-integrations"]
 demo = []
 ghostty-vt = ["official-libghostty-vt-rs"]
 libghostty-vt = ["official-libghostty-vt-rs"]

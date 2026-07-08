@@ -1,5 +1,4 @@
 import SwiftUI
-import OSLog
 
 private enum ReconnectTarget {
     case preview(HostProfile)
@@ -7,92 +6,36 @@ private enum ReconnectTarget {
     case privateKey(profile: HostProfile, privateKeyPEM: String, passphrase: String?, startupCommand: String)
 }
 
-private let rendererSurfaceLogger = Logger(subsystem: "xyz.zinglix.shellow", category: "renderer")
+private enum ShellowRoute: Hashable {
+    case terminal
+}
 
 struct AppShell: View {
-    @State private var selectedTab: AppTab = .terminal
+    @State private var path: [ShellowRoute] = []
     @State private var coreSession = ShellowCoreSession()
     @State private var session = TerminalSession.preview
     @State private var profiles = HostProfileStore.load()
     @State private var settings = ShellowSettingsStore.load()
     @State private var reconnectTarget: ReconnectTarget?
+    @State private var isSettingsPresented = false
+    @State private var terminalRenderTick = 0
 
     var body: some View {
-        TabView(selection: $selectedTab) {
-            TerminalScreen(
-                session: $session,
-                settings: settings,
-                onTerminalInput: { input in
-                    updateSession(coreSession.sendTerminalInput(input))
-                },
-                onReconnect: reconnectTarget == nil ? nil : {
-                    reconnect()
-                },
-                onDisconnect: {
-                    updateSession(coreSession.disconnectLiveShell())
-                },
-                onResizeTerminal: { cols, rows in
-                    updateSession(coreSession.resizeTerminal(cols: cols, rows: rows))
-                },
-                onAttachRendererSurface: { rawHandle, width, height in
-                    let response = coreSession.attachCoreAnimationLayer(
-                        rawHandle: rawHandle,
-                        width: width,
-                        height: height
-                    )
-                    #if DEBUG
-                    print("Shellow renderer surface attach \(response)")
-                    rendererSurfaceLogger.info("Shellow renderer surface attach \(response, privacy: .public)")
-                    #endif
-                },
-                onSetRendererOverlay: { overlayJSON in
-                    _ = coreSession.setRendererOverlayJSON(overlayJSON)
-                },
-                onRenderRendererSurface: { width, height, firstRow, rowCount in
-                    let presented = coreSession.renderRendererSurfaceFrame(
-                        width: width,
-                        height: height,
-                        firstRow: firstRow,
-                        rowCount: rowCount
-                    )
-                    #if DEBUG
-                    if presented {
-                        let message = "Shellow renderer terminal surface frame \(width)x\(height) first=\(firstRow) rows=\(rowCount)"
-                        print(message)
-                        rendererSurfaceLogger.info("\(message, privacy: .public)")
-                    }
-                    #endif
-                    return presented
-                },
-                onDetachRendererSurface: {
-                    let response = coreSession.detachRendererSurface()
-                    #if DEBUG
-                    print("Shellow renderer surface detach \(response)")
-                    rendererSurfaceLogger.info("Shellow renderer surface detach \(response, privacy: .public)")
-                    #endif
-                },
-                onClearTerminal: {
-                    updateSession(coreSession.clearTerminal())
-                },
-                onResetTerminal: {
-                    updateSession(coreSession.resetTerminal())
-                }
-            )
-                .tabItem { AppTab.terminal.label }
-                .tag(AppTab.terminal)
-
+        NavigationStack(path: $path) {
             HostsScreen(
                 profiles: $profiles,
-                selectedTab: $selectedTab,
+                onOpenSettings: {
+                    isSettingsPresented = true
+                },
                 connectPreview: { profile in
                     reconnectTarget = .preview(profile)
                     updateSession(coreSession.connectPreview(to: profile))
-                    selectedTab = .terminal
+                    showTerminal()
                 },
                 connectPassword: { profile, password, command in
                     reconnectTarget = .password(profile: profile, password: password, startupCommand: command)
                     session = .connecting(to: profile)
-                    selectedTab = .terminal
+                    showTerminal()
                     Task {
                         await connectPasswordShell(profile: profile, password: password, startupCommand: command)
                     }
@@ -105,7 +48,7 @@ struct AppShell: View {
                         startupCommand: command
                     )
                     session = .connecting(to: profile)
-                    selectedTab = .terminal
+                    showTerminal()
                     Task {
                         await connectPrivateKeyShell(
                             profile: profile,
@@ -116,22 +59,40 @@ struct AppShell: View {
                     }
                 }
             )
-                .tabItem { AppTab.hosts.label }
-                .tag(AppTab.hosts)
-
-            SettingsScreen(settings: $settings)
-                .tabItem { AppTab.settings.label }
-                .tag(AppTab.settings)
+            .navigationDestination(for: ShellowRoute.self) { route in
+                switch route {
+                case .terminal:
+                    terminalScreen
+                }
+            }
+            .sheet(isPresented: $isSettingsPresented) {
+                SettingsScreen(settings: $settings)
+            }
         }
         .tint(ShellowTheme.accent)
         .preferredColorScheme(settings.colorScheme.preferredSwiftUIColorScheme)
         .task {
             updateSession(coreSession.snapshot())
+            var lastLiveRevision = coreSession.liveShellEventRevision()
+            var idleRenderTicks = 0
             while !Task.isCancelled {
-                try? await Task.sleep(nanoseconds: 300_000_000)
-                let next = coreSession.pollLiveShell()
-                if next != session {
-                    updateSession(next)
+                try? await Task.sleep(nanoseconds: 50_000_000)
+                let revision = coreSession.liveShellEventRevision()
+                if revision != lastLiveRevision {
+                    lastLiveRevision = revision
+                    idleRenderTicks = 0
+                    let next = coreSession.pollLiveShell()
+                    if next != session {
+                        updateSession(next)
+                    } else if next.state == .connected {
+                        advanceTerminalRenderTick()
+                    }
+                } else if session.state == .connected {
+                    idleRenderTicks += 1
+                    if idleRenderTicks >= 20 {
+                        idleRenderTicks = 0
+                        advanceTerminalRenderTick()
+                    }
                 }
             }
         }
@@ -143,16 +104,70 @@ struct AppShell: View {
         }
     }
 
+    private var terminalScreen: some View {
+        TerminalScreen(
+            session: $session,
+            settings: settings,
+            renderTick: terminalRenderTick,
+            onTerminalInput: { input in
+                updateSession(coreSession.sendTerminalInput(input))
+            },
+            onReconnect: reconnectTarget == nil ? nil : {
+                reconnect()
+            },
+            onDisconnect: {
+                updateSession(coreSession.disconnectLiveShell())
+            },
+            onResizeTerminal: { cols, rows in
+                updateSession(coreSession.resizeTerminal(cols: cols, rows: rows))
+            },
+            onAttachRendererSurface: { rawHandle, width, height in
+                _ = coreSession.attachCoreAnimationLayer(
+                    rawHandle: rawHandle,
+                    width: width,
+                    height: height
+                )
+            },
+            onSetRendererOverlay: { overlayJSON in
+                _ = coreSession.setRendererOverlayJSON(overlayJSON)
+            },
+            onRenderRendererSurface: { width, height, firstRow, rowCount in
+                coreSession.renderRendererSurfaceFrame(
+                    width: width,
+                    height: height,
+                    firstRow: firstRow,
+                    rowCount: rowCount
+                )
+            },
+            onDetachRendererSurface: {
+                _ = coreSession.detachRendererSurface()
+            },
+            onClearTerminal: {
+                updateSession(coreSession.clearTerminal())
+            },
+            onResetTerminal: {
+                updateSession(coreSession.resetTerminal())
+            }
+        )
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar(.hidden, for: .navigationBar)
+    }
+
+    private func showTerminal() {
+        guard path.last != .terminal else { return }
+        path.append(.terminal)
+    }
+
     private func reconnect() {
         guard let reconnectTarget else { return }
 
         switch reconnectTarget {
         case .preview(let profile):
             updateSession(coreSession.connectPreview(to: profile))
-            selectedTab = .terminal
+            showTerminal()
         case .password(let profile, let password, let startupCommand):
             session = .connecting(to: profile)
-            selectedTab = .terminal
+            showTerminal()
             Task {
                 await connectPasswordShell(
                     profile: profile,
@@ -162,7 +177,7 @@ struct AppShell: View {
             }
         case .privateKey(let profile, let privateKeyPEM, let passphrase, let startupCommand):
             session = .connecting(to: profile)
-            selectedTab = .terminal
+            showTerminal()
             Task {
                 await connectPrivateKeyShell(
                     profile: profile,
@@ -176,7 +191,12 @@ struct AppShell: View {
 
     private func updateSession(_ next: TerminalSession) {
         session = next
+        advanceTerminalRenderTick()
         captureObservedHostKeyIfNeeded(from: next)
+    }
+
+    private func advanceTerminalRenderTick() {
+        terminalRenderTick &+= 1
     }
 
     private func captureObservedHostKeyIfNeeded(from session: TerminalSession) {

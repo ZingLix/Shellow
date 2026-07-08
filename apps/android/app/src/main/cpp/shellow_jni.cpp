@@ -254,9 +254,33 @@ Java_xyz_zinglix_shellow_core_ShellowNative_nativeRenderFrameViewportJson(
     );
 }
 
+extern "C" JNIEXPORT jboolean JNICALL
+Java_xyz_zinglix_shellow_core_ShellowNative_nativeRenderSurfaceFramePresented(
+    JNIEnv *,
+    jobject,
+    jlong handle,
+    jint widthPx,
+    jint heightPx,
+    jint firstRow,
+    jint rowCount
+) {
+    return shellow_engine_render_surface_frame_presented(
+        engineFromHandle(handle),
+        static_cast<uint32_t>(widthPx),
+        static_cast<uint32_t>(heightPx),
+        static_cast<uint32_t>(firstRow),
+        static_cast<uint32_t>(rowCount)
+    ) ? JNI_TRUE : JNI_FALSE;
+}
+
 extern "C" JNIEXPORT jstring JNICALL
 Java_xyz_zinglix_shellow_core_ShellowNative_nativeRendererInfoJson(JNIEnv *env, jobject, jlong handle) {
     return takeJson(env, shellow_engine_renderer_info_json(engineFromHandle(handle)));
+}
+
+extern "C" JNIEXPORT jlong JNICALL
+Java_xyz_zinglix_shellow_core_ShellowNative_nativeLiveShellEventRevision(JNIEnv *, jobject, jlong handle) {
+    return static_cast<jlong>(shellow_engine_live_shell_event_revision(engineFromHandle(handle)));
 }
 
 extern "C" JNIEXPORT jstring JNICALL

@@ -6,7 +6,10 @@ use std::ffi::c_void;
 use std::hash::{Hash, Hasher};
 #[cfg(feature = "native-integrations")]
 use std::ptr::NonNull;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{
+    OnceLock,
+    atomic::{AtomicU64, Ordering},
+};
 
 use crate::{
     TerminalCursorShape, TerminalGridColor, TerminalGridSnapshot, TerminalGridStyle, TerminalRow,
@@ -339,6 +342,7 @@ pub struct TerminalRenderer {
     last_frame_signature: Option<String>,
     dimensions: RendererDimensions,
     glyph_atlas: GlyphAtlas,
+    layout_cache: GlyphLayoutCache,
     runtime: RendererRuntime,
     overlay_state: RendererOverlayState,
     surface_attachment: Option<RendererSurfaceAttachment>,
@@ -358,6 +362,7 @@ impl TerminalRenderer {
                 rows: rows.max(1),
             },
             glyph_atlas: GlyphAtlas::new(),
+            layout_cache: GlyphLayoutCache::new(),
             runtime: RendererRuntime::new(),
             overlay_state: RendererOverlayState::default(),
             surface_attachment: None,
@@ -685,15 +690,23 @@ impl TerminalRenderer {
             content_changed,
         );
 
-        let added_glyph_count = self.glyph_atlas.ensure_frame(grid, history_rows);
-        let dirty_row_upload =
-            DirtyRowUpload::from_frame(grid, history_rows, &dirty_rows, &self.glyph_atlas);
+        let added_glyph_count =
+            self.glyph_atlas
+                .ensure_frame(grid, history_rows, &mut self.layout_cache);
+        let dirty_row_upload = DirtyRowUpload::from_frame(
+            grid,
+            history_rows,
+            &dirty_rows,
+            &self.glyph_atlas,
+            &mut self.layout_cache,
+        );
         let surface_frame_upload = SurfaceFrameUpload::from_frame(
             grid,
             history_rows,
             width_px,
             height_px,
             &self.glyph_atlas,
+            &mut self.layout_cache,
             &self.overlay_state,
         );
         let gpu_pass = self.runtime.render_frame(
@@ -874,6 +887,7 @@ impl DirtyRowUpload {
         history_rows: &[TerminalRow],
         dirty_rows: &[usize],
         glyph_atlas: &GlyphAtlas,
+        layout_cache: &mut GlyphLayoutCache,
     ) -> Self {
         let mut payload = Vec::new();
         let mut row_count = 0usize;
@@ -887,7 +901,7 @@ impl DirtyRowUpload {
             };
 
             row_count += 1;
-            let layout = GlyphLayoutPlan::from_text(&line, u32::MAX, glyph_atlas);
+            let layout = layout_cache.layout_for_text(&line, u32::MAX, glyph_atlas);
 
             push_u32(&mut payload, *row as u32);
             push_u32(&mut payload, layout.clusters.len() as u32);
@@ -928,11 +942,12 @@ impl SurfaceFrameUpload {
         width_px: u32,
         height_px: u32,
         glyph_atlas: &GlyphAtlas,
+        layout_cache: &mut GlyphLayoutCache,
         overlay_state: &RendererOverlayState,
     ) -> Self {
         let width = width_px.max(1) as f32;
         let height = height_px.max(1) as f32;
-        let mut builder = SurfaceFrameBuilder::new(width, height, glyph_atlas);
+        let mut builder = SurfaceFrameBuilder::new(width, height, glyph_atlas, layout_cache);
 
         match grid {
             Some(grid) => builder.push_grid(grid, overlay_state),
@@ -967,6 +982,48 @@ struct GlyphLayoutCluster {
 enum GlyphKey {
     Codepoint(char),
     FontGlyph { font: u16, glyph: u16 },
+}
+
+struct GlyphLayoutCache {
+    plans: BTreeMap<GlyphLayoutCacheKey, GlyphLayoutPlan>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct GlyphLayoutCacheKey {
+    text: String,
+    max_cells: u32,
+}
+
+impl GlyphLayoutCache {
+    const MAX_ENTRIES: usize = 4096;
+
+    fn new() -> Self {
+        Self {
+            plans: BTreeMap::new(),
+        }
+    }
+
+    fn layout_for_text(
+        &mut self,
+        text: &str,
+        max_cells: u32,
+        glyph_atlas: &GlyphAtlas,
+    ) -> GlyphLayoutPlan {
+        let key = GlyphLayoutCacheKey {
+            text: text.to_string(),
+            max_cells,
+        };
+        if let Some(plan) = self.plans.get(&key) {
+            return plan.clone();
+        }
+
+        let plan = GlyphLayoutPlan::from_text(text, max_cells, glyph_atlas);
+        if self.plans.len() >= Self::MAX_ENTRIES {
+            self.plans.clear();
+        }
+        self.plans.insert(key, plan.clone());
+        plan
+    }
 }
 
 impl GlyphLayoutPlan {
@@ -1029,6 +1086,7 @@ struct SurfaceFrameBuilder<'a> {
     width: f32,
     height: f32,
     glyph_atlas: &'a GlyphAtlas,
+    layout_cache: &'a mut GlyphLayoutCache,
     atlas_extent: GlyphAtlasExtent,
     vertices: Vec<SurfaceVertex>,
     cell_count: usize,
@@ -1040,11 +1098,17 @@ struct SurfaceFrameBuilder<'a> {
 }
 
 impl<'a> SurfaceFrameBuilder<'a> {
-    fn new(width: f32, height: f32, glyph_atlas: &'a GlyphAtlas) -> Self {
+    fn new(
+        width: f32,
+        height: f32,
+        glyph_atlas: &'a GlyphAtlas,
+        layout_cache: &'a mut GlyphLayoutCache,
+    ) -> Self {
         Self {
             width,
             height,
             glyph_atlas,
+            layout_cache,
             atlas_extent: glyph_atlas.extent(),
             vertices: Vec::new(),
             cell_count: 0,
@@ -1060,10 +1124,11 @@ impl<'a> SurfaceFrameBuilder<'a> {
         let cols = grid.cols.max(1);
         let row_count = grid.lines.len().max(1) as u32;
         let cell_width = self.width / cols as f32;
-        let row_height = terminal_surface_row_height(cell_width, self.height / row_count as f32);
+        let row_slot_height = self.height / row_count as f32;
+        let row_height = terminal_surface_row_height(cell_width, row_slot_height);
 
         for row in 0..grid.lines.len() {
-            let y = row as f32 * row_height;
+            let y = terminal_surface_row_y(row as u32, row_slot_height, row_height);
             self.push_grid_row_overlays(row as u32, cols, y, cell_width, row_height, overlay_state);
             let line = &grid.lines[row];
             if let Some(styled_line) = grid
@@ -1099,7 +1164,7 @@ impl<'a> SurfaceFrameBuilder<'a> {
             }
         }
 
-        self.push_cursor(grid, cell_width, row_height);
+        self.push_cursor(grid, cell_width, row_slot_height, row_height);
     }
 
     fn push_grid_row_overlays(
@@ -1138,10 +1203,11 @@ impl<'a> SurfaceFrameBuilder<'a> {
             .unwrap_or(80)
             .max(1);
         let cell_width = self.width / cols as f32;
-        let row_height = terminal_surface_row_height(cell_width, self.height / row_count as f32);
+        let row_slot_height = self.height / row_count as f32;
+        let row_height = terminal_surface_row_height(cell_width, row_slot_height);
 
         for (row_index, row) in rows.iter().enumerate() {
-            let y = row_index as f32 * row_height;
+            let y = terminal_surface_row_y(row_index as u32, row_slot_height, row_height);
             self.push_run(
                 &history_row_text(row),
                 row_style_to_grid_style(row.style),
@@ -1169,8 +1235,11 @@ impl<'a> SurfaceFrameBuilder<'a> {
         }
 
         let (foreground, background) = style_colors(style);
-        let layout =
-            GlyphLayoutPlan::from_text(text, cols.saturating_sub(consumed_cells), self.glyph_atlas);
+        let layout = self.layout_cache.layout_for_text(
+            text,
+            cols.saturating_sub(consumed_cells),
+            self.glyph_atlas,
+        );
         let run_cells = layout.cell_count;
         if run_cells == 0 {
             return consumed_cells;
@@ -1240,7 +1309,13 @@ impl<'a> SurfaceFrameBuilder<'a> {
         consumed_cells
     }
 
-    fn push_cursor(&mut self, grid: &TerminalGridSnapshot, cell_width: f32, row_height: f32) {
+    fn push_cursor(
+        &mut self,
+        grid: &TerminalGridSnapshot,
+        cell_width: f32,
+        row_slot_height: f32,
+        row_height: f32,
+    ) {
         if !grid.cursor_visible {
             return;
         }
@@ -1251,7 +1326,7 @@ impl<'a> SurfaceFrameBuilder<'a> {
 
         let column = grid.cursor_column.min(grid.cols.saturating_sub(1));
         let x = column as f32 * cell_width;
-        let y = row as f32 * row_height;
+        let y = terminal_surface_row_y(row as u32, row_slot_height, row_height);
         let color = SurfaceColor::new(0.46, 0.86, 0.67, 0.92);
         match grid.cursor_shape {
             TerminalCursorShape::Block => {
@@ -1613,6 +1688,10 @@ fn terminal_surface_row_height(cell_width: f32, available_row_height: f32) -> f3
     desired.clamp(1.0, available_row_height.max(1.0))
 }
 
+fn terminal_surface_row_y(row: u32, row_slot_height: f32, row_height: f32) -> f32 {
+    row as f32 * row_slot_height + ((row_slot_height - row_height) / 2.0).max(0.0)
+}
+
 fn terminal_glyph_quad_height(cell_width: f32, row_height: f32) -> f32 {
     let inferred_font_size = cell_width / 0.56;
     (inferred_font_size * 1.02).clamp(1.0, row_height.max(1.0))
@@ -1706,6 +1785,7 @@ fn push_f32(output: &mut Vec<u8>, value: f32) {
 
 struct GlyphAtlas {
     glyphs: BTreeSet<GlyphKey>,
+    glyph_indices: BTreeMap<GlyphKey, u32>,
     glyph_metrics: BTreeMap<GlyphKey, GlyphAtlasGlyphMetrics>,
     rasterizer: GlyphAtlasRasterizer,
     revision: u64,
@@ -1745,12 +1825,21 @@ impl GlyphAtlas {
         let rasterizer = GlyphAtlasRasterizer::new();
         let mut atlas = Self {
             glyphs,
+            glyph_indices: BTreeMap::new(),
             glyph_metrics: BTreeMap::new(),
             rasterizer,
             revision: 1,
         };
+        atlas.refresh_glyph_indices();
         atlas.refresh_glyph_metrics();
         atlas
+    }
+
+    fn refresh_glyph_indices(&mut self) {
+        self.glyph_indices.clear();
+        for (index, glyph) in self.glyphs.iter().copied().enumerate() {
+            self.glyph_indices.insert(glyph, index as u32);
+        }
     }
 
     fn refresh_glyph_metrics(&mut self) {
@@ -1766,31 +1855,33 @@ impl GlyphAtlas {
         &mut self,
         grid: Option<&TerminalGridSnapshot>,
         history_rows: &[TerminalRow],
+        layout_cache: &mut GlyphLayoutCache,
     ) -> usize {
         let mut added = 0usize;
         match grid {
             Some(grid) => {
                 for line in &grid.lines {
-                    added += self.ensure_text(line);
+                    added += self.ensure_text(line, layout_cache);
                 }
             }
             None => {
                 for row in history_rows {
-                    added += self.ensure_text(&history_row_text(row));
+                    added += self.ensure_text(&history_row_text(row), layout_cache);
                 }
             }
         }
 
         if added > 0 {
+            self.refresh_glyph_indices();
             self.revision = self.revision.saturating_add(1);
         }
 
         added
     }
 
-    fn ensure_text(&mut self, text: &str) -> usize {
+    fn ensure_text(&mut self, text: &str, layout_cache: &mut GlyphLayoutCache) -> usize {
         let mut added = 0usize;
-        let layout = GlyphLayoutPlan::from_text(text, u32::MAX, self);
+        let layout = layout_cache.layout_for_text(text, u32::MAX, self);
         for cluster in layout.clusters {
             if self.glyphs.insert(cluster.glyph) {
                 if let Some(metrics) = self.rasterizer.glyph_metrics(cluster.glyph) {
@@ -1835,15 +1926,15 @@ impl GlyphAtlas {
     }
 
     fn glyph_index(&self, glyph: GlyphKey) -> u32 {
-        self.glyphs
-            .iter()
-            .position(|candidate| *candidate == glyph)
-            .unwrap_or_else(|| {
-                self.glyphs
-                    .iter()
-                    .position(|candidate| *candidate == GlyphKey::Codepoint('\u{fffd}'))
-                    .unwrap_or(0)
-            }) as u32
+        self.glyph_indices
+            .get(&glyph)
+            .copied()
+            .or_else(|| {
+                self.glyph_indices
+                    .get(&GlyphKey::Codepoint('\u{fffd}'))
+                    .copied()
+            })
+            .unwrap_or(0)
     }
 
     fn glyph_metrics(&self, glyph: GlyphKey) -> Option<GlyphAtlasGlyphMetrics> {
@@ -1884,7 +1975,7 @@ impl GlyphAtlas {
 impl GlyphAtlasRasterizer {
     fn new() -> Self {
         #[cfg(feature = "native-integrations")]
-        if let Some(rasterizer) = SystemFontRasterizer::new() {
+        if let Some(rasterizer) = SystemFontRasterizer::cached() {
             return Self::FontdueSystemFont(rasterizer);
         }
 
@@ -1930,7 +2021,7 @@ impl GlyphAtlasRasterizer {
     fn real_font_available() -> bool {
         #[cfg(feature = "native-integrations")]
         {
-            SystemFontRasterizer::new().is_some()
+            SystemFontRasterizer::cached().is_some()
         }
 
         #[cfg(not(feature = "native-integrations"))]
@@ -1996,11 +2087,13 @@ impl GlyphAtlasRasterizer {
 }
 
 #[cfg(feature = "native-integrations")]
+#[derive(Clone)]
 struct SystemFontRasterizer {
     faces: Vec<SystemFontFace>,
 }
 
 #[cfg(feature = "native-integrations")]
+#[derive(Clone)]
 struct SystemFontFace {
     font: fontdue::Font,
     data: Vec<u8>,
@@ -2013,7 +2106,12 @@ impl SystemFontRasterizer {
     const EMBEDDED_MONO_FONT: &'static [u8] = include_bytes!("../assets/JetBrainsMono-Regular.ttf");
     const MAX_COLLECTION_FACES: u32 = 16;
 
-    fn new() -> Option<Self> {
+    fn cached() -> Option<Self> {
+        static SYSTEM_FONT_RASTERIZER: OnceLock<Option<SystemFontRasterizer>> = OnceLock::new();
+        SYSTEM_FONT_RASTERIZER.get_or_init(Self::load).clone()
+    }
+
+    fn load() -> Option<Self> {
         let mut faces = Vec::new();
         if let Some(face) = load_system_font_face(Self::EMBEDDED_MONO_FONT.to_vec(), 0) {
             faces.push(face);
@@ -2614,6 +2712,8 @@ struct GpuRuntime {
     surface_pipeline: Option<GpuSurfacePipeline>,
     surface_vertex_buffer: Option<wgpu::Buffer>,
     surface_vertex_buffer_capacity: u64,
+    surface_atlas_bind_group: Option<wgpu::BindGroup>,
+    surface_atlas_bind_group_revision: u64,
     surface: Option<GpuSurfaceRuntime>,
 }
 
@@ -2725,14 +2825,21 @@ impl RendererRuntime {
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let runtime = self.ensure_ready()?;
             let upload_stats = runtime.upload_frame_inputs(glyph_atlas, dirty_rows)?;
-            runtime.render_offscreen(width_px, height_px)?;
+            let native_surface_configured = runtime.surface_configured();
+            let offscreen_gpu_pass = if native_surface_configured {
+                false
+            } else {
+                runtime.render_offscreen(width_px, height_px)?;
+                true
+            };
             let surface_render = runtime.render_surface_frame(Some(surface_frame))?;
             Ok::<_, String>((
                 runtime.backend.clone(),
                 runtime.adapter.clone(),
                 runtime.glyph_atlas_ready(),
                 upload_stats,
-                runtime.surface_configured(),
+                native_surface_configured,
+                offscreen_gpu_pass,
                 surface_render.presented,
                 surface_render.terminal_frame_presented,
                 runtime.surface_presentation_ready(),
@@ -2748,13 +2855,14 @@ impl RendererRuntime {
                 glyph_atlas_ready,
                 upload_stats,
                 native_surface_configured,
+                offscreen_gpu_pass,
                 native_surface_presented_this_frame,
                 native_surface_terminal_frame_presented_this_frame,
                 native_surface_presentation_ready,
                 native_surface_present_count,
                 _native_surface_terminal_frame_ready,
             ))) => GpuPassResult {
-                offscreen_gpu_pass: true,
+                offscreen_gpu_pass,
                 gpu_backend: Some(backend),
                 gpu_adapter: Some(adapter),
                 glyph_atlas_ready,
@@ -2780,11 +2888,26 @@ impl RendererRuntime {
                     },
                 reused_gpu_device,
                 notes: {
-                    let mut notes = vec![if reused_gpu_device {
-                        "offscreen wgpu pass reused the persistent device/queue".to_string()
+                    let mut notes = Vec::new();
+                    if offscreen_gpu_pass {
+                        notes.push(if reused_gpu_device {
+                            "offscreen wgpu pass reused the persistent device/queue".to_string()
+                        } else {
+                            "offscreen wgpu pass created the persistent device/queue".to_string()
+                        });
                     } else {
-                        "offscreen wgpu pass created the persistent device/queue".to_string()
-                    }];
+                        notes.push(if reused_gpu_device {
+                            "native wgpu surface pass reused the persistent device/queue"
+                                .to_string()
+                        } else {
+                            "native wgpu surface pass created the persistent device/queue"
+                                .to_string()
+                        });
+                        notes.push(
+                            "native surface is configured; offscreen wgpu pass was skipped"
+                                .to_string(),
+                        );
+                    }
                     if native_surface_presented_this_frame {
                         notes.push(
                             "native wgpu surface frame was acquired, rendered, and presented"
@@ -2988,6 +3111,8 @@ impl GpuRuntime {
             surface_pipeline: None,
             surface_vertex_buffer: None,
             surface_vertex_buffer_capacity: 0,
+            surface_atlas_bind_group: None,
+            surface_atlas_bind_group_revision: 0,
             surface: None,
         })
     }
@@ -3058,6 +3183,7 @@ impl GpuRuntime {
         self.glyph_atlas_texture = Some(texture);
         self.glyph_atlas_revision = glyph_atlas.revision();
         self.glyph_atlas_upload_count = self.glyph_atlas_upload_count.saturating_add(1);
+        self.surface_atlas_bind_group = None;
         Ok(true)
     }
 
@@ -3331,12 +3457,48 @@ impl GpuRuntime {
             ..Default::default()
         });
 
+        self.surface_atlas_bind_group = None;
         self.surface_pipeline = Some(GpuSurfacePipeline {
             format,
             pipeline,
             bind_group_layout,
             sampler,
         });
+        Ok(())
+    }
+
+    fn ensure_surface_atlas_bind_group(&mut self) -> Result<(), String> {
+        if self.surface_atlas_bind_group.is_some()
+            && self.surface_atlas_bind_group_revision == self.glyph_atlas_revision
+        {
+            return Ok(());
+        }
+
+        let pipeline = self
+            .surface_pipeline
+            .as_ref()
+            .ok_or_else(|| "native surface pipeline was not created".to_string())?;
+        let texture = self
+            .glyph_atlas_texture
+            .as_ref()
+            .ok_or_else(|| "glyph atlas texture is not available".to_string())?;
+        let texture_view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        self.surface_atlas_bind_group =
+            Some(self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("shellow-terminal-surface-atlas-bind-group"),
+                layout: &pipeline.bind_group_layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(&texture_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::Sampler(&pipeline.sampler),
+                    },
+                ],
+            }));
+        self.surface_atlas_bind_group_revision = self.glyph_atlas_revision;
         Ok(())
     }
 
@@ -3381,6 +3543,7 @@ impl GpuRuntime {
         if draw_terminal_frame {
             let frame = surface_frame.expect("checked terminal surface frame");
             self.ensure_surface_pipeline(surface_format)?;
+            self.ensure_surface_atlas_bind_group()?;
             self.upload_surface_vertices(frame)?;
         }
 
@@ -3451,25 +3614,10 @@ impl GpuRuntime {
                     .surface_pipeline
                     .as_ref()
                     .ok_or_else(|| "native surface pipeline was not created".to_string())?;
-                let texture = self
-                    .glyph_atlas_texture
+                let bind_group = self
+                    .surface_atlas_bind_group
                     .as_ref()
-                    .ok_or_else(|| "glyph atlas texture is not available".to_string())?;
-                let texture_view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-                let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                    label: Some("shellow-terminal-surface-atlas-bind-group"),
-                    layout: &pipeline.bind_group_layout,
-                    entries: &[
-                        wgpu::BindGroupEntry {
-                            binding: 0,
-                            resource: wgpu::BindingResource::TextureView(&texture_view),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 1,
-                            resource: wgpu::BindingResource::Sampler(&pipeline.sampler),
-                        },
-                    ],
-                });
+                    .ok_or_else(|| "native surface atlas bind group was not created".to_string())?;
                 let vertex_buffer = self
                     .surface_vertex_buffer
                     .as_ref()
@@ -3477,7 +3625,7 @@ impl GpuRuntime {
                 let vertex_count = surface_frame
                     .map_or(0, |frame| frame.vertex_count.min(u32::MAX as usize) as u32);
                 pass.set_pipeline(&pipeline.pipeline);
-                pass.set_bind_group(0, &bind_group, &[]);
+                pass.set_bind_group(0, bind_group, &[]);
                 pass.set_vertex_buffer(0, vertex_buffer.slice(..));
                 pass.draw(0..vertex_count, 0..1);
             }
@@ -3711,6 +3859,18 @@ mod tests {
     }
 
     #[test]
+    fn terminal_surface_rows_are_centered_in_available_slots() {
+        let row_slot_height = 100.0;
+        let row_height = 76.0;
+
+        assert_eq!(terminal_surface_row_y(0, row_slot_height, row_height), 12.0);
+        assert_eq!(
+            terminal_surface_row_y(1, row_slot_height, row_height),
+            112.0
+        );
+    }
+
+    #[test]
     fn terminal_glyph_quad_height_leaves_breathing_room() {
         let cell_width = 37.75;
         let row_height = terminal_surface_row_height(cell_width, 133.0);
@@ -3733,7 +3893,7 @@ mod tests {
     #[cfg(feature = "native-integrations")]
     #[test]
     fn shaped_space_glyph_rasterizes_transparent() {
-        let rasterizer = SystemFontRasterizer::new().expect("embedded mono font should load");
+        let rasterizer = SystemFontRasterizer::cached().expect("embedded mono font should load");
         let layout = rasterizer
             .shape_text(" ", 1)
             .expect("embedded mono font should shape a space");

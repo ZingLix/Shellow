@@ -12,7 +12,8 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -26,9 +27,10 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.ime
-import androidx.compose.foundation.layout.offset
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -45,10 +47,7 @@ import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.NavigationBar
-import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -102,8 +101,8 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.zIndex
 import xyz.zinglix.shellow.core.AuthenticationKind
 import xyz.zinglix.shellow.core.ConnectionState
 import xyz.zinglix.shellow.core.HostProfile
@@ -134,10 +133,10 @@ import org.json.JSONObject
 import kotlin.math.floor
 import kotlin.math.roundToInt
 
-private enum class AppTab(val title: String, val mark: String) {
-  Terminal("Terminal", "$"),
-  Hosts("Hosts", "H"),
-  Settings("Settings", "S"),
+private enum class AppScreen {
+  Hosts,
+  Terminal,
+  Settings,
 }
 
 private const val TerminalDirectInputSentinel = "\u2060"
@@ -269,7 +268,7 @@ fun ShellowApp() {
         profiles.addAll(loadHostProfiles(context))
       }
     }
-  var tab by remember { mutableStateOf(AppTab.Terminal) }
+  var screen by remember { mutableStateOf(AppScreen.Hosts) }
   var session by remember { mutableStateOf(core.snapshot()) }
   var reconnectTarget by remember { mutableStateOf<ReconnectTarget?>(null) }
 
@@ -294,11 +293,16 @@ fun ShellowApp() {
   }
 
   LaunchedEffect(core) {
+    var lastLiveRevision = withContext(Dispatchers.IO) { core.liveShellEventRevision() }
     while (true) {
-      delay(300)
-      val next = withContext(Dispatchers.IO) { core.pollLiveShell() }
-      if (!next.sameTerminalContentAs(session)) {
-        updateSession(next)
+      delay(50)
+      val revision = withContext(Dispatchers.IO) { core.liveShellEventRevision() }
+      if (revision != lastLiveRevision) {
+        lastLiveRevision = revision
+        val next = withContext(Dispatchers.IO) { core.pollLiveShell() }
+        if (next != session) {
+          updateSession(next)
+        }
       }
     }
   }
@@ -313,7 +317,7 @@ fun ShellowApp() {
 
   fun connectPasswordShell(profile: HostProfile, password: String, startupCommand: String) {
     session = TerminalSession.connecting(profile)
-    tab = AppTab.Terminal
+    screen = AppScreen.Terminal
     scope.launch {
       updateSession(withContext(Dispatchers.IO) { core.startPasswordShell(profile, password) })
       val command = startupCommand.trim()
@@ -330,7 +334,7 @@ fun ShellowApp() {
     startupCommand: String,
   ) {
     session = TerminalSession.connecting(profile)
-    tab = AppTab.Terminal
+    screen = AppScreen.Terminal
     scope.launch {
       updateSession(withContext(Dispatchers.IO) { core.startPrivateKeyShell(profile, privateKeyPem, passphrase) })
       val command = startupCommand.trim()
@@ -344,7 +348,7 @@ fun ShellowApp() {
     when (val target = reconnectTarget) {
       is ReconnectTarget.Preview -> {
         updateSession(core.connectPreview(target.profile))
-        tab = AppTab.Terminal
+        screen = AppScreen.Terminal
       }
       is ReconnectTarget.Password ->
         connectPasswordShell(
@@ -363,76 +367,63 @@ fun ShellowApp() {
     }
   }
 
-  Scaffold(
-    containerColor = ShellowColors.TerminalBackground,
-    bottomBar = {
-      NavigationBar(containerColor = ShellowColors.PanelBackground) {
-        AppTab.entries.forEach { item ->
-          NavigationBarItem(
-            selected = tab == item,
-            onClick = { tab = item },
-            icon = { Text(item.mark, fontFamily = FontFamily.Monospace) },
-            label = { Text(item.title) },
-          )
-        }
-      }
-    },
-  ) { padding ->
-    Box(
-      modifier =
-        Modifier
-          .padding(padding)
-          .fillMaxSize()
-          .background(ShellowColors.TerminalBackground)
-    ) {
-      when (tab) {
-        AppTab.Terminal ->
-          TerminalScreen(
-            session = session,
-            displaySettings = displaySettings,
-            onSubmit = { command -> updateSession(core.sendCommand(command)) },
-            onInput = { input -> updateSession(core.sendTerminalInput(input)) },
-            onReconnect = if (reconnectTarget == null) null else ::reconnect,
-            onDisconnect = { updateSession(core.disconnectLiveShell()) },
-            onResize = { cols, rows -> updateSession(core.resizeTerminal(cols, rows)) },
-            onAttachRendererSurface = { surface, width, height -> core.attachAndroidSurface(surface, width, height) },
-            onSetRendererOverlay = { overlay -> core.setRendererOverlayJson(overlay) },
-            onRenderRendererSurface = { width, height, firstRow, rowCount ->
-              core.renderRendererSurfaceFrame(width, height, firstRow, rowCount)
-            },
-            onDetachRendererSurface = { core.detachRendererSurface() },
-            onClearTerminal = { updateSession(core.clearTerminal()) },
-            onResetTerminal = { updateSession(core.resetTerminal()) },
-          )
-        AppTab.Hosts ->
-          HostsScreen(
-            profiles = profiles,
-            secretStore = secretStore,
-            onAddProfile = { profile ->
-              profiles.add(profile)
-              saveHostProfiles(context, profiles)
-            },
-            onPreview = { profile ->
-              reconnectTarget = ReconnectTarget.Preview(profile)
-              updateSession(core.connectPreview(profile))
-              tab = AppTab.Terminal
-            },
-            onConnectPassword = { profile, password, startup ->
-              reconnectTarget = ReconnectTarget.Password(profile, password, startup)
-              connectPasswordShell(profile, password, startup)
-            },
-            onConnectPrivateKey = { profile, privateKeyPem, passphrase, startup ->
-              reconnectTarget = ReconnectTarget.PrivateKey(profile, privateKeyPem, passphrase, startup)
-              connectPrivateKeyShell(profile, privateKeyPem, passphrase, startup)
-            },
-          )
-        AppTab.Settings ->
-          SettingsScreen(
-            report = session.integration,
-            displaySettings = displaySettings,
-            onDisplaySettingsChange = { displaySettings = it },
-          )
-      }
+  Box(
+    modifier =
+      Modifier
+        .fillMaxSize()
+        .background(ShellowColors.TerminalBackground)
+        .statusBarsPadding()
+        .navigationBarsPadding()
+  ) {
+    when (screen) {
+      AppScreen.Terminal ->
+        TerminalScreen(
+          session = session,
+          displaySettings = displaySettings,
+          onBackToHosts = { screen = AppScreen.Hosts },
+          onInput = { input -> updateSession(core.sendTerminalInput(input)) },
+          onReconnect = if (reconnectTarget == null) null else ::reconnect,
+          onDisconnect = { updateSession(core.disconnectLiveShell()) },
+          onResize = { cols, rows -> updateSession(core.resizeTerminal(cols, rows)) },
+          onAttachRendererSurface = { surface, width, height -> core.attachAndroidSurface(surface, width, height) },
+          onSetRendererOverlay = { overlay -> core.setRendererOverlayJson(overlay) },
+          onRenderRendererSurface = { width, height, firstRow, rowCount ->
+            core.renderRendererSurfaceFrame(width, height, firstRow, rowCount)
+          },
+          onDetachRendererSurface = { core.detachRendererSurface() },
+          onClearTerminal = { updateSession(core.clearTerminal()) },
+          onResetTerminal = { updateSession(core.resetTerminal()) },
+        )
+      AppScreen.Hosts ->
+        HostsScreen(
+          profiles = profiles,
+          secretStore = secretStore,
+          onOpenSettings = { screen = AppScreen.Settings },
+          onAddProfile = { profile ->
+            profiles.add(profile)
+            saveHostProfiles(context, profiles)
+          },
+          onPreview = { profile ->
+            reconnectTarget = ReconnectTarget.Preview(profile)
+            updateSession(core.connectPreview(profile))
+            screen = AppScreen.Terminal
+          },
+          onConnectPassword = { profile, password, startup ->
+            reconnectTarget = ReconnectTarget.Password(profile, password, startup)
+            connectPasswordShell(profile, password, startup)
+          },
+          onConnectPrivateKey = { profile, privateKeyPem, passphrase, startup ->
+            reconnectTarget = ReconnectTarget.PrivateKey(profile, privateKeyPem, passphrase, startup)
+            connectPrivateKeyShell(profile, privateKeyPem, passphrase, startup)
+          },
+        )
+      AppScreen.Settings ->
+        SettingsScreen(
+          report = session.integration,
+          displaySettings = displaySettings,
+          onBack = { screen = AppScreen.Hosts },
+          onDisplaySettingsChange = { displaySettings = it },
+        )
     }
   }
 }
@@ -442,7 +433,7 @@ fun ShellowApp() {
 private fun TerminalScreen(
   session: TerminalSession,
   displaySettings: AppDisplaySettings,
-  onSubmit: (String) -> Unit,
+  onBackToHosts: () -> Unit,
   onInput: (String) -> Unit,
   onReconnect: (() -> Unit)?,
   onDisconnect: () -> Unit,
@@ -483,13 +474,20 @@ private fun TerminalScreen(
   val terminalListState = rememberLazyListState()
   val terminalScope = rememberCoroutineScope()
   val keyboardOffsetPx = WindowInsets.ime.getBottom(density)
+  val keyboardOffsetDp = with(density) { keyboardOffsetPx.toDp() }
+  val terminalHeaderInsetDp = 76.dp
+  val terminalSearchBarTopDp = 64.dp
+  val terminalSearchInsetDp = 130.dp
+  val terminalTopInsetDp = if (searchVisible) terminalSearchInsetDp else terminalHeaderInsetDp
+  val terminalBottomInsetDp = 10.dp
+  val terminalTopInsetPx = with(density) { terminalTopInsetDp.toPx() }
+  val terminalBottomInsetPx = with(density) { terminalBottomInsetDp.toPx() }
   val terminalTextSizePx = with(density) { displaySettings.fontSizeSp.sp.toPx() }
   val gridCellWidthPx = (terminalTextSizePx * 0.62f).coerceAtLeast(with(density) { 7.dp.toPx() })
   val terminalRowHeightPx =
     ((terminalTextSizePx * 1.45f).coerceAtLeast(with(density) { 13.dp.toPx() }) + with(density) { 4.dp.toPx() }) *
       displaySettings.lineHeightScale
   val viewportHorizontalPaddingPx = with(density) { 14.dp.toPx() }
-  val viewportVerticalPaddingPx = with(density) { 10.dp.toPx() }
   val grid = session.grid
   val visibleGrid = grid?.takeIf { it.hasVisibleContent || it.activeScreen == TerminalScreenKind.Alternate }
   val gridVisible = visibleGrid != null
@@ -544,7 +542,7 @@ private fun TerminalScreen(
     if (widthPx <= 0 || heightPx <= 0) return
 
     val contentWidthPx = (widthPx.toFloat() - viewportHorizontalPaddingPx * 2f).coerceAtLeast(1f)
-    val contentHeightPx = (heightPx.toFloat() - viewportVerticalPaddingPx * 2f).coerceAtLeast(1f)
+    val contentHeightPx = (heightPx.toFloat() - terminalTopInsetPx - terminalBottomInsetPx).coerceAtLeast(1f)
     val cols = (contentWidthPx / gridCellWidthPx).toInt().coerceIn(20, 300)
     val rows = (contentHeightPx / terminalRowHeightPx).toInt().coerceIn(8, 120)
     if (cols != reportedCols || rows != reportedRows) {
@@ -669,7 +667,6 @@ private fun TerminalScreen(
   Column(
     Modifier
       .fillMaxSize()
-      .offset { IntOffset(0, -keyboardOffsetPx) }
       .onPreviewKeyEvent { event ->
         if (event.type != KeyEventType.KeyDown) {
           return@onPreviewKeyEvent false
@@ -703,31 +700,6 @@ private fun TerminalScreen(
         false
       },
   ) {
-    SessionHeader(session, onReconnect, onDisconnect)
-    IntegrationStrip(session.integration)
-    if (searchVisible) {
-      TerminalSearchBar(
-        query = searchQuery,
-        onQueryChange = {
-          searchQuery = it
-          searchIndex = 0
-        },
-        presentation = search,
-        onPrevious = {
-          val count = search.hits.size
-          if (count > 0) searchIndex = (searchIndex - 1).floorMod(count)
-        },
-        onNext = {
-          val count = search.hits.size
-          if (count > 0) searchIndex = (searchIndex + 1).floorMod(count)
-        },
-        onClose = {
-          searchVisible = false
-          searchQuery = ""
-          searchIndex = 0
-        },
-      )
-    }
     val terminalItemCount =
       if (visibleGrid != null) {
         visibleGrid.lines.size
@@ -743,6 +715,21 @@ private fun TerminalScreen(
     LaunchedEffect(terminalItemCount, search.isEmpty, canJumpToBottom) {
       if (canJumpToBottom && search.isEmpty) {
         terminalListState.animateScrollToItem(terminalItemCount - 1)
+      }
+    }
+    LaunchedEffect(keyboardOffsetPx, visibleGrid?.cursorRow, terminalItemCount, viewportHeightPx) {
+      if (keyboardOffsetPx > 0 && visibleGrid != null && visibleGrid.activeScreen == TerminalScreenKind.Primary && terminalItemCount > 0) {
+        val availableRows =
+          ((viewportHeightPx.toFloat() - terminalTopInsetPx - terminalBottomInsetPx) / terminalRowHeightPx)
+            .toInt()
+            .coerceAtLeast(1)
+        val cursorRow = visibleGrid.cursorRow.coerceIn(0, terminalItemCount - 1)
+        val firstVisible = terminalListState.firstVisibleItemIndex
+        val comfortableLast = firstVisible + availableRows - 3
+        if (cursorRow < firstVisible || cursorRow > comfortableLast) {
+          val target = (cursorRow - availableRows + 3).coerceIn(0, (terminalItemCount - 1).coerceAtLeast(0))
+          terminalListState.animateScrollToItem(target)
+        }
       }
     }
     Box(
@@ -761,7 +748,7 @@ private fun TerminalScreen(
           overlayJson = rendererOverlayJson ?: "{\"ranges\":[]}",
           modifier =
             Modifier
-              .padding(horizontal = 14.dp, vertical = 10.dp)
+              .padding(start = 14.dp, top = terminalTopInsetDp, end = 14.dp, bottom = terminalBottomInsetDp)
               .fillMaxWidth()
               .height(surfaceHeightDp),
           onAttachSurface = onAttachRendererSurface,
@@ -791,7 +778,7 @@ private fun TerminalScreen(
               viewportHeightPx = size.height
               reportViewportSize(size.width, size.height)
             }
-            .padding(horizontal = 14.dp, vertical = 10.dp),
+            .padding(start = 14.dp, top = terminalTopInsetDp, end = 14.dp, bottom = terminalBottomInsetDp),
         verticalArrangement = if (visibleGrid != null) Arrangement.spacedBy(0.dp) else Arrangement.spacedBy(6.dp),
       ) {
         if (visibleGrid != null) {
@@ -808,22 +795,20 @@ private fun TerminalScreen(
               rowHeightPx = terminalRowHeightPx,
               textSizePx = terminalTextSizePx,
               preferRustSurface = rustSurfaceEnabled,
-              onSelect = {
+              onTap = {
                 focusTerminalInput()
                 val mouseInput = grid.mousePressSequence(row = row, column = 0)
                 if (mouseInput != null) {
                   selection = null
                   sendTerminalInput(mouseInput)
-                } else {
-                  selection = selection.extendingGridRow(row)
                 }
+              },
+              onLongPressSelect = { point ->
+                focusTerminalInput()
+                selection = TerminalSelection.gridRow(point.row)
               },
               onDragSelect = { anchor, focus ->
                 selection = TerminalSelection.Grid(anchor, focus)
-              },
-              onMouseInput = {
-                focusTerminalInput()
-                sendTerminalInput(it)
               },
             )
           }
@@ -835,7 +820,8 @@ private fun TerminalScreen(
               selected = selection.containsHistory(rowIndex),
               searchMatch = search.containsHistory(rowIndex),
               activeSearchMatch = search.activeHit == TerminalSearchHit.History(rowIndex),
-              onSelect = {
+              onTap = { focusTerminalInput() },
+              onLongPressSelect = {
                 focusTerminalInput()
                 selection = selection.extendingHistory(rowIndex)
               },
@@ -843,11 +829,46 @@ private fun TerminalScreen(
           }
         }
       }
+      TerminalFloatingHeader(
+        session = session,
+        onBackToHosts = onBackToHosts,
+        onReconnect = onReconnect,
+        onDisconnect = onDisconnect,
+        modifier =
+          Modifier
+            .align(Alignment.TopCenter)
+            .padding(horizontal = 10.dp, vertical = 8.dp)
+            .zIndex(3f),
+      )
+      if (searchVisible) {
+        TerminalSearchBar(
+          query = searchQuery,
+          onQueryChange = {
+            searchQuery = it
+            searchIndex = 0
+          },
+          presentation = search,
+          onPrevious = {
+            val count = search.hits.size
+            if (count > 0) searchIndex = (searchIndex - 1).floorMod(count)
+          },
+          onNext = {
+            val count = search.hits.size
+            if (count > 0) searchIndex = (searchIndex + 1).floorMod(count)
+          },
+          onClose = {
+            searchVisible = false
+            searchQuery = ""
+            searchIndex = 0
+          },
+          modifier =
+            Modifier
+              .align(Alignment.TopCenter)
+              .padding(start = 10.dp, top = terminalSearchBarTopDp, end = 10.dp)
+              .zIndex(2f),
+        )
+      }
     }
-    TerminalCommandStrip(
-      commands = listOf("shellow integrations", "shellow ghostty", "shellow renderer", "shellow ssh"),
-      onSubmit = onSubmit,
-    )
     Row(
       modifier =
         Modifier
@@ -948,7 +969,7 @@ private fun TerminalScreen(
         TerminalKey(key.label) { sendToolbarInput(key.sequence) }
       }
     }
-    Spacer(Modifier.height(6.dp).fillMaxWidth().background(ShellowColors.PanelBackground))
+    Spacer(Modifier.height(6.dp + keyboardOffsetDp).fillMaxWidth().background(ShellowColors.PanelBackground))
   }
 
   pendingPaste?.let { paste ->
@@ -1000,30 +1021,6 @@ private fun TerminalScreen(
         TextButton(onClick = { transcriptSaveResult = null }) { Text("OK") }
       },
     )
-  }
-}
-
-@Composable
-private fun TerminalCommandStrip(
-  commands: List<String>,
-  onSubmit: (String) -> Unit,
-) {
-  Row(
-    modifier =
-      Modifier
-        .fillMaxWidth()
-        .horizontalScroll(rememberScrollState())
-        .padding(horizontal = 12.dp, vertical = 4.dp),
-    horizontalArrangement = Arrangement.spacedBy(8.dp),
-    verticalAlignment = Alignment.CenterVertically,
-  ) {
-    commands.forEach { command ->
-      FilterChip(
-        selected = false,
-        onClick = { onSubmit(command) },
-        label = { Text(command.removePrefix("shellow "), maxLines = 1) },
-      )
-    }
   }
 }
 
@@ -1100,35 +1097,37 @@ private fun TerminalKey(
 }
 
 @Composable
-private fun SessionHeader(
+private fun TerminalFloatingHeader(
   session: TerminalSession,
+  onBackToHosts: () -> Unit,
   onReconnect: (() -> Unit)?,
   onDisconnect: () -> Unit,
+  modifier: Modifier = Modifier,
 ) {
   Row(
     modifier =
-      Modifier
+      modifier
         .fillMaxWidth()
-        .background(ShellowColors.PanelBackground)
-        .padding(horizontal = 16.dp, vertical = 12.dp),
+        .background(ShellowColors.PanelBackground.copy(alpha = 0.94f), RoundedCornerShape(12.dp))
+        .padding(horizontal = 10.dp, vertical = 8.dp),
     verticalAlignment = Alignment.CenterVertically,
+    horizontalArrangement = Arrangement.spacedBy(9.dp),
   ) {
+    TerminalCompactButton("Back", width = 48.dp, onClick = onBackToHosts)
     Box(
       modifier =
         Modifier
           .size(9.dp)
           .background(statusColor(session.state), RoundedCornerShape(9.dp))
     )
-    Spacer(Modifier.width(10.dp))
-    Column(Modifier.weight(1f)) {
-      Text(session.title, style = MaterialTheme.typography.titleSmall)
-      Text(
-        session.terminalDescriptor(),
-        color = ShellowColors.TerminalMuted,
-        maxLines = 1,
-        overflow = TextOverflow.Ellipsis,
-      )
-    }
+    Text(
+      session.title,
+      modifier = Modifier.weight(1f),
+      color = ShellowColors.TerminalText,
+      style = MaterialTheme.typography.titleSmall,
+      maxLines = 1,
+      overflow = TextOverflow.Ellipsis,
+    )
     Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
       if (session.bellCount > 0) {
         Text(
@@ -1154,49 +1153,10 @@ private fun SessionHeader(
           onClick = onDisconnect,
           modifier = Modifier.background(ShellowColors.Warning.copy(alpha = 0.16f), RoundedCornerShape(8.dp)),
         ) {
-          Text("Disconnect", color = ShellowColors.Warning, style = MaterialTheme.typography.labelMedium)
+          Text("Stop", color = ShellowColors.Warning, style = MaterialTheme.typography.labelMedium)
         }
       }
-      Text(session.state.title, color = statusColor(session.state), style = MaterialTheme.typography.labelMedium)
     }
-  }
-}
-
-@Composable
-private fun IntegrationStrip(report: IntegrationReport) {
-  Row(
-    modifier =
-      Modifier
-        .fillMaxWidth()
-        .background(ShellowColors.TerminalBackground)
-        .padding(horizontal = 12.dp, vertical = 8.dp),
-    horizontalArrangement = Arrangement.spacedBy(8.dp),
-  ) {
-    IntegrationPill("VT", report.terminalBackend, report.ghosttyReady, Modifier.weight(1f))
-    IntegrationPill("SSH", report.sshBackend, report.russhReady, Modifier.weight(1f))
-    IntegrationPill("GPU", report.rendererBackend, report.wgpuReady, Modifier.weight(1f))
-  }
-}
-
-@Composable
-private fun IntegrationPill(
-  title: String,
-  value: String,
-  ready: Boolean,
-  modifier: Modifier = Modifier,
-) {
-  Row(
-    modifier =
-      modifier
-        .background(ShellowColors.KeyBackground, RoundedCornerShape(8.dp))
-        .padding(horizontal = 8.dp, vertical = 6.dp),
-    verticalAlignment = Alignment.CenterVertically,
-  ) {
-    Box(Modifier.size(6.dp).background(if (ready) ShellowColors.Success else ShellowColors.Warning, RoundedCornerShape(6.dp)))
-    Spacer(Modifier.width(6.dp))
-    Text(title, color = ShellowColors.TerminalMuted, style = MaterialTheme.typography.labelSmall)
-    Spacer(Modifier.width(4.dp))
-    Text(value, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.labelSmall)
   }
 }
 
@@ -1208,12 +1168,13 @@ private fun TerminalSearchBar(
   onPrevious: () -> Unit,
   onNext: () -> Unit,
   onClose: () -> Unit,
+  modifier: Modifier = Modifier,
 ) {
   Row(
     modifier =
-      Modifier
+      modifier
         .fillMaxWidth()
-        .background(ShellowColors.PanelBackground)
+        .background(ShellowColors.PanelBackground.copy(alpha = 0.96f), RoundedCornerShape(12.dp))
         .padding(horizontal = 12.dp, vertical = 8.dp),
     verticalAlignment = Alignment.CenterVertically,
     horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -1256,6 +1217,7 @@ private fun AndroidRendererSurfaceHost(
   onPresentationChange: (Boolean) -> Unit,
 ) {
   val surfaceViewState = remember { mutableStateOf<SurfaceView?>(null) }
+  val lastAppliedOverlayJson = remember { arrayOf<String?>(null) }
   val renderSignature = androidRendererSurfaceSignature(grid, viewportFirstRow, viewportRowCount, overlayJson)
 
   fun renderIfReady(view: SurfaceView?): Boolean {
@@ -1266,7 +1228,10 @@ private fun AndroidRendererSurfaceHost(
       return false
     }
 
-    onSetOverlay(overlayJson)
+    if (lastAppliedOverlayJson[0] != overlayJson) {
+      onSetOverlay(overlayJson)
+      lastAppliedOverlayJson[0] = overlayJson
+    }
     val presented = onRenderFrame(width, height, viewportFirstRow, viewportRowCount)
     if (presented) {
       Log.i(RendererLogTag, "Shellow renderer Android terminal surface frame ${width}x$height")
@@ -1417,9 +1382,9 @@ private fun TerminalGridRow(
   rowHeightPx: Float,
   textSizePx: Float,
   preferRustSurface: Boolean,
-  onSelect: () -> Unit,
+  onTap: () -> Unit,
+  onLongPressSelect: (TerminalSelectionPoint) -> Unit,
   onDragSelect: (TerminalSelectionPoint, TerminalSelectionPoint) -> Unit,
-  onMouseInput: (String) -> Unit,
 ) {
   val density = LocalDensity.current
   val rowHeightDp = with(density) { rowHeightPx.toDp() }
@@ -1427,73 +1392,37 @@ private fun TerminalGridRow(
     Modifier
       .fillMaxWidth()
       .height(rowHeightDp)
-      .pointerInput(grid.mouseReporting, grid.mouseDragReporting, row, line, cellWidthPx, rowHeightPx, grid.lines.size) {
-        if (grid.mouseReporting && grid.mouseDragReporting) {
-          var lastPoint: TerminalSelectionPoint? = null
-          detectDragGestures(
-            onDragStart = { offset ->
-              val start = terminalSelectionPointFromOffset(
-                offset = offset,
-                initialRow = row,
-                lines = grid.lines,
-                cellWidthPx = cellWidthPx,
-                rowHeightPx = rowHeightPx,
-              )
-              lastPoint = start
-              grid.mouseEventSequence(start.row, start.column, TerminalMouseEvent.Press)?.let(onMouseInput)
-            },
-            onDrag = { change, _ ->
-              val focus = terminalSelectionPointFromOffset(
-                offset = change.position,
-                initialRow = row,
-                lines = grid.lines,
-                cellWidthPx = cellWidthPx,
-                rowHeightPx = rowHeightPx,
-              )
-              lastPoint = focus
-              grid.mouseEventSequence(focus.row, focus.column, TerminalMouseEvent.Drag)?.let(onMouseInput)
-              change.consume()
-            },
-            onDragEnd = {
-              lastPoint?.let { point ->
-                grid.mouseEventSequence(point.row, point.column, TerminalMouseEvent.Release)?.let(onMouseInput)
-              }
-              lastPoint = null
-            },
-            onDragCancel = { lastPoint = null },
-          )
-        } else if (!grid.mouseReporting) {
-          var anchor: TerminalSelectionPoint? = null
-          detectDragGestures(
-            onDragStart = { offset ->
-              val start = terminalSelectionPointFromOffset(
-                offset = offset,
-                initialRow = row,
-                lines = grid.lines,
-                cellWidthPx = cellWidthPx,
-                rowHeightPx = rowHeightPx,
-              )
-              anchor = start
-              onDragSelect(start, start)
-            },
-            onDrag = { change, _ ->
-              val start = anchor ?: return@detectDragGestures
-              val focus = terminalSelectionPointFromOffset(
-                offset = change.position,
-                initialRow = row,
-                lines = grid.lines,
-                cellWidthPx = cellWidthPx,
-                rowHeightPx = rowHeightPx,
-              )
-              onDragSelect(start, focus)
-              change.consume()
-            },
-            onDragEnd = { anchor = null },
-            onDragCancel = { anchor = null },
-          )
-        }
+      .pointerInput(row, line, cellWidthPx, rowHeightPx, grid.lines.size) {
+        var anchor: TerminalSelectionPoint? = null
+        detectDragGesturesAfterLongPress(
+          onDragStart = { offset ->
+            val start = terminalSelectionPointFromOffset(
+              offset = offset,
+              initialRow = row,
+              lines = grid.lines,
+              cellWidthPx = cellWidthPx,
+              rowHeightPx = rowHeightPx,
+            )
+            anchor = start
+            onLongPressSelect(start)
+          },
+          onDrag = { change, _ ->
+            val start = anchor ?: return@detectDragGesturesAfterLongPress
+            val focus = terminalSelectionPointFromOffset(
+              offset = change.position,
+              initialRow = row,
+              lines = grid.lines,
+              cellWidthPx = cellWidthPx,
+              rowHeightPx = rowHeightPx,
+            )
+            onDragSelect(start, focus)
+            change.consume()
+          },
+          onDragEnd = { anchor = null },
+          onDragCancel = { anchor = null },
+        )
       }
-      .clickable(onClick = onSelect)
+      .clickable(onClick = onTap)
 
   if (preferRustSurface) {
     Box(modifier = rowModifier)
@@ -1552,14 +1481,20 @@ private fun TerminalRowView(
   selected: Boolean = false,
   searchMatch: Boolean = false,
   activeSearchMatch: Boolean = false,
-  onSelect: () -> Unit = {},
+  onTap: () -> Unit = {},
+  onLongPressSelect: () -> Unit = {},
 ) {
   Row(
     modifier =
       Modifier
         .fillMaxWidth()
         .background(searchableRowBackground(selected, searchMatch, activeSearchMatch))
-        .clickable(onClick = onSelect)
+        .pointerInput(Unit) {
+          detectTapGestures(
+            onTap = { onTap() },
+            onLongPress = { onLongPressSelect() },
+          )
+        }
         .padding(horizontal = 3.dp, vertical = 1.dp),
     verticalAlignment = Alignment.Top,
   ) {
@@ -1616,6 +1551,7 @@ private fun terminalSelectionPointFromOffset(
 private fun HostsScreen(
   profiles: List<HostProfile>,
   secretStore: SSHSecretStore,
+  onOpenSettings: () -> Unit,
   onAddProfile: (HostProfile) -> Unit,
   onPreview: (HostProfile) -> Unit,
   onConnectPassword: (HostProfile, String, String) -> Unit,
@@ -1626,16 +1562,33 @@ private fun HostsScreen(
   var addingProfile by remember { mutableStateOf(false) }
 
   LazyColumn(
-    modifier = Modifier.fillMaxSize().padding(16.dp),
+    modifier =
+      Modifier
+        .fillMaxSize()
+        .background(ShellowColors.TerminalBackground)
+        .padding(16.dp),
     verticalArrangement = Arrangement.spacedBy(10.dp),
   ) {
     item {
-      Button(onClick = { addingProfile = true }, modifier = Modifier.fillMaxWidth()) {
-        Text("Add Host")
+      Row(
+        modifier = Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+      ) {
+        Text(
+          "Hosts",
+          modifier = Modifier.weight(1f),
+          color = ShellowColors.TerminalText,
+          style = MaterialTheme.typography.titleLarge,
+        )
+        TextButton(onClick = onOpenSettings) { Text("Settings") }
+        Button(onClick = { addingProfile = true }) {
+          Text("Add")
+        }
       }
     }
 
-    items(profiles) { profile ->
+    items(profiles, key = { it.id }) { profile ->
       Card(
         onClick = {
           if (profile.authentication == AuthenticationKind.Password) {
@@ -1648,7 +1601,7 @@ private fun HostsScreen(
       ) {
         Row(Modifier.fillMaxWidth().padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
           Column(Modifier.weight(1f)) {
-            Text(profile.name, style = MaterialTheme.typography.titleSmall)
+            Text(profile.name, color = ShellowColors.TerminalText, style = MaterialTheme.typography.titleSmall)
             Text(profile.endpoint, color = ShellowColors.TerminalMuted)
             Text(profile.hostKeyTrustTitle, color = ShellowColors.TerminalMuted, style = MaterialTheme.typography.labelSmall)
           }
@@ -1988,9 +1941,18 @@ private fun PrivateKeyDialog(
 private fun SettingsScreen(
   report: IntegrationReport,
   displaySettings: AppDisplaySettings,
+  onBack: () -> Unit,
   onDisplaySettingsChange: (AppDisplaySettings) -> Unit,
 ) {
   Column(Modifier.fillMaxSize().padding(16.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
+    Row(
+      modifier = Modifier.fillMaxWidth(),
+      verticalAlignment = Alignment.CenterVertically,
+      horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+      TextButton(onClick = onBack) { Text("Back") }
+      Text("Settings", color = ShellowColors.TerminalText, style = MaterialTheme.typography.titleLarge)
+    }
     DisplaySlider(
       title = "Font Size",
       valueLabel = "${displaySettings.fontSizeSp.roundToInt()} sp",
@@ -2028,7 +1990,7 @@ private fun DisplaySlider(
     verticalArrangement = Arrangement.spacedBy(8.dp),
   ) {
     Row(verticalAlignment = Alignment.CenterVertically) {
-      Text(title, modifier = Modifier.weight(1f))
+      Text(title, modifier = Modifier.weight(1f), color = ShellowColors.TerminalText)
       Text(valueLabel, color = ShellowColors.TerminalMuted)
     }
     Slider(value = value, onValueChange = onValueChange, valueRange = valueRange)
@@ -2046,7 +2008,7 @@ private fun SettingsRow(label: String, value: String) {
     verticalAlignment = Alignment.CenterVertically,
   ) {
     Text(label, modifier = Modifier.width(56.dp), color = ShellowColors.TerminalMuted)
-    Text(value, maxLines = 1, overflow = TextOverflow.Ellipsis)
+    Text(value, color = ShellowColors.TerminalText, maxLines = 1, overflow = TextOverflow.Ellipsis)
   }
 }
 
@@ -2095,6 +2057,7 @@ private fun defaultHostProfiles(): List<HostProfile> =
       trustedHostKeySha256 = "SHA256:sample-staging-host-key",
       id = "sample-staging",
     ),
+    HostProfile("10.248.1.102", "10.248.1.102", 22, "zinglix", AuthenticationKind.Password, id = "lab-10-248-1-102"),
     HostProfile("Home Lab", "192.168.1.42", 22, "zinglix", AuthenticationKind.Password, id = "sample-home-lab"),
   )
 
@@ -2261,10 +2224,6 @@ private fun TerminalSession.promptInputText(): String {
   val row = rows.lastOrNull() ?: return ""
   return if (row.style == TerminalRowStyle.Prompt) row.text else ""
 }
-
-private fun TerminalSession.sameTerminalContentAs(other: TerminalSession): Boolean =
-  copy(grid = grid?.copy(dirtyRows = emptyList())) ==
-    other.copy(grid = other.grid?.copy(dirtyRows = emptyList()))
 
 private fun TerminalGridSnapshot.viewportFirstRow(firstVisibleItemIndex: Int): Int {
   if (activeScreen != TerminalScreenKind.Primary || lines.size <= rows) return 0

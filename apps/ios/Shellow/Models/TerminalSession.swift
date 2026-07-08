@@ -48,7 +48,7 @@ struct TerminalSession: Equatable, Decodable {
             bellCount: 0,
             rows: [
                 TerminalRow(prompt: "$", text: "ssh \(profile.endpoint)", style: .command),
-                TerminalRow(prompt: "", text: "waiting for russh password authentication", style: .muted),
+                TerminalRow(prompt: "", text: "Connecting...", style: .muted),
                 TerminalRow(prompt: "$", text: "", style: .prompt)
             ],
             grid: nil,
@@ -136,7 +136,8 @@ struct TerminalGridSnapshot: Equatable, Decodable {
             lhs.mouseDragReporting == rhs.mouseDragReporting &&
             lhs.sgrMouse == rhs.sgrMouse &&
             lhs.lines == rhs.lines &&
-            lhs.styledLines == rhs.styledLines
+            lhs.styledLines == rhs.styledLines &&
+            lhs.dirtyRows == rhs.dirtyRows
     }
 
     private enum CodingKeys: String, CodingKey {

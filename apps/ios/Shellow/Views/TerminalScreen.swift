@@ -162,11 +162,26 @@ private struct TerminalKeyboardAvoidanceState: Equatable {
         guard endFrame.minY < viewFrame.maxY else { return 0 }
         return max(0, viewFrame.maxY - endFrame.minY)
     }
+
+    func cursorAwareOffset(
+        overlapping viewFrame: CGRect,
+        cursorBottomY: CGFloat?,
+        coveredBottomInset: CGFloat,
+        bottomPadding: CGFloat
+    ) -> CGFloat {
+        guard let cursorBottomY, coveredBottomInset > 0 else { return 0 }
+        guard !viewFrame.isNull, !viewFrame.isEmpty else { return 0 }
+
+        let visibleBottomY = max(0, viewFrame.height - coveredBottomInset)
+        return max(0, cursorBottomY + bottomPadding - visibleBottomY)
+    }
 }
 
 struct TerminalScreen: View {
+    @Environment(\.dismiss) private var dismiss
     @Binding var session: TerminalSession
     let settings: ShellowSettings
+    let renderTick: Int
     let onTerminalInput: (String) -> Void
     let onReconnect: (() -> Void)?
     let onDisconnect: () -> Void
@@ -194,33 +209,43 @@ struct TerminalScreen: View {
 
         GeometryReader { geometry in
             let keyboardInset = keyboardAvoidance.bottomInset(overlapping: geometry.frame(in: .global))
-            VStack(spacing: 0) {
-                SessionHeader(
-                    session: session,
-                    onReconnect: onReconnect,
-                    onDisconnect: onDisconnect
-                )
-                IntegrationStrip(report: session.integration)
+            let bottomSafeInset = geometry.safeAreaInsets.bottom
+            let bottomOverlayPadding = keyboardInset > 0 ? keyboardInset : bottomSafeInset
+            let bottomChromeHeight = TerminalChromeMetrics.bottomReserve(
+                showKeyboardToolbar: settings.showKeyboardToolbar
+            )
+            let topOverlayPadding = TerminalChromeMetrics.topOverlayPadding(
+                safeAreaTop: geometry.safeAreaInsets.top
+            )
+            let contentTopInset = TerminalChromeMetrics.contentTopInset(
+                safeAreaTop: geometry.safeAreaInsets.top,
+                showsSearch: isSearchVisible
+            )
+            let contentBottomInset = bottomChromeHeight + bottomOverlayPadding + TerminalChromeMetrics.contentBottomGap
+            let cursorBottomY = session.cursorBottomY(
+                fontSize: settings.fontSize,
+                lineHeightScale: settings.lineHeightScale,
+                viewportHeight: max(1, geometry.size.height - contentTopInset - contentBottomInset),
+                topOffset: contentTopInset
+            )
+            let keyboardCursorOverlap = keyboardAvoidance.cursorAwareOffset(
+                overlapping: geometry.frame(in: .global),
+                cursorBottomY: cursorBottomY,
+                coveredBottomInset: keyboardInset,
+                bottomPadding: TerminalChromeMetrics.cursorPadding
+            )
 
-                if isSearchVisible {
-                    TerminalSearchBar(
-                        query: $searchQuery,
-                        focusedIndex: $searchIndex,
-                        presentation: search,
-                        onClose: {
-                            isSearchVisible = false
-                            searchQuery = ""
-                            searchIndex = 0
-                        }
-                    )
-                }
-
+            ZStack(alignment: .top) {
                 TerminalViewport(
                     session: session,
                     fontSize: settings.fontSize,
                     lineHeightScale: settings.lineHeightScale,
                     search: search,
                     selection: $selection,
+                    renderTick: renderTick,
+                    contentTopInset: contentTopInset,
+                    contentBottomInset: contentBottomInset,
+                    reserveBottomScrollSpace: keyboardCursorOverlap > 0,
                     onResizeTerminal: onResizeTerminal,
                     onAttachRendererSurface: onAttachRendererSurface,
                     onSetRendererOverlay: onSetRendererOverlay,
@@ -235,40 +260,69 @@ struct TerminalScreen: View {
                     copyShortcut: copySelectionOrVisibleTerminal,
                     searchShortcut: showSearch
                 )
-                TerminalInputBar(
-                    isSearchVisible: $isSearchVisible,
-                    selectedText: session.selectedText(for: selection),
-                    selectedLink: session.selectedText(for: selection)?.firstTerminalURL,
-                    onEnter: sendEnter,
-                    onClearTerminal: onClearTerminal,
-                    onResetTerminal: onResetTerminal,
-                    onSaveTranscript: saveTranscript,
-                    onCopyTerminal: copyVisibleTerminal,
-                    onCopySelection: copySelection,
-                    onCopyLink: copySelectedLink,
-                    clearSelection: { selection = nil },
-                    onPasteClipboard: pasteFromClipboard
-                )
+                .padding(.top, contentTopInset)
+                .padding(.bottom, contentBottomInset)
 
-                if settings.showKeyboardToolbar {
-                    TerminalKeyboardToolbar(
+                VStack(spacing: 8) {
+                    TerminalFloatingHeader(
+                        session: session,
+                        onBack: { dismiss() },
+                        onReconnect: onReconnect,
+                        onDisconnect: onDisconnect
+                    )
+
+                    if isSearchVisible {
+                        TerminalSearchBar(
+                            query: $searchQuery,
+                            focusedIndex: $searchIndex,
+                            presentation: search,
+                            onClose: {
+                                isSearchVisible = false
+                                searchQuery = ""
+                                searchIndex = 0
+                            }
+                        )
+                    }
+                }
+                .padding(.top, topOverlayPadding)
+                .padding(.horizontal, 12)
+
+                VStack {
+                    Spacer(minLength: 0)
+                    TerminalControlsPanel(
+                        isSearchVisible: $isSearchVisible,
+                        selectedText: session.selectedText(for: selection),
+                        selectedLink: session.selectedText(for: selection)?.firstTerminalURL,
+                        showKeyboardToolbar: settings.showKeyboardToolbar,
                         isCtrlArmed: $isCtrlArmed,
                         isAltArmed: $isAltArmed,
                         applicationCursorKeys: session.isApplicationCursorKeysActive,
+                        onEnter: sendEnter,
+                        onClearTerminal: onClearTerminal,
+                        onResetTerminal: onResetTerminal,
+                        onSaveTranscript: saveTranscript,
+                        onCopyTerminal: copyVisibleTerminal,
+                        onCopySelection: copySelection,
+                        onCopyLink: copySelectedLink,
+                        clearSelection: { selection = nil },
+                        onPasteClipboard: pasteFromClipboard,
                         sendInput: sendTerminalInput
                     )
                 }
+                .padding(.bottom, bottomOverlayPadding)
             }
             .frame(
                 width: geometry.size.width,
                 height: max(1, geometry.size.height),
                 alignment: .top
             )
-            .offset(y: -keyboardInset)
             .clipped()
-            .animation(keyboardAvoidance.animation, value: keyboardInset)
+            .animation(keyboardAvoidance.animation, value: bottomOverlayPadding)
+            .animation(keyboardAvoidance.animation, value: keyboardCursorOverlap)
         }
         .background(ShellowTheme.terminalBackground.ignoresSafeArea())
+        .ignoresSafeArea(.container, edges: [.top, .bottom])
+        .ignoresSafeArea(.keyboard, edges: .bottom)
         .onAppear {
             presentRemoteClipboardIfNeeded()
         }
@@ -497,50 +551,52 @@ struct TerminalScreen: View {
     }
 }
 
-private struct SessionHeader: View {
+private struct TerminalFloatingHeader: View {
     let session: TerminalSession
+    let onBack: () -> Void
     let onReconnect: (() -> Void)?
     let onDisconnect: () -> Void
 
     var body: some View {
         HStack(spacing: 8) {
-            Circle()
-                .fill(statusColor)
-                .frame(width: 9, height: 9)
+            Button(action: onBack) {
+                Image(systemName: "chevron.left")
+                    .font(.system(size: 15, weight: .semibold))
+                    .frame(width: 34, height: 34)
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(ShellowTheme.terminalText)
+            .background(ShellowTheme.keyBackground.opacity(0.92), in: RoundedRectangle(cornerRadius: 8))
+            .accessibilityLabel("Back to Hosts")
 
-            VStack(alignment: .leading, spacing: 2) {
+            HStack(spacing: 8) {
+                Circle()
+                    .fill(statusColor)
+                    .frame(width: 8, height: 8)
+
                 Text(session.title)
                     .font(.subheadline.weight(.semibold))
                     .lineLimit(1)
                     .minimumScaleFactor(0.82)
-                Text(session.terminalDescriptor)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
             }
-            .layoutPriority(1)
-            .frame(maxWidth: .infinity, alignment: .leading)
-
-            if session.bellCount > 0 {
-                Text("Bell \(session.bellCount)")
-                    .font(.caption.weight(.medium))
-                    .padding(.horizontal, 9)
-                    .padding(.vertical, 5)
-                    .background(ShellowTheme.warning.opacity(0.16), in: Capsule())
-                    .foregroundStyle(ShellowTheme.warning)
-                    .accessibilityLabel("Terminal bell \(session.bellCount)")
-            }
+            .padding(.horizontal, 12)
+            .frame(height: 34)
+            .frame(maxWidth: .infinity)
+            .background(ShellowTheme.panelBackground.opacity(0.94), in: RoundedRectangle(cornerRadius: 8))
+            .overlay(
+                RoundedRectangle(cornerRadius: 8)
+                    .stroke(ShellowTheme.keyBackground.opacity(0.7), lineWidth: 1)
+            )
 
             if session.state == .disconnected, let onReconnect {
                 Button(action: onReconnect) {
                     Image(systemName: "arrow.clockwise")
                         .font(.system(size: 14, weight: .semibold))
-                        .frame(width: 30, height: 30)
+                        .frame(width: 34, height: 34)
                 }
                 .buttonStyle(.plain)
                 .foregroundStyle(ShellowTheme.accent)
-                .background(ShellowTheme.accent.opacity(0.14), in: RoundedRectangle(cornerRadius: 8))
+                .background(ShellowTheme.accent.opacity(0.16), in: RoundedRectangle(cornerRadius: 8))
                 .accessibilityLabel("Reconnect Terminal")
             }
 
@@ -548,26 +604,15 @@ private struct SessionHeader: View {
                 Button(action: onDisconnect) {
                     Image(systemName: "power")
                         .font(.system(size: 14, weight: .semibold))
-                        .frame(width: 30, height: 30)
+                        .frame(width: 34, height: 34)
                 }
                 .buttonStyle(.plain)
                 .foregroundStyle(ShellowTheme.warning)
-                .background(ShellowTheme.warning.opacity(0.14), in: RoundedRectangle(cornerRadius: 8))
+                .background(ShellowTheme.warning.opacity(0.16), in: RoundedRectangle(cornerRadius: 8))
                 .accessibilityLabel("Disconnect Terminal")
             }
-
-            Text(session.state.title)
-                .font(.caption.weight(.medium))
-                .lineLimit(1)
-                .padding(.horizontal, 10)
-                .padding(.vertical, 5)
-                .background(statusColor.opacity(0.16), in: Capsule())
-                .foregroundStyle(statusColor)
-                .fixedSize(horizontal: true, vertical: false)
         }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 8)
-        .background(ShellowTheme.panelBackground)
+        .frame(height: TerminalChromeMetrics.floatingHeaderHeight)
     }
 
     private var statusColor: Color {
@@ -585,6 +630,10 @@ private struct TerminalViewport: View {
     let lineHeightScale: Double
     let search: TerminalSearchPresentation
     @Binding var selection: TerminalSelection?
+    let renderTick: Int
+    let contentTopInset: CGFloat
+    let contentBottomInset: CGFloat
+    let reserveBottomScrollSpace: Bool
     let onResizeTerminal: (Int, Int) -> Void
     let onAttachRendererSurface: (UInt64, Int, Int) -> Void
     let onSetRendererOverlay: (String) -> Void
@@ -610,21 +659,28 @@ private struct TerminalViewport: View {
                     ScrollViewReader { proxy in
                         ZStack(alignment: .bottomTrailing) {
                             ScrollView(.vertical) {
-                                TerminalGridSurface(
-                                    grid: grid,
-                                    fontSize: fontSize,
-                                    lineHeightScale: lineHeightScale,
-                                    scrollOffsetY: gridUsesDirectScrollGeometry ? gridScrollOffsetY : nil,
-                                    search: search,
-                                    selection: $selection,
-                                    onAttachRendererSurface: onAttachRendererSurface,
-                                    onSetRendererOverlay: onSetRendererOverlay,
-                                    onRenderRendererSurface: onRenderRendererSurface,
-                                    onDetachRendererSurface: onDetachRendererSurface,
-                                    sendInput: sendInput
-                                )
+                                VStack(alignment: .leading, spacing: 0) {
+                                    TerminalGridSurface(
+                                        grid: grid,
+                                        fontSize: fontSize,
+                                        lineHeightScale: lineHeightScale,
+                                        renderTick: renderTick,
+                                        scrollOffsetY: gridUsesDirectScrollGeometry ? gridScrollOffsetY : nil,
+                                        search: search,
+                                        selection: $selection,
+                                        onAttachRendererSurface: onAttachRendererSurface,
+                                        onSetRendererOverlay: onSetRendererOverlay,
+                                        onRenderRendererSurface: onRenderRendererSurface,
+                                        onDetachRendererSurface: onDetachRendererSurface,
+                                        sendInput: sendInput
+                                    )
                                     .padding(.horizontal, TerminalMetrics.viewportHorizontalPadding)
                                     .padding(.vertical, TerminalMetrics.viewportVerticalPadding)
+
+                                    Color.clear
+                                        .frame(height: 1)
+                                        .id(Self.bottomAnchorID)
+                                }
                             }
                             .scrollIndicators(.hidden)
                             .coordinateSpace(name: TerminalGridSurface.scrollCoordinateSpaceName)
@@ -663,6 +719,10 @@ private struct TerminalViewport: View {
                             guard search.isEmpty, !grid.lines.isEmpty, grid.activeScreen == .primary else { return }
                             scrollGridToBottom(proxy, lineCount: grid.lines.count)
                         }
+                        .onChange(of: reserveBottomScrollSpace) {
+                            guard search.isEmpty, !grid.lines.isEmpty, grid.activeScreen == .primary else { return }
+                            scrollGridToBottom(proxy, lineCount: grid.lines.count)
+                        }
                     }
                 } else {
                     ScrollViewReader { proxy in
@@ -670,21 +730,24 @@ private struct TerminalViewport: View {
                             ScrollView {
                                 LazyVStack(alignment: .leading, spacing: 6) {
                                     ForEach(Array(session.rows.enumerated()), id: \.element.id) { index, row in
-                                        Button {
+                                        TerminalRowView(
+                                            row: row,
+                                            fontSize: fontSize,
+                                            isSelected: selection?.containsHistory(row: index) == true,
+                                            isSearchMatch: search.containsHistory(row: index),
+                                            isActiveSearchMatch: search.activeHit == .history(index)
+                                        )
+                                        .contentShape(Rectangle())
+                                        .onLongPressGesture(minimumDuration: 0.35) {
                                             selection = selection?.extendingHistory(to: index) ?? .history(anchor: index, focus: index)
-                                        } label: {
-                                            TerminalRowView(
-                                                row: row,
-                                                fontSize: fontSize,
-                                                isSelected: selection?.containsHistory(row: index) == true,
-                                                isSearchMatch: search.containsHistory(row: index),
-                                                isActiveSearchMatch: search.activeHit == .history(index)
-                                            )
                                         }
-                                        .buttonStyle(.plain)
-                                        .accessibilityLabel("Select terminal row \(index + 1)")
+                                        .accessibilityLabel("Long press to select terminal row \(index + 1)")
                                         .id(TerminalSearchHit.history(index).id)
                                     }
+
+                                    Color.clear
+                                        .frame(height: 1)
+                                        .id(Self.bottomAnchorID)
                                 }
                                 .padding(.horizontal, TerminalMetrics.viewportHorizontalPadding)
                                 .padding(.vertical, TerminalMetrics.viewportVerticalPadding)
@@ -705,6 +768,10 @@ private struct TerminalViewport: View {
                             scrollHistoryToBottom(proxy, rowCount: session.rows.count, animated: false)
                         }
                         .onChange(of: session.rows.count) {
+                            guard search.isEmpty else { return }
+                            scrollHistoryToBottom(proxy, rowCount: session.rows.count)
+                        }
+                        .onChange(of: reserveBottomScrollSpace) {
                             guard search.isEmpty else { return }
                             scrollHistoryToBottom(proxy, rowCount: session.rows.count)
                         }
@@ -751,10 +818,14 @@ private struct TerminalViewport: View {
                 inputFocusNonce += 1
             }
             .onChange(of: geometry.size) { report(size: geometry.size) }
+            .onChange(of: contentTopInset) { report(size: geometry.size) }
+            .onChange(of: contentBottomInset) { report(size: geometry.size) }
             .onChange(of: fontSize) { report(size: geometry.size) }
             .onChange(of: lineHeightScale) { report(size: geometry.size) }
         }
     }
+
+    private static let bottomAnchorID = "terminal-bottom-anchor"
 
     private func report(size: CGSize) {
         let grid = TerminalGridSize(size: size, fontSize: fontSize, lineHeightScale: lineHeightScale)
@@ -765,13 +836,12 @@ private struct TerminalViewport: View {
 
     private func scrollGridToBottom(_ proxy: ScrollViewProxy, lineCount: Int, animated: Bool = true) {
         guard lineCount > 0 else { return }
-        let target = TerminalSearchHit.gridRowID(lineCount - 1)
         if animated {
             withAnimation(.snappy(duration: 0.18)) {
-                proxy.scrollTo(target, anchor: .bottomLeading)
+                proxy.scrollTo(Self.bottomAnchorID, anchor: .bottomLeading)
             }
         } else {
-            proxy.scrollTo(target, anchor: .bottomLeading)
+            proxy.scrollTo(Self.bottomAnchorID, anchor: .bottomLeading)
         }
     }
 
@@ -784,13 +854,12 @@ private struct TerminalViewport: View {
 
     private func scrollHistoryToBottom(_ proxy: ScrollViewProxy, rowCount: Int, animated: Bool = true) {
         guard rowCount > 0 else { return }
-        let target = TerminalSearchHit.history(rowCount - 1).id
         if animated {
             withAnimation(.snappy(duration: 0.18)) {
-                proxy.scrollTo(target, anchor: .bottom)
+                proxy.scrollTo(Self.bottomAnchorID, anchor: .bottom)
             }
         } else {
-            proxy.scrollTo(target, anchor: .bottom)
+            proxy.scrollTo(Self.bottomAnchorID, anchor: .bottom)
         }
     }
 
@@ -811,6 +880,7 @@ private struct TerminalGridSurface: View {
     let grid: TerminalGridSnapshot
     let fontSize: Double
     let lineHeightScale: Double
+    let renderTick: Int
     let scrollOffsetY: CGFloat?
     let search: TerminalSearchPresentation
     @Binding var selection: TerminalSelection?
@@ -819,7 +889,7 @@ private struct TerminalGridSurface: View {
     let onRenderRendererSurface: (Int, Int, Int, Int) -> Bool
     let onDetachRendererSurface: () -> Void
     let sendInput: (String) -> Void
-    @State private var activeMouseDragPoint: TerminalSelectionPoint?
+    @State private var activeSelectionDragAnchor: TerminalSelectionPoint?
     @State private var suppressNextMouseTap = false
     @State private var contentMinY = TerminalMetrics.viewportVerticalPadding
 
@@ -832,6 +902,7 @@ private struct TerminalGridSurface: View {
                 TerminalMetalGridSurface(
                     viewportFirstRow: currentViewportFirstRow,
                     viewportRowCount: currentViewportRowCount,
+                    renderTick: renderTick,
                     rendererOverlayJSON: rendererOverlayJSON,
                     attachRendererSurface: onAttachRendererSurface,
                     setRendererOverlay: onSetRendererOverlay,
@@ -847,15 +918,13 @@ private struct TerminalGridSurface: View {
             VStack(alignment: .leading, spacing: 0) {
                 ForEach(Array(grid.lines.enumerated()), id: \.offset) { row, _ in
                     Button {
+                        if suppressNextMouseTap {
+                            suppressNextMouseTap = false
+                            return
+                        }
                         if let mouseInput = grid.mousePressSequence(row: row, column: 0) {
-                            if suppressNextMouseTap {
-                                suppressNextMouseTap = false
-                                return
-                            }
                             selection = nil
                             sendInput(mouseInput)
-                        } else {
-                            selection = selection?.extendingGridRow(to: row) ?? .gridRow(row)
                         }
                     } label: {
                         Color.clear
@@ -864,49 +933,34 @@ private struct TerminalGridSurface: View {
                     }
                     .buttonStyle(.plain)
                     .simultaneousGesture(
-                        DragGesture(minimumDistance: 6)
+                        LongPressGesture(minimumDuration: 0.35)
+                            .sequenced(before: DragGesture(minimumDistance: 0))
                             .onChanged { value in
-                                if grid.mouseReporting, grid.mouseDragReporting {
-                                    selection = nil
-                                    let start = selectionPoint(from: value.startLocation, initialRow: row)
-                                    if activeMouseDragPoint == nil,
-                                       let press = grid.mouseEventSequence(
-                                           row: start.row,
-                                           column: start.column,
-                                           event: .press
-                                       ) {
-                                        sendInput(press)
-                                    }
-
-                                    let focus = selectionPoint(from: value.location, initialRow: row)
-                                    activeMouseDragPoint = focus
+                                switch value {
+                                case .first(true):
+                                    selection = .gridRow(row)
                                     suppressNextMouseTap = true
-                                    if let drag = grid.mouseEventSequence(
-                                        row: focus.row,
-                                        column: focus.column,
-                                        event: .drag
-                                    ) {
-                                        sendInput(drag)
-                                    }
+                                case .second(true, let drag?):
+                                    let start = activeSelectionDragAnchor
+                                        ?? selectionPoint(from: drag.startLocation, initialRow: row)
+                                    activeSelectionDragAnchor = start
+                                    let focus = selectionPoint(from: drag.location, initialRow: row)
+                                    selection = .grid(anchor: start, focus: focus)
+                                    suppressNextMouseTap = true
+                                default:
+                                    break
                                 }
                             }
                             .onEnded { value in
-                                guard grid.mouseReporting, grid.mouseDragReporting else { return }
-                                let releasePoint = activeMouseDragPoint
-                                    ?? selectionPoint(from: value.location, initialRow: row)
-                                if let release = grid.mouseEventSequence(
-                                    row: releasePoint.row,
-                                    column: releasePoint.column,
-                                    event: .release
-                                ) {
-                                    sendInput(release)
+                                if case .first(true) = value {
+                                    selection = .gridRow(row)
                                 }
-                                activeMouseDragPoint = nil
                                 suppressNextMouseTap = true
+                                activeSelectionDragAnchor = nil
                             },
-                        including: grid.mouseReporting && grid.mouseDragReporting ? .all : .subviews
+                        including: .all
                     )
-                    .accessibilityLabel(grid.mouseReporting ? "Send mouse event row \(row + 1)" : "Select terminal grid row \(row + 1)")
+                    .accessibilityLabel(grid.mouseReporting ? "Send mouse event row \(row + 1), long press to select" : "Long press to select terminal grid row \(row + 1)")
                     .id(TerminalSearchHit.gridRowID(row))
                 }
             }
@@ -1435,21 +1489,6 @@ private struct TerminalRowView: View {
     }
 }
 
-private struct IntegrationStrip: View {
-    let report: IntegrationReport
-
-    var body: some View {
-        HStack(spacing: 8) {
-            IntegrationPill(title: "VT", value: report.terminalBackend, isReady: report.ghosttyReady)
-            IntegrationPill(title: "SSH", value: report.sshBackend, isReady: report.russhReady)
-            IntegrationPill(title: "GPU", value: report.rendererBackend, isReady: report.wgpuReady)
-        }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 8)
-        .background(ShellowTheme.terminalBackground)
-    }
-}
-
 private struct TerminalSearchBar: View {
     @Binding var query: String
     @Binding var focusedIndex: Int
@@ -1505,9 +1544,12 @@ private struct TerminalSearchBar: View {
             .background(ShellowTheme.keyBackground, in: RoundedRectangle(cornerRadius: 8))
             .accessibilityLabel("Close Search")
         }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 8)
-        .background(ShellowTheme.panelBackground)
+        .padding(8)
+        .background(ShellowTheme.panelBackground.opacity(0.96), in: RoundedRectangle(cornerRadius: 8))
+        .overlay(
+            RoundedRectangle(cornerRadius: 8)
+                .stroke(ShellowTheme.keyBackground.opacity(0.7), lineWidth: 1)
+        )
     }
 
     private var matchText: String {
@@ -1562,27 +1604,84 @@ enum TerminalMetrics {
     }
 }
 
-private struct IntegrationPill: View {
-    let title: String
-    let value: String
-    let isReady: Bool
+private enum TerminalChromeMetrics {
+    static let floatingHeaderHeight: CGFloat = 42
+    static let floatingHeaderTopPadding: CGFloat = 8
+    static let cursorPadding: CGFloat = 18
+    static let searchHeight: CGFloat = 48
+    static let headerContentGap: CGFloat = 8
+    static let contentBottomGap: CGFloat = 8
+    static let fallbackSafeAreaTop: CGFloat = 52
+
+    static func topOverlayPadding(safeAreaTop: CGFloat) -> CGFloat {
+        max(safeAreaTop, fallbackSafeAreaTop) + floatingHeaderTopPadding
+    }
+
+    static func contentTopInset(safeAreaTop: CGFloat, showsSearch: Bool) -> CGFloat {
+        topOverlayPadding(safeAreaTop: safeAreaTop)
+            + floatingHeaderHeight
+            + headerContentGap
+            + (showsSearch ? searchHeight + headerContentGap : 0)
+    }
+
+    static func bottomReserve(showKeyboardToolbar: Bool) -> CGFloat {
+        showKeyboardToolbar ? 104 : 58
+    }
+}
+
+private struct TerminalControlsPanel: View {
+    @Binding var isSearchVisible: Bool
+    let selectedText: String?
+    let selectedLink: String?
+    let showKeyboardToolbar: Bool
+    @Binding var isCtrlArmed: Bool
+    @Binding var isAltArmed: Bool
+    let applicationCursorKeys: Bool
+    let onEnter: () -> Void
+    let onClearTerminal: () -> Void
+    let onResetTerminal: () -> Void
+    let onSaveTranscript: () -> Void
+    let onCopyTerminal: () -> Void
+    let onCopySelection: () -> Void
+    let onCopyLink: () -> Void
+    let clearSelection: () -> Void
+    let onPasteClipboard: () -> Void
+    let sendInput: (String) -> Void
 
     var body: some View {
-        HStack(spacing: 5) {
-            Circle()
-                .fill(isReady ? ShellowTheme.success : ShellowTheme.warning)
-                .frame(width: 6, height: 6)
-            Text(title)
-                .foregroundStyle(ShellowTheme.terminalMuted)
-            Text(value)
-                .lineLimit(1)
+        VStack(spacing: 8) {
+            TerminalInputBar(
+                isSearchVisible: $isSearchVisible,
+                selectedText: selectedText,
+                selectedLink: selectedLink,
+                onEnter: onEnter,
+                onClearTerminal: onClearTerminal,
+                onResetTerminal: onResetTerminal,
+                onSaveTranscript: onSaveTranscript,
+                onCopyTerminal: onCopyTerminal,
+                onCopySelection: onCopySelection,
+                onCopyLink: onCopyLink,
+                clearSelection: clearSelection,
+                onPasteClipboard: onPasteClipboard
+            )
+
+            if showKeyboardToolbar {
+                TerminalKeyboardToolbar(
+                    isCtrlArmed: $isCtrlArmed,
+                    isAltArmed: $isAltArmed,
+                    applicationCursorKeys: applicationCursorKeys,
+                    sendInput: sendInput
+                )
+            }
         }
-        .font(.caption2.weight(.medium))
-        .foregroundStyle(ShellowTheme.terminalText)
-        .padding(.horizontal, 8)
-        .padding(.vertical, 5)
-        .frame(maxWidth: .infinity)
-        .background(ShellowTheme.keyBackground, in: RoundedRectangle(cornerRadius: 8))
+        .padding(.horizontal, 12)
+        .padding(.vertical, 10)
+        .background(ShellowTheme.panelBackground.opacity(0.97))
+        .overlay(alignment: .top) {
+            Rectangle()
+                .fill(ShellowTheme.keyBackground.opacity(0.85))
+                .frame(height: 1)
+        }
     }
 }
 
@@ -1601,86 +1700,82 @@ private struct TerminalInputBar: View {
     let onPasteClipboard: () -> Void
 
     var body: some View {
-        VStack(spacing: 0) {
-            HStack(spacing: 10) {
-                ScrollView(.horizontal) {
-                    HStack(spacing: 10) {
-                        TerminalIconButton(
-                            systemName: "trash",
-                            accessibilityLabel: "Clear Terminal",
-                            action: onClearTerminal
-                        )
-                        TerminalIconButton(
-                            systemName: "arrow.counterclockwise",
-                            accessibilityLabel: "Reset Terminal",
-                            action: onResetTerminal
-                        )
-                        TerminalIconButton(
-                            systemName: "square.and.arrow.down",
-                            accessibilityLabel: "Save Transcript",
-                            action: onSaveTranscript
-                        )
-                        TerminalIconButton(
-                            systemName: "doc.on.doc",
-                            accessibilityLabel: "Copy Terminal",
-                            action: onCopyTerminal
-                        )
-                        TerminalIconButton(
-                            systemName: "magnifyingglass",
-                            accessibilityLabel: "Search Terminal",
-                            foreground: isSearchVisible ? ShellowTheme.accent : ShellowTheme.terminalText
-                        ) {
-                            isSearchVisible.toggle()
-                        }
+        HStack(spacing: 10) {
+            ScrollView(.horizontal) {
+                HStack(spacing: 10) {
+                    TerminalIconButton(
+                        systemName: "trash",
+                        accessibilityLabel: "Clear Terminal",
+                        action: onClearTerminal
+                    )
+                    TerminalIconButton(
+                        systemName: "arrow.counterclockwise",
+                        accessibilityLabel: "Reset Terminal",
+                        action: onResetTerminal
+                    )
+                    TerminalIconButton(
+                        systemName: "square.and.arrow.down",
+                        accessibilityLabel: "Save Transcript",
+                        action: onSaveTranscript
+                    )
+                    TerminalIconButton(
+                        systemName: "doc.on.doc",
+                        accessibilityLabel: "Copy Terminal",
+                        action: onCopyTerminal
+                    )
+                    TerminalIconButton(
+                        systemName: "magnifyingglass",
+                        accessibilityLabel: "Search Terminal",
+                        foreground: isSearchVisible ? ShellowTheme.accent : ShellowTheme.terminalText
+                    ) {
+                        isSearchVisible.toggle()
+                    }
 
-                        if selectedText != nil {
+                    if selectedText != nil {
+                        TerminalIconButton(
+                            systemName: "doc.on.doc.fill",
+                            accessibilityLabel: "Copy Selection",
+                            foreground: ShellowTheme.accent,
+                            action: onCopySelection
+                        )
+
+                        if selectedLink != nil {
                             TerminalIconButton(
-                                systemName: "doc.on.doc.fill",
-                                accessibilityLabel: "Copy Selection",
+                                systemName: "link",
+                                accessibilityLabel: "Copy Link",
                                 foreground: ShellowTheme.accent,
-                                action: onCopySelection
-                            )
-
-                            if selectedLink != nil {
-                                TerminalIconButton(
-                                    systemName: "link",
-                                    accessibilityLabel: "Copy Link",
-                                    foreground: ShellowTheme.accent,
-                                    action: onCopyLink
-                                )
-                            }
-
-                            TerminalIconButton(
-                                systemName: "xmark.circle",
-                                accessibilityLabel: "Clear Selection",
-                                action: clearSelection
+                                action: onCopyLink
                             )
                         }
 
                         TerminalIconButton(
-                            systemName: "doc.on.clipboard",
-                            accessibilityLabel: "Paste",
-                            action: onPasteClipboard
+                            systemName: "xmark.circle",
+                            accessibilityLabel: "Clear Selection",
+                            action: clearSelection
                         )
                     }
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                }
-                .scrollIndicators(.hidden)
-                .frame(maxWidth: .infinity)
 
-                TerminalIconButton(
-                    systemName: "return",
-                    accessibilityLabel: "Enter",
-                    foreground: .white,
-                    background: ShellowTheme.accent,
-                    action: onEnter
-                )
-                .fixedSize()
+                    TerminalIconButton(
+                        systemName: "doc.on.clipboard",
+                        accessibilityLabel: "Paste",
+                        action: onPasteClipboard
+                    )
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
+            .scrollIndicators(.hidden)
+            .frame(maxWidth: .infinity)
+
+            TerminalIconButton(
+                systemName: "return",
+                accessibilityLabel: "Enter",
+                foreground: .white,
+                background: ShellowTheme.accent,
+                action: onEnter
+            )
+            .fixedSize()
         }
-        .padding(12)
-        .background(ShellowTheme.panelBackground)
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 
@@ -1798,9 +1893,6 @@ private struct TerminalKeyboardToolbar: View {
         }
         .scrollIndicators(.hidden)
         .foregroundStyle(ShellowTheme.terminalText)
-        .padding(.horizontal, 12)
-        .padding(.vertical, 8)
-        .background(ShellowTheme.panelBackground)
     }
 
     private func sendWithOptionalAlt(_ input: String) {
@@ -2259,17 +2351,50 @@ private extension TerminalSelection {
 }
 
 private extension TerminalSession {
-    var terminalDescriptor: String {
-        let size = "\(terminalCols)x\(terminalRows)"
-        guard let grid else {
-            return "\(host)  \(size)"
+    func cursorBottomY(
+        fontSize: Double,
+        lineHeightScale: Double,
+        viewportHeight: CGFloat,
+        topOffset: CGFloat
+    ) -> CGFloat? {
+        let rowHeight = TerminalMetrics.rowHeight(fontSize: fontSize, lineHeightScale: lineHeightScale)
+        let contentHeight = max(rowHeight, viewportHeight - TerminalMetrics.viewportVerticalPadding * 2)
+        let visibleRowCapacity = max(1, Int(contentHeight / rowHeight))
+
+        guard let row = focusedCursorViewportRow(visibleRowCapacity: visibleRowCapacity) else {
+            return nil
         }
-        var parts = [host, size]
-        if grid.scrollbackLen > 0, grid.activeScreen == .primary {
-            parts.append("sb \(grid.scrollbackLen)")
+
+        return topOffset
+            + TerminalMetrics.viewportVerticalPadding
+            + CGFloat(row + 1) * rowHeight
+    }
+
+    private func focusedCursorViewportRow(visibleRowCapacity: Int) -> Int? {
+        if let grid, grid.hasVisibleContent || grid.activeScreen == .alternate {
+            guard grid.cursorVisible else { return nil }
+
+            let totalRows = max(grid.lines.count, Int(grid.rows))
+            let cursorRow = max(0, min(grid.cursorRow, max(0, totalRows - 1)))
+            let firstVisibleRow: Int
+
+            if grid.activeScreen == .alternate {
+                firstVisibleRow = 0
+            } else {
+                let maxFirstRow = max(0, totalRows - visibleRowCapacity)
+                firstVisibleRow = max(0, min(cursorRow - visibleRowCapacity + 1, maxFirstRow))
+            }
+
+            return max(0, min(cursorRow - firstVisibleRow, visibleRowCapacity - 1))
         }
-        parts.append("dirty \(grid.dirtyRows.count)")
-        return parts.joined(separator: "  ")
+
+        guard !rows.isEmpty else { return nil }
+
+        let totalRows = max(rows.count, terminalRows)
+        let cursorRow = rows.count - 1
+        let maxFirstRow = max(0, totalRows - visibleRowCapacity)
+        let firstVisibleRow = max(0, min(cursorRow - visibleRowCapacity + 1, maxFirstRow))
+        return max(0, min(cursorRow - firstVisibleRow, visibleRowCapacity - 1))
     }
 
     var isAlternateScreenActive: Bool {
@@ -2460,6 +2585,7 @@ enum ShellowTheme {
     TerminalScreen(
         session: .constant(.preview),
         settings: ShellowSettings(),
+        renderTick: 0,
         onTerminalInput: { _ in },
         onReconnect: nil,
         onDisconnect: {},

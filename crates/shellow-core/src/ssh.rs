@@ -28,6 +28,8 @@ pub fn demo_transport_summary() -> String {
 
 pub const DEFAULT_LIVE_KEEPALIVE_INTERVAL_SECS: u64 = 30;
 pub const DEFAULT_KEEPALIVE_MAX: usize = 3;
+const DEFAULT_PTY_TERM: &str = "xterm-256color";
+const DEFAULT_COLORTERM: &str = "truecolor";
 
 pub fn keepalive_policy_summary(interval_secs: Option<u64>, max: usize) -> String {
     match interval_secs {
@@ -118,6 +120,7 @@ pub struct LiveShellHandle {
     input: tokio::sync::mpsc::UnboundedSender<LiveShellInput>,
     output: std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
     status: std::sync::Arc<std::sync::Mutex<LiveShellStatus>>,
+    revision: std::sync::Arc<std::sync::atomic::AtomicU64>,
 }
 
 #[cfg(feature = "native-integrations")]
@@ -130,8 +133,10 @@ impl LiveShellHandle {
         let (input, receiver) = tokio::sync::mpsc::unbounded_channel();
         let output = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let status = std::sync::Arc::new(std::sync::Mutex::new(LiveShellStatus::Connecting));
+        let revision = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(1));
         let thread_output = std::sync::Arc::clone(&output);
         let thread_status = std::sync::Arc::clone(&status);
+        let thread_revision = std::sync::Arc::clone(&revision);
 
         std::thread::Builder::new()
             .name("shellow-live-russh".to_string())
@@ -145,6 +150,7 @@ impl LiveShellHandle {
                     Err(error) => {
                         set_live_status(
                             &thread_status,
+                            &thread_revision,
                             LiveShellStatus::Failed(format!("tokio runtime failed: {error}")),
                         );
                         return;
@@ -156,6 +162,7 @@ impl LiveShellHandle {
                     receiver,
                     thread_output,
                     thread_status,
+                    thread_revision,
                 ));
             })
             .map_err(|error| format!("failed to spawn russh shell thread: {error}"))?;
@@ -164,6 +171,7 @@ impl LiveShellHandle {
             input,
             output,
             status,
+            revision,
         })
     }
 
@@ -188,6 +196,10 @@ impl LiveShellHandle {
             output: take_live_output(&self.output),
             status: get_live_status(&self.status),
         }
+    }
+
+    pub fn event_revision(&self) -> u64 {
+        self.revision.load(std::sync::atomic::Ordering::Acquire)
     }
 }
 
@@ -237,19 +249,14 @@ async fn run_live_shell(
     mut receiver: tokio::sync::mpsc::UnboundedReceiver<LiveShellInput>,
     output: std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
     status: std::sync::Arc<std::sync::Mutex<LiveShellStatus>>,
+    revision: std::sync::Arc<std::sync::atomic::AtomicU64>,
 ) {
-    let auth_label = options.auth.label();
-    append_live_output(
-        &output,
-        format!("russh {auth_label} authentication starting\r\n").as_bytes(),
-    );
-
     let mut actor = match RusshSessionActor::connect(options).await {
         Ok(actor) => actor,
         Err(error) => {
-            append_live_output(&output, error.as_bytes());
-            append_live_output(&output, b"\r\n");
-            set_live_status(&status, LiveShellStatus::Failed(error));
+            append_live_output(&output, &revision, error.as_bytes());
+            append_live_output(&output, &revision, b"\r\n");
+            set_live_status(&status, &revision, LiveShellStatus::Failed(error));
             return;
         }
     };
@@ -257,8 +264,9 @@ async fn run_live_shell(
     let channel_result = async {
         let channel = actor.session.channel_open_session().await?;
         channel
-            .request_pty(false, "xterm-256color", actor.cols, actor.rows, 0, 0, &[])
+            .request_pty(false, DEFAULT_PTY_TERM, actor.cols, actor.rows, 0, 0, &[])
             .await?;
+        let _ = channel.set_env(false, "COLORTERM", DEFAULT_COLORTERM).await;
         channel.request_shell(true).await?;
         Ok::<_, russh::Error>(channel)
     }
@@ -268,18 +276,18 @@ async fn run_live_shell(
         Ok(channel) => channel,
         Err(error) => {
             let message = format!("ssh pty/shell request failed: {error}");
-            append_live_output(&output, message.as_bytes());
-            append_live_output(&output, b"\r\n");
-            set_live_status(&status, LiveShellStatus::Failed(message));
+            append_live_output(&output, &revision, message.as_bytes());
+            append_live_output(&output, &revision, b"\r\n");
+            set_live_status(&status, &revision, LiveShellStatus::Failed(message));
             let _ = actor.disconnect().await;
             return;
         }
     };
 
     let (mut read_half, write_half) = channel.split();
-    append_live_output(&output, b"russh live shell connected\r\n");
     set_live_status(
         &status,
+        &revision,
         LiveShellStatus::Connected {
             observed_host_key_sha256: actor.observed_host_key_sha256.clone(),
         },
@@ -291,9 +299,9 @@ async fn run_live_shell(
                 LiveShellInput::Bytes(bytes) => {
                     if let Err(error) = write_half.data_bytes(bytes).await {
                         let message = format!("ssh input failed: {error}");
-                        append_live_output(&output, message.as_bytes());
-                        append_live_output(&output, b"\r\n");
-                        set_live_status(&status, LiveShellStatus::Failed(message));
+                        append_live_output(&output, &revision, message.as_bytes());
+                        append_live_output(&output, &revision, b"\r\n");
+                        set_live_status(&status, &revision, LiveShellStatus::Failed(message));
                         let _ = write_half.close().await;
                         let _ = actor.disconnect().await;
                         return;
@@ -302,9 +310,9 @@ async fn run_live_shell(
                 LiveShellInput::Resize { cols, rows } => {
                     if let Err(error) = write_half.window_change(cols, rows, 0, 0).await {
                         let message = format!("ssh window-change failed: {error}");
-                        append_live_output(&output, message.as_bytes());
-                        append_live_output(&output, b"\r\n");
-                        set_live_status(&status, LiveShellStatus::Failed(message));
+                        append_live_output(&output, &revision, message.as_bytes());
+                        append_live_output(&output, &revision, b"\r\n");
+                        set_live_status(&status, &revision, LiveShellStatus::Failed(message));
                         let _ = write_half.close().await;
                         let _ = actor.disconnect().await;
                         return;
@@ -313,20 +321,22 @@ async fn run_live_shell(
                 LiveShellInput::Disconnect => {
                     let _ = write_half.close().await;
                     let _ = actor.disconnect().await;
-                    set_live_status(&status, LiveShellStatus::Closed);
+                    set_live_status(&status, &revision, LiveShellStatus::Closed);
                     return;
                 }
             }
         }
 
         match tokio::time::timeout(std::time::Duration::from_millis(40), read_half.wait()).await {
-            Ok(Some(russh::ChannelMsg::Data { data })) => append_live_output(&output, &data),
+            Ok(Some(russh::ChannelMsg::Data { data })) => {
+                append_live_output(&output, &revision, &data)
+            }
             Ok(Some(russh::ChannelMsg::ExtendedData { data, .. })) => {
-                append_live_output(&output, &data)
+                append_live_output(&output, &revision, &data)
             }
             Ok(Some(russh::ChannelMsg::ExitStatus { .. })) => {}
             Ok(Some(russh::ChannelMsg::Close)) | Ok(None) => {
-                set_live_status(&status, LiveShellStatus::Closed);
+                set_live_status(&status, &revision, LiveShellStatus::Closed);
                 let _ = actor.disconnect().await;
                 return;
             }
@@ -336,8 +346,16 @@ async fn run_live_shell(
 }
 
 #[cfg(feature = "native-integrations")]
-fn append_live_output(output: &std::sync::Arc<std::sync::Mutex<Vec<u8>>>, bytes: &[u8]) {
+fn append_live_output(
+    output: &std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
+    revision: &std::sync::Arc<std::sync::atomic::AtomicU64>,
+    bytes: &[u8],
+) {
     const MAX_BUFFERED_BYTES: usize = 128 * 1024;
+
+    if bytes.is_empty() {
+        return;
+    }
 
     if let Ok(mut output) = output.lock() {
         output.extend_from_slice(bytes);
@@ -345,6 +363,7 @@ fn append_live_output(output: &std::sync::Arc<std::sync::Mutex<Vec<u8>>>, bytes:
             let drain = output.len() - MAX_BUFFERED_BYTES;
             output.drain(..drain);
         }
+        revision.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
     }
 }
 
@@ -359,10 +378,14 @@ fn take_live_output(output: &std::sync::Arc<std::sync::Mutex<Vec<u8>>>) -> Vec<u
 #[cfg(feature = "native-integrations")]
 fn set_live_status(
     status: &std::sync::Arc<std::sync::Mutex<LiveShellStatus>>,
+    revision: &std::sync::Arc<std::sync::atomic::AtomicU64>,
     next: LiveShellStatus,
 ) {
     if let Ok(mut status) = status.lock() {
-        *status = next;
+        if *status != next {
+            *status = next;
+            revision.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        }
     }
 }
 
@@ -467,8 +490,9 @@ impl RusshSessionActor {
     pub async fn exec_collect_text(&mut self, command: &str) -> Result<String, russh::Error> {
         let mut channel = self.session.channel_open_session().await?;
         channel
-            .request_pty(false, "xterm-256color", self.cols, self.rows, 0, 0, &[])
+            .request_pty(false, DEFAULT_PTY_TERM, self.cols, self.rows, 0, 0, &[])
             .await?;
+        let _ = channel.set_env(false, "COLORTERM", DEFAULT_COLORTERM).await;
         channel.exec(true, command).await?;
 
         let mut output = Vec::new();

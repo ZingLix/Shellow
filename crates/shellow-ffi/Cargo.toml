@@ -9,7 +9,7 @@ rust-version.workspace = true
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [features]
-default = []
+default = ["native-integrations"]
 native-integrations = ["shellow-core/native-integrations"]
 
 [dependencies]

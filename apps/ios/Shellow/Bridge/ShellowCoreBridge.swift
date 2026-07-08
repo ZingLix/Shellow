@@ -61,18 +61,26 @@ final class ShellowCoreSession: @unchecked Sendable {
     }
 
     func renderRendererSurfaceFrame(width: Int, height: Int, firstRow: Int, rowCount: Int) -> Bool {
-        let json = renderFrameJSON(width: width, height: height, firstRow: firstRow, rowCount: rowCount)
-        guard let data = json.data(using: .utf8),
-              let report = try? decoder.decode(RendererFrameReport.self, from: data)
-        else {
-            return false
+        withLockedEngine {
+            shellow_engine_render_surface_frame_presented(
+                engine,
+                UInt32(clamping: width),
+                UInt32(clamping: height),
+                UInt32(clamping: firstRow),
+                UInt32(clamping: rowCount)
+            )
         }
-        return report.nativeSurfaceTerminalFramePresentedThisFrame
     }
 
     func rendererInfoJSON() -> String {
         withLockedEngine {
             takeString(shellow_engine_renderer_info_json(engine))
+        }
+    }
+
+    func liveShellEventRevision() -> UInt64 {
+        withLockedEngine {
+            shellow_engine_live_shell_event_revision(engine)
         }
     }
 

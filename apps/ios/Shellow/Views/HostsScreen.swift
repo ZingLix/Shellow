@@ -2,7 +2,7 @@ import SwiftUI
 
 struct HostsScreen: View {
     @Binding var profiles: [HostProfile]
-    @Binding var selectedTab: AppTab
+    let onOpenSettings: () -> Void
     let connectPreview: (HostProfile) -> Void
     let connectPassword: (HostProfile, String, String) -> Void
     let connectPrivateKey: (HostProfile, String, String?, String) -> Void
@@ -19,94 +19,97 @@ struct HostsScreen: View {
     @State private var livePrivateKey = ""
     @State private var liveKeyPassphrase = ""
     @State private var liveCommand = ""
+    @State private var isAddingProfile = false
 
     var body: some View {
-        NavigationStack {
-            List {
-                Section("Profiles") {
-                    ForEach(profiles) { profile in
-                        Button {
-                            if profile.authentication == .password {
-                                livePassword = ""
-                                liveCommand = ""
-                                selectedPasswordProfile = profile
-                            } else {
-                                livePrivateKey = ""
-                                liveKeyPassphrase = ""
-                                liveCommand = ""
-                                selectedPrivateKeyProfile = profile
-                            }
-                        } label: {
-                            HostProfileRow(profile: profile)
-                        }
-                        .buttonStyle(.plain)
-                    }
-                }
-
-                Section("New Profile") {
-                    TextField("Name", text: $draftName)
-                    TextField("Host", text: $draftHost)
-                        .textInputAutocapitalization(.never)
-                        .autocorrectionDisabled()
-                    TextField("Port", text: $draftPort)
-                        .keyboardType(.numberPad)
-                    TextField("User", text: $draftUser)
-                        .textInputAutocapitalization(.never)
-                        .autocorrectionDisabled()
-                    TextField("Host key SHA256", text: $draftHostKeyFingerprint)
-                        .textInputAutocapitalization(.never)
-                        .autocorrectionDisabled()
-                        .font(.system(.body, design: .monospaced))
-
-                    Picker("Auth", selection: $authentication) {
-                        ForEach(AuthenticationKind.allCases) { kind in
-                            Text(kind.title).tag(kind)
-                        }
-                    }
-
+        List {
+            Section("Hosts") {
+                ForEach(profiles) { profile in
                     Button {
-                        addProfile()
+                        open(profile)
                     } label: {
-                        Label("Add Host", systemImage: "plus")
+                        HostProfileRow(profile: profile)
                     }
-                    .disabled(!canAddProfile)
+                    .buttonStyle(.plain)
                 }
             }
-            .navigationTitle("Hosts")
-            .sheet(item: $selectedPasswordProfile) { profile in
-                LiveSSHPasswordSheet(
-                    profile: profile,
-                    password: $livePassword,
-                    command: $liveCommand,
-                    connect: { password, command in
-                        connectPassword(profile, password, command)
-                        selectedPasswordProfile = nil
-                    }
-                )
-                .presentationDetents([.medium])
+        }
+        .navigationTitle("Shellow")
+        .toolbar {
+            ToolbarItem(placement: .topBarLeading) {
+                Button(action: onOpenSettings) {
+                    Image(systemName: "gearshape")
+                }
+                .accessibilityLabel("Settings")
             }
-            .sheet(item: $selectedPrivateKeyProfile) { profile in
-                LiveSSHPrivateKeySheet(
-                    profile: profile,
-                    privateKey: $livePrivateKey,
-                    passphrase: $liveKeyPassphrase,
-                    command: $liveCommand,
-                    preview: {
-                        connectPreview(profile)
-                        selectedPrivateKeyProfile = nil
-                    },
-                    connect: { privateKeyPEM, passphrase, command in
-                        connectPrivateKey(
-                            profile,
-                            privateKeyPEM,
-                            passphrase,
-                            command
-                        )
-                        selectedPrivateKeyProfile = nil
-                    }
-                )
-                .presentationDetents([.large])
+
+            ToolbarItem(placement: .topBarTrailing) {
+                Button {
+                    isAddingProfile = true
+                } label: {
+                    Image(systemName: "plus")
+                }
+                .accessibilityLabel("Add Host")
             }
+        }
+        .sheet(isPresented: $isAddingProfile) {
+            NewHostProfileSheet(
+                draftName: $draftName,
+                draftHost: $draftHost,
+                draftPort: $draftPort,
+                draftUser: $draftUser,
+                draftHostKeyFingerprint: $draftHostKeyFingerprint,
+                authentication: $authentication,
+                addProfile: addProfile
+            )
+            .presentationDetents([.large])
+        }
+        .sheet(item: $selectedPasswordProfile) { profile in
+            LiveSSHPasswordSheet(
+                profile: profile,
+                password: $livePassword,
+                command: $liveCommand,
+                connect: { password, command in
+                    connectPassword(profile, password, command)
+                    selectedPasswordProfile = nil
+                }
+            )
+            .presentationDetents([.medium])
+        }
+        .sheet(item: $selectedPrivateKeyProfile) { profile in
+            LiveSSHPrivateKeySheet(
+                profile: profile,
+                privateKey: $livePrivateKey,
+                passphrase: $liveKeyPassphrase,
+                command: $liveCommand,
+                preview: {
+                    connectPreview(profile)
+                    selectedPrivateKeyProfile = nil
+                },
+                connect: { privateKeyPEM, passphrase, command in
+                    connectPrivateKey(
+                        profile,
+                        privateKeyPEM,
+                        passphrase,
+                        command
+                    )
+                    selectedPrivateKeyProfile = nil
+                }
+            )
+            .presentationDetents([.large])
+        }
+    }
+
+    private func open(_ profile: HostProfile) {
+        if profile.authentication == .password {
+            livePassword = ""
+            liveCommand = ""
+            selectedPasswordProfile = profile
+        } else {
+            livePrivateKey = ""
+            liveKeyPassphrase = ""
+            liveCommand = ""
+            selectedPrivateKeyProfile = profile
         }
     }
 
@@ -144,6 +147,70 @@ struct HostsScreen: View {
         return value.isEmpty ? nil : value
     }
 
+}
+
+private struct NewHostProfileSheet: View {
+    @Binding var draftName: String
+    @Binding var draftHost: String
+    @Binding var draftPort: String
+    @Binding var draftUser: String
+    @Binding var draftHostKeyFingerprint: String
+    @Binding var authentication: AuthenticationKind
+    let addProfile: () -> Void
+
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section("Connection") {
+                    TextField("Name", text: $draftName)
+                    TextField("Host", text: $draftHost)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                    TextField("Port", text: $draftPort)
+                        .keyboardType(.numberPad)
+                    TextField("User", text: $draftUser)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                }
+
+                Section("Authentication") {
+                    Picker("Auth", selection: $authentication) {
+                        ForEach(AuthenticationKind.allCases) { kind in
+                            Text(kind.title).tag(kind)
+                        }
+                    }
+
+                    TextField("Host key SHA256", text: $draftHostKeyFingerprint)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                        .font(.system(.body, design: .monospaced))
+                }
+            }
+            .navigationTitle("New Host")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") {
+                        dismiss()
+                    }
+                }
+
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Add") {
+                        addProfile()
+                        dismiss()
+                    }
+                    .disabled(!canAddProfile)
+                }
+            }
+        }
+    }
+
+    private var canAddProfile: Bool {
+        !draftName.isEmpty && !draftHost.isEmpty && !draftUser.isEmpty && Int(draftPort) != nil
+    }
 }
 
 private struct LiveSSHPasswordSheet: View {
@@ -273,7 +340,7 @@ private struct LiveSSHPrivateKeySheet: View {
                     Button {
                         preview()
                     } label: {
-                        Label("Preview Connection Metadata", systemImage: "terminal")
+                        Label("Preview Terminal", systemImage: "terminal")
                     }
                 }
 
@@ -419,6 +486,10 @@ private struct HostProfileRow: View {
             Text(profile.authentication.title)
                 .font(.caption.weight(.medium))
                 .foregroundStyle(.secondary)
+
+            Image(systemName: "chevron.right")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.tertiary)
         }
         .padding(.vertical, 4)
     }
@@ -427,7 +498,7 @@ private struct HostProfileRow: View {
 #Preview {
     HostsScreen(
         profiles: .constant(HostProfile.samples),
-        selectedTab: .constant(.hosts),
+        onOpenSettings: {},
         connectPreview: { _ in },
         connectPassword: { _, _, _ in },
         connectPrivateKey: { _, _, _, _ in }

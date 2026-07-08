@@ -3,6 +3,8 @@ package xyz.zinglix.shellow.core
 import android.view.Surface
 import java.io.Closeable
 import java.util.UUID
+import java.util.concurrent.locks.ReentrantLock
+import kotlin.concurrent.withLock
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -150,9 +152,9 @@ data class TerminalSession(
         rows =
           listOf(
             TerminalRow("$", "ssh ${profile.endpoint}", TerminalRowStyle.Command),
-            TerminalRow("", "waiting for russh password authentication", TerminalRowStyle.Muted),
+            TerminalRow("", "Connecting...", TerminalRowStyle.Muted),
             TerminalRow("$", "", TerminalRowStyle.Prompt),
-        ),
+          ),
         grid = null,
         cursorColumn = 0,
         terminalCols = 80,
@@ -402,6 +404,7 @@ data class IntegrationReport(
 }
 
 class ShellowCoreSession : Closeable {
+  private val lock = ReentrantLock()
   private var initFailure: String? = null
   private var handle =
     try {
@@ -415,14 +418,10 @@ class ShellowCoreSession : Closeable {
       0L
     }
 
-  fun snapshot() = decode { ShellowNative.nativeSnapshotJson(handle) }
+  fun snapshot() = decode { current -> ShellowNative.nativeSnapshotJson(current) }
 
   fun renderFrameJson(widthPx: Int, heightPx: Int): String =
-    if (handle == 0L) {
-      "{\"error\":${JSONObject.quote(initFailure ?: "native engine is not available")}}"
-    } else {
-      ShellowNative.nativeRenderFrameJson(handle, widthPx, heightPx)
-    }
+    nativeJson { current -> ShellowNative.nativeRenderFrameJson(current, widthPx, heightPx) }
 
   fun renderFrameViewportJson(
     widthPx: Int,
@@ -430,35 +429,23 @@ class ShellowCoreSession : Closeable {
     firstRow: Int,
     rowCount: Int,
   ): String =
-    if (handle == 0L) {
-      "{\"error\":${JSONObject.quote(initFailure ?: "native engine is not available")}}"
-    } else {
-      ShellowNative.nativeRenderFrameViewportJson(handle, widthPx, heightPx, firstRow, rowCount)
+    nativeJson { current ->
+      ShellowNative.nativeRenderFrameViewportJson(current, widthPx, heightPx, firstRow, rowCount)
     }
 
   fun rendererInfoJson(): String =
-    if (handle == 0L) {
-      "{\"error\":${JSONObject.quote(initFailure ?: "native engine is not available")}}"
-    } else {
-      ShellowNative.nativeRendererInfoJson(handle)
-    }
+    nativeJson { current -> ShellowNative.nativeRendererInfoJson(current) }
 
   fun setRendererOverlayJson(overlayJson: String): String =
-    if (handle == 0L) {
-      "{\"error\":${JSONObject.quote(initFailure ?: "native engine is not available")}}"
-    } else {
-      ShellowNative.nativeSetRendererOverlayJson(handle, overlayJson)
-    }
+    nativeJson { current -> ShellowNative.nativeSetRendererOverlayJson(current, overlayJson) }
 
   fun attachAndroidNativeWindow(
     rawHandle: Long,
     widthPx: Int,
     heightPx: Int,
   ): String =
-    if (handle == 0L) {
-      "{\"error\":${JSONObject.quote(initFailure ?: "native engine is not available")}}"
-    } else {
-      ShellowNative.nativeAttachAndroidNativeWindowJson(handle, rawHandle, widthPx, heightPx)
+    nativeJson { current ->
+      ShellowNative.nativeAttachAndroidNativeWindowJson(current, rawHandle, widthPx, heightPx)
     }
 
   fun attachAndroidSurface(
@@ -466,10 +453,8 @@ class ShellowCoreSession : Closeable {
     widthPx: Int,
     heightPx: Int,
   ): String =
-    if (handle == 0L) {
-      "{\"error\":${JSONObject.quote(initFailure ?: "native engine is not available")}}"
-    } else {
-      ShellowNative.nativeAttachAndroidSurfaceJson(handle, surface, widthPx, heightPx)
+    nativeJson { current ->
+      ShellowNative.nativeAttachAndroidSurfaceJson(current, surface, widthPx, heightPx)
     }
 
   fun renderRendererSurfaceFrame(
@@ -478,34 +463,37 @@ class ShellowCoreSession : Closeable {
     firstRow: Int,
     rowCount: Int,
   ): Boolean =
-    try {
-      JSONObject(renderFrameViewportJson(widthPx, heightPx, firstRow, rowCount))
-        .optBoolean("native_surface_terminal_frame_presented_this_frame", false)
-    } catch (_: Throwable) {
-      false
+    lock.withLock {
+      val current = handle
+      current != 0L && ShellowNative.nativeRenderSurfaceFramePresented(current, widthPx, heightPx, firstRow, rowCount)
+    }
+
+  fun liveShellEventRevision(): Long =
+    lock.withLock {
+      val current = handle
+      if (current == 0L) 0L else ShellowNative.nativeLiveShellEventRevision(current)
     }
 
   fun detachRendererSurface(): String =
-    if (handle == 0L) {
-      "{\"error\":${JSONObject.quote(initFailure ?: "native engine is not available")}}"
-    } else {
-      ShellowNative.nativeDetachRendererSurfaceJson(handle)
-    }
+    nativeJson { current -> ShellowNative.nativeDetachRendererSurfaceJson(current) }
 
-  fun sendCommand(command: String) = decode { ShellowNative.nativeSendCommandJson(handle, command) }
+  fun sendCommand(command: String) =
+    decode { current -> ShellowNative.nativeSendCommandJson(current, command) }
 
-  fun sendTerminalInput(input: String) = decode { ShellowNative.nativeSendTerminalInputJson(handle, input) }
+  fun sendTerminalInput(input: String) =
+    decode { current -> ShellowNative.nativeSendTerminalInputJson(current, input) }
 
-  fun resizeTerminal(cols: Int, rows: Int) = decode { ShellowNative.nativeResizeTerminalJson(handle, cols, rows) }
+  fun resizeTerminal(cols: Int, rows: Int) =
+    decode { current -> ShellowNative.nativeResizeTerminalJson(current, cols, rows) }
 
-  fun clearTerminal() = decode { ShellowNative.nativeClearTerminalJson(handle) }
+  fun clearTerminal() = decode { current -> ShellowNative.nativeClearTerminalJson(current) }
 
-  fun resetTerminal() = decode { ShellowNative.nativeResetTerminalJson(handle) }
+  fun resetTerminal() = decode { current -> ShellowNative.nativeResetTerminalJson(current) }
 
   fun connectPreview(profile: HostProfile) =
-    decode {
+    decode { current ->
       ShellowNative.nativeConnectPreviewJson(
-        handle,
+        current,
         profile.name,
         profile.host,
         profile.port,
@@ -516,9 +504,9 @@ class ShellowCoreSession : Closeable {
     }
 
   fun startPasswordShell(profile: HostProfile, password: String) =
-    decode {
+    decode { current ->
       ShellowNative.nativeStartPasswordShellJson(
-        handle,
+        current,
         profile.name,
         profile.host,
         profile.port,
@@ -533,9 +521,9 @@ class ShellowCoreSession : Closeable {
     privateKeyPem: String,
     passphrase: String,
   ) =
-    decode {
+    decode { current ->
       ShellowNative.nativeStartPrivateKeyShellJson(
-        handle,
+        current,
         profile.name,
         profile.host,
         profile.port,
@@ -546,24 +534,33 @@ class ShellowCoreSession : Closeable {
       )
     }
 
-  fun pollLiveShell() = decode { ShellowNative.nativePollLiveShellJson(handle) }
+  fun pollLiveShell() = decode { current -> ShellowNative.nativePollLiveShellJson(current) }
 
-  fun disconnectLiveShell() = decode { ShellowNative.nativeDisconnectLiveShellJson(handle) }
+  fun disconnectLiveShell() =
+    decode { current -> ShellowNative.nativeDisconnectLiveShellJson(current) }
 
   override fun close() {
-    val current = handle
-    if (current != 0L) {
-      ShellowNative.nativeDestroy(current)
-      handle = 0L
+    lock.withLock {
+      val current = handle
+      if (current != 0L) {
+        ShellowNative.nativeDestroy(current)
+        handle = 0L
+      }
     }
   }
 
-  private fun decode(body: () -> String): TerminalSession =
-    if (handle == 0L) {
-      TerminalSession.bridgeFailure(initFailure ?: "native engine is not available")
-    } else {
-      decodeNative(body)
+  private inline fun nativeJson(crossinline body: (Long) -> String): String =
+    lock.withLock {
+      val current = handle
+      if (current == 0L) {
+        "{\"error\":${JSONObject.quote(initFailure ?: "native engine is not available")}}"
+      } else {
+        body(current)
+      }
     }
+
+  private inline fun decode(crossinline body: (Long) -> String): TerminalSession =
+    decodeNative { nativeJson(body) }
 
   private fun decodeNative(body: () -> String): TerminalSession =
     try {
@@ -584,7 +581,9 @@ internal object ShellowNative {
   external fun nativeSnapshotJson(handle: Long): String
   external fun nativeRenderFrameJson(handle: Long, widthPx: Int, heightPx: Int): String
   external fun nativeRenderFrameViewportJson(handle: Long, widthPx: Int, heightPx: Int, firstRow: Int, rowCount: Int): String
+  external fun nativeRenderSurfaceFramePresented(handle: Long, widthPx: Int, heightPx: Int, firstRow: Int, rowCount: Int): Boolean
   external fun nativeRendererInfoJson(handle: Long): String
+  external fun nativeLiveShellEventRevision(handle: Long): Long
   external fun nativeSetRendererOverlayJson(handle: Long, overlayJson: String): String
   external fun nativeAttachAndroidNativeWindowJson(handle: Long, rawHandle: Long, widthPx: Int, heightPx: Int): String
   external fun nativeAttachAndroidSurfaceJson(handle: Long, surface: Surface, widthPx: Int, heightPx: Int): String

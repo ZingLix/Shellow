@@ -1,6 +1,7 @@
 #ifndef SHELLOW_CORE_H
 #define SHELLOW_CORE_H
 
+#include <stdbool.h>
 #include <stdint.h>
 
 #ifdef __cplusplus
@@ -15,7 +16,9 @@ void shellow_engine_destroy(ShellowEngine *engine);
 char *shellow_engine_snapshot_json(const ShellowEngine *engine);
 char *shellow_engine_render_frame_json(const ShellowEngine *engine, uint32_t width_px, uint32_t height_px);
 char *shellow_engine_render_frame_viewport_json(const ShellowEngine *engine, uint32_t width_px, uint32_t height_px, uint32_t first_row, uint32_t row_count);
+bool shellow_engine_render_surface_frame_presented(const ShellowEngine *engine, uint32_t width_px, uint32_t height_px, uint32_t first_row, uint32_t row_count);
 char *shellow_engine_renderer_info_json(const ShellowEngine *engine);
+uint64_t shellow_engine_live_shell_event_revision(const ShellowEngine *engine);
 char *shellow_engine_set_renderer_overlay_json(ShellowEngine *engine, const char *overlay_json);
 char *shellow_engine_attach_core_animation_layer_json(ShellowEngine *engine, uint64_t raw_handle, uint32_t width_px, uint32_t height_px);
 char *shellow_engine_attach_android_native_window_json(ShellowEngine *engine, uint64_t raw_handle, uint32_t width_px, uint32_t height_px);
