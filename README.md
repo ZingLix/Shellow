@@ -69,7 +69,8 @@ The APK is written to:
 apps/android/app/build/outputs/apk/debug/app-debug.apk
 ```
 
-Store release CI setup lives in `docs/STORE_RELEASE_SETUP.md`.
+Store release CI setup lives in `docs/STORE_RELEASE_SETUP.md`; Chinese setup
+notes live in `docs/STORE_RELEASE_SETUP.zh-CN.md`.
 
 Run on a connected ADB device:
 

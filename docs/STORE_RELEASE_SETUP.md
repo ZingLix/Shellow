@@ -3,6 +3,8 @@
 This project ships native Android and iOS apps from GitHub Actions through
 `.github/workflows/release-mobile.yml`.
 
+Chinese setup notes are available in `docs/STORE_RELEASE_SETUP.zh-CN.md`.
+
 The workflow can be started manually from GitHub Actions, or by pushing a tag
 named `v*`, such as `v0.1.1`. Manual runs let you choose `all`, `android`, or
 `ios`, plus the Google Play track. Android defaults to the `alpha` track, which
