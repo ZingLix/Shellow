@@ -26,11 +26,25 @@ class SSHSecretStore(context: Context) {
     kind: SSHSecretKind,
   ): Boolean = loadSecret(profile, kind) != null
 
+  fun hasKeySecret(
+    keyId: String,
+    kind: SSHSecretKind,
+  ): Boolean = loadKeySecret(keyId, kind) != null
+
   fun loadSecret(
     profile: HostProfile,
     kind: SSHSecretKind,
+  ): String? = loadAccountSecret(account(profile, kind))
+
+  fun loadKeySecret(
+    keyId: String,
+    kind: SSHSecretKind,
+  ): String? = loadAccountSecret(keyAccount(keyId, kind))
+
+  private fun loadAccountSecret(
+    account: String,
   ): String? {
-    val encoded = preferences.getString(account(profile, kind), null) ?: return null
+    val encoded = preferences.getString(account, null) ?: return null
     val parts = encoded.split(":")
     if (parts.size != 2) return null
 
@@ -48,6 +62,21 @@ class SSHSecretStore(context: Context) {
     profile: HostProfile,
     kind: SSHSecretKind,
   ) {
+    saveAccountSecret(secret, account(profile, kind))
+  }
+
+  fun saveKeySecret(
+    secret: String,
+    keyId: String,
+    kind: SSHSecretKind,
+  ) {
+    saveAccountSecret(secret, keyAccount(keyId, kind))
+  }
+
+  private fun saveAccountSecret(
+    secret: String,
+    account: String,
+  ) {
     if (secret.isEmpty()) return
 
     val cipher = Cipher.getInstance(Transformation)
@@ -61,7 +90,7 @@ class SSHSecretStore(context: Context) {
 
     preferences
       .edit()
-      .putString(account(profile, kind), encoded)
+      .putString(account, encoded)
       .apply()
   }
 
@@ -72,10 +101,22 @@ class SSHSecretStore(context: Context) {
     preferences.edit().remove(account(profile, kind)).apply()
   }
 
+  fun deleteKeySecret(
+    keyId: String,
+    kind: SSHSecretKind,
+  ) {
+    preferences.edit().remove(keyAccount(keyId, kind)).apply()
+  }
+
   private fun account(
     profile: HostProfile,
     kind: SSHSecretKind,
   ): String = "${profile.id}.${kind.storageName}"
+
+  private fun keyAccount(
+    keyId: String,
+    kind: SSHSecretKind,
+  ): String = "key.$keyId.${kind.storageName}"
 
   private fun getOrCreateKey(): SecretKey {
     val keyStore = KeyStore.getInstance(AndroidKeyStore).apply { load(null) }

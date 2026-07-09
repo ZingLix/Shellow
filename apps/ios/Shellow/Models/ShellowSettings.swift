@@ -11,7 +11,7 @@ struct ShellowSettings: Equatable, Codable {
     var confirmPaste = true
     var showKeyboardToolbar = true
     var keepAliveSeconds: Double = 30
-    var colorScheme: TerminalColorScheme = .dark
+    var colorScheme: TerminalColorScheme = .system
 
     func normalized() -> ShellowSettings {
         var copy = self

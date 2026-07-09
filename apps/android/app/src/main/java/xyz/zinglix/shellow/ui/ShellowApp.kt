@@ -1,15 +1,20 @@
 package xyz.zinglix.shellow.ui
 
 import android.graphics.Paint
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.graphics.Typeface
 import android.content.Context
 import android.os.Environment
+import android.util.Base64
 import android.util.Log
 import android.view.Surface
 import android.view.SurfaceHolder
 import android.view.SurfaceView
+import androidx.activity.compose.BackHandler
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
@@ -26,12 +31,16 @@ import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.ime
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
@@ -39,6 +48,7 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -46,9 +56,11 @@ import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.FilterChip
+import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Slider
+import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TextField
@@ -58,6 +70,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
@@ -69,6 +82,7 @@ import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color as ComposeColor
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.drawscope.drawIntoCanvas
 import androidx.compose.ui.graphics.nativeCanvas
 import androidx.compose.ui.graphics.toArgb
@@ -89,13 +103,16 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.TextFieldValue
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextDecoration
@@ -104,6 +121,21 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.zIndex
 import xyz.zinglix.shellow.core.AuthenticationKind
+import xyz.zinglix.shellow.core.CodexApproval
+import xyz.zinglix.shellow.core.CodexDirectoryEntry
+import xyz.zinglix.shellow.core.CodexMarkdownBlock
+import xyz.zinglix.shellow.core.CodexMarkdownBlockKind
+import xyz.zinglix.shellow.core.CodexMarkdownInlineRun
+import xyz.zinglix.shellow.core.CodexMarkdownInlineStyle
+import xyz.zinglix.shellow.core.CodexMarkdownTableCell
+import xyz.zinglix.shellow.core.CodexMessage
+import xyz.zinglix.shellow.core.CodexMessageKind
+import xyz.zinglix.shellow.core.CodexMessageRole
+import xyz.zinglix.shellow.core.CodexMessageVisibility
+import xyz.zinglix.shellow.core.CodexModelOption
+import xyz.zinglix.shellow.core.CodexSnapshot
+import xyz.zinglix.shellow.core.CodexStatus
+import xyz.zinglix.shellow.core.CodexThreadSummary
 import xyz.zinglix.shellow.core.ConnectionState
 import xyz.zinglix.shellow.core.HostProfile
 import xyz.zinglix.shellow.core.IntegrationReport
@@ -119,11 +151,15 @@ import xyz.zinglix.shellow.core.TerminalRow
 import xyz.zinglix.shellow.core.TerminalRowStyle
 import xyz.zinglix.shellow.core.TerminalScreenKind
 import xyz.zinglix.shellow.core.TerminalSession
+import xyz.zinglix.shellow.theme.ShellowColorScheme
 import xyz.zinglix.shellow.theme.ShellowColors
+import xyz.zinglix.shellow.theme.ShellowTheme
 import java.io.File
+import java.net.URL
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import java.util.UUID
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -136,11 +172,18 @@ import kotlin.math.roundToInt
 private enum class AppScreen {
   Hosts,
   Terminal,
+  Codex,
   Settings,
+}
+
+private enum class HostConnectMode(val passwordTitle: String) {
+  Terminal("Terminal Password"),
+  Codex("Codex Password"),
 }
 
 private const val TerminalDirectInputSentinel = "\u2060"
 private const val RendererLogTag = "ShellowRenderer"
+private const val TerminalKeyboardLayoutCommitDelayMs = 260L
 
 private data class TerminalSelectionPoint(
   val row: Int,
@@ -216,6 +259,24 @@ private data class TranscriptSaveResult(
 private data class AppDisplaySettings(
   val fontSizeSp: Float = 14f,
   val lineHeightScale: Float = 1f,
+  val colorScheme: ShellowColorScheme = ShellowColorScheme.System,
+)
+
+private data class SSHKeyCredential(
+  val id: String = UUID.randomUUID().toString(),
+  val name: String,
+)
+
+private data class StoredPrivateKeyAuth(
+  val credential: SSHKeyCredential,
+  val privateKeyPem: String,
+  val passphrase: String,
+)
+
+private data class PasswordPromptRequest(
+  val profile: HostProfile,
+  val mode: HostConnectMode,
+  val reason: String?,
 )
 
 private sealed class ReconnectTarget {
@@ -233,6 +294,23 @@ private sealed class ReconnectTarget {
   ) : ReconnectTarget()
 }
 
+private sealed class CodexReconnectTarget {
+  data class Password(
+    val profile: HostProfile,
+    val password: String,
+    val cwd: String,
+    val threadId: String? = null,
+  ) : CodexReconnectTarget()
+
+  data class PrivateKey(
+    val profile: HostProfile,
+    val privateKeyPem: String,
+    val passphrase: String,
+    val cwd: String,
+    val threadId: String? = null,
+  ) : CodexReconnectTarget()
+}
+
 private fun ReconnectTarget.profile(): HostProfile =
   when (this) {
     is ReconnectTarget.Preview -> profile
@@ -245,6 +323,30 @@ private fun ReconnectTarget.withProfile(profile: HostProfile): ReconnectTarget =
     is ReconnectTarget.Preview -> copy(profile = profile)
     is ReconnectTarget.Password -> copy(profile = profile)
     is ReconnectTarget.PrivateKey -> copy(profile = profile)
+  }
+
+private fun CodexReconnectTarget.profile(): HostProfile =
+  when (this) {
+    is CodexReconnectTarget.Password -> profile
+    is CodexReconnectTarget.PrivateKey -> profile
+  }
+
+private fun CodexReconnectTarget.withProfile(profile: HostProfile): CodexReconnectTarget =
+  when (this) {
+    is CodexReconnectTarget.Password -> copy(profile = profile)
+    is CodexReconnectTarget.PrivateKey -> copy(profile = profile)
+  }
+
+private fun CodexReconnectTarget.withCwd(cwd: String): CodexReconnectTarget =
+  when (this) {
+    is CodexReconnectTarget.Password -> copy(cwd = cwd)
+    is CodexReconnectTarget.PrivateKey -> copy(cwd = cwd)
+  }
+
+private fun CodexReconnectTarget.withThreadId(threadId: String?): CodexReconnectTarget =
+  when (this) {
+    is CodexReconnectTarget.Password -> copy(threadId = threadId)
+    is CodexReconnectTarget.PrivateKey -> copy(threadId = threadId)
   }
 
 private fun HostProfile.matchesProfileIdentity(other: HostProfile): Boolean =
@@ -268,9 +370,18 @@ fun ShellowApp() {
         profiles.addAll(loadHostProfiles(context))
       }
     }
+  val sshKeys =
+    remember {
+      mutableStateListOf<SSHKeyCredential>().also { keys ->
+        keys.addAll(loadSSHKeyCredentials(context))
+      }
+    }
   var screen by remember { mutableStateOf(AppScreen.Hosts) }
   var session by remember { mutableStateOf(core.snapshot()) }
+  var codexSnapshot by remember { mutableStateOf(CodexSnapshot.disconnected()) }
   var reconnectTarget by remember { mutableStateOf<ReconnectTarget?>(null) }
+  var codexReconnectTarget by remember { mutableStateOf<CodexReconnectTarget?>(null) }
+  var passwordPrompt by remember { mutableStateOf<PasswordPromptRequest?>(null) }
 
   fun captureObservedHostKeyIfNeeded(next: TerminalSession) {
     val observed = next.observedHostKeySha256?.trim().takeUnless { it.isNullOrEmpty() } ?: return
@@ -287,13 +398,46 @@ fun ShellowApp() {
     reconnectTarget = target.withProfile(updated)
   }
 
+  fun captureObservedHostKeyIfNeeded(next: CodexSnapshot) {
+    val observed = next.observedHostKeySha256?.trim().takeUnless { it.isNullOrEmpty() } ?: return
+    val target = codexReconnectTarget ?: return
+    val profile = target.profile()
+    if (!profile.trustedHostKeySha256.isNullOrBlank()) return
+
+    val updated = profile.copy(trustedHostKeySha256 = observed)
+    val index = profiles.indexOfFirst { it.matchesProfileIdentity(profile) }
+    if (index >= 0) {
+      profiles[index] = updated
+      saveHostProfiles(context, profiles)
+    }
+    codexReconnectTarget = target.withProfile(updated)
+  }
+
   fun updateSession(next: TerminalSession) {
     session = next
     captureObservedHostKeyIfNeeded(next)
   }
 
+  fun rememberCodexResumePoint(next: CodexSnapshot) {
+    var target = codexReconnectTarget ?: return
+    next.cwd?.trim()?.takeUnless { it.isEmpty() }?.let { cwd ->
+      target = target.withCwd(cwd)
+    }
+    next.threadId?.trim()?.takeUnless { it.isEmpty() }?.let { threadId ->
+      target = target.withThreadId(threadId)
+    }
+    codexReconnectTarget = target
+  }
+
+  fun updateCodexSnapshot(next: CodexSnapshot) {
+    codexSnapshot = next
+    rememberCodexResumePoint(next)
+    captureObservedHostKeyIfNeeded(next)
+  }
+
   LaunchedEffect(core) {
     var lastLiveRevision = withContext(Dispatchers.IO) { core.liveShellEventRevision() }
+    var lastCodexRevision = withContext(Dispatchers.IO) { core.codexEventRevision() }
     while (true) {
       delay(50)
       val revision = withContext(Dispatchers.IO) { core.liveShellEventRevision() }
@@ -302,6 +446,15 @@ fun ShellowApp() {
         val next = withContext(Dispatchers.IO) { core.pollLiveShell() }
         if (next != session) {
           updateSession(next)
+        }
+      }
+
+      val codexRevision = withContext(Dispatchers.IO) { core.codexEventRevision() }
+      if (codexRevision != lastCodexRevision) {
+        lastCodexRevision = codexRevision
+        val next = withContext(Dispatchers.IO) { core.pollCodex() }
+        if (next != codexSnapshot) {
+          updateCodexSnapshot(next)
         }
       }
     }
@@ -344,6 +497,220 @@ fun ShellowApp() {
     }
   }
 
+  fun startCodexPassword(profile: HostProfile, password: String, cwd: String) {
+    codexSnapshot = CodexSnapshot.connecting(profile, cwd)
+    screen = AppScreen.Codex
+    scope.launch {
+      updateCodexSnapshot(withContext(Dispatchers.IO) { core.startCodexPassword(profile, password, cwd) })
+    }
+  }
+
+  fun startCodexPrivateKey(
+    profile: HostProfile,
+    privateKeyPem: String,
+    passphrase: String,
+    cwd: String,
+  ) {
+    codexSnapshot = CodexSnapshot.connecting(profile, cwd)
+    screen = AppScreen.Codex
+    scope.launch {
+      updateCodexSnapshot(withContext(Dispatchers.IO) { core.startCodexPrivateKey(profile, privateKeyPem, passphrase, cwd) })
+    }
+  }
+
+  fun startPasswordConnection(
+    profile: HostProfile,
+    password: String,
+    mode: HostConnectMode,
+  ) {
+    when (mode) {
+      HostConnectMode.Terminal -> {
+        reconnectTarget = ReconnectTarget.Password(profile, password, "")
+        connectPasswordShell(profile, password, "")
+      }
+      HostConnectMode.Codex -> {
+        codexReconnectTarget = CodexReconnectTarget.Password(profile, password, "")
+        startCodexPassword(profile, password, "")
+      }
+    }
+  }
+
+  fun storedPrivateKeyAuths(): List<StoredPrivateKeyAuth> =
+    sshKeys.mapNotNull { credential ->
+      val privateKeyPem = secretStore.loadKeySecret(credential.id, SSHSecretKind.PrivateKey)
+      if (privateKeyPem.isNullOrBlank() || !privateKeyLooksUsable(privateKeyPem)) {
+        null
+      } else {
+        StoredPrivateKeyAuth(
+          credential = credential,
+          privateKeyPem = privateKeyPem,
+          passphrase = secretStore.loadKeySecret(credential.id, SSHSecretKind.Passphrase).orEmpty(),
+        )
+      }
+    }
+
+  suspend fun waitForTerminalConnectionResult(): TerminalSession {
+    val deadline = System.currentTimeMillis() + 8_000
+    var current = session
+    while (current.state == ConnectionState.Connecting && System.currentTimeMillis() < deadline) {
+      delay(200)
+      current = withContext(Dispatchers.IO) { core.pollLiveShell() }
+      updateSession(current)
+    }
+    return current
+  }
+
+  suspend fun waitForCodexConnectionResult(): CodexSnapshot {
+    val deadline = System.currentTimeMillis() + 10_000
+    var current = codexSnapshot
+    while (current.status == CodexStatus.Connecting && System.currentTimeMillis() < deadline) {
+      delay(250)
+      current = withContext(Dispatchers.IO) { core.pollCodex() }
+      updateCodexSnapshot(current)
+    }
+    return current
+  }
+
+  suspend fun resumeCodexThreadAfterReconnect(threadId: String?) {
+    val resumeThreadId = threadId?.trim().takeUnless { it.isNullOrEmpty() } ?: return
+    if (codexSnapshot.status == CodexStatus.Connecting) {
+      waitForCodexConnectionResult()
+    }
+    if (codexSnapshot.status == CodexStatus.Connected) {
+      updateCodexSnapshot(withContext(Dispatchers.IO) { core.resumeCodexThread(resumeThreadId) })
+    }
+  }
+
+  suspend fun reconnectCodexPassword(
+    profile: HostProfile,
+    password: String,
+    cwd: String,
+    threadId: String?,
+  ) {
+    codexSnapshot = CodexSnapshot.connecting(profile, cwd)
+    screen = AppScreen.Codex
+    updateCodexSnapshot(withContext(Dispatchers.IO) { core.startCodexPassword(profile, password, cwd) })
+    resumeCodexThreadAfterReconnect(threadId)
+  }
+
+  suspend fun reconnectCodexPrivateKey(
+    profile: HostProfile,
+    privateKeyPem: String,
+    passphrase: String,
+    cwd: String,
+    threadId: String?,
+  ) {
+    codexSnapshot = CodexSnapshot.connecting(profile, cwd)
+    screen = AppScreen.Codex
+    updateCodexSnapshot(withContext(Dispatchers.IO) { core.startCodexPrivateKey(profile, privateKeyPem, passphrase, cwd) })
+    resumeCodexThreadAfterReconnect(threadId)
+  }
+
+  suspend fun tryPrivateKeysForTerminal(
+    profile: HostProfile,
+    keys: List<StoredPrivateKeyAuth>,
+  ): Boolean {
+    session = TerminalSession.connecting(profile)
+    screen = AppScreen.Terminal
+
+    keys.forEach { key ->
+      reconnectTarget =
+        ReconnectTarget.PrivateKey(
+          profile = profile,
+          privateKeyPem = key.privateKeyPem,
+          passphrase = key.passphrase,
+          startupCommand = "",
+        )
+      updateSession(
+        withContext(Dispatchers.IO) {
+          core.startPrivateKeyShell(profile, key.privateKeyPem, key.passphrase)
+        },
+      )
+
+      val result = waitForTerminalConnectionResult()
+      if (result.state == ConnectionState.Connected) {
+        return true
+      }
+
+      withContext(Dispatchers.IO) { core.disconnectLiveShell() }
+    }
+
+    return false
+  }
+
+  suspend fun tryPrivateKeysForCodex(
+    profile: HostProfile,
+    keys: List<StoredPrivateKeyAuth>,
+  ): Boolean {
+    codexSnapshot = CodexSnapshot.connecting(profile, "")
+    screen = AppScreen.Codex
+
+    keys.forEach { key ->
+      codexReconnectTarget =
+        CodexReconnectTarget.PrivateKey(
+          profile = profile,
+          privateKeyPem = key.privateKeyPem,
+          passphrase = key.passphrase,
+          cwd = "",
+        )
+      updateCodexSnapshot(
+        withContext(Dispatchers.IO) {
+          core.startCodexPrivateKey(profile, key.privateKeyPem, key.passphrase, "")
+        },
+      )
+
+      val result = waitForCodexConnectionResult()
+      if (result.status == CodexStatus.Connected) {
+        return true
+      }
+
+      withContext(Dispatchers.IO) { core.disconnectCodex() }
+    }
+
+    return false
+  }
+
+  fun connectHost(
+    profile: HostProfile,
+    mode: HostConnectMode,
+  ) {
+    scope.launch {
+      val savedPassword = withContext(Dispatchers.IO) { secretStore.loadSecret(profile, SSHSecretKind.Password) }
+      if (!savedPassword.isNullOrBlank()) {
+        startPasswordConnection(profile, savedPassword, mode)
+        return@launch
+      }
+
+      val keys = withContext(Dispatchers.IO) { storedPrivateKeyAuths() }
+      if (keys.isEmpty()) {
+        passwordPrompt =
+          PasswordPromptRequest(
+            profile = profile,
+            mode = mode,
+            reason = "No saved SSH keys are available.",
+          )
+        return@launch
+      }
+
+      val didConnect =
+        when (mode) {
+          HostConnectMode.Terminal -> tryPrivateKeysForTerminal(profile, keys)
+          HostConnectMode.Codex -> tryPrivateKeysForCodex(profile, keys)
+        }
+
+      if (!didConnect) {
+        reconnectTarget = null
+        codexReconnectTarget = null
+        passwordPrompt =
+          PasswordPromptRequest(
+            profile = profile,
+            mode = mode,
+            reason = "Saved SSH keys did not authenticate. Enter a password to continue.",
+          )
+      }
+    }
+  }
+
   fun reconnect() {
     when (val target = reconnectTarget) {
       is ReconnectTarget.Preview -> {
@@ -367,63 +734,2095 @@ fun ShellowApp() {
     }
   }
 
-  Box(
+  fun reconnectCodex() {
+    when (val target = codexReconnectTarget) {
+      is CodexReconnectTarget.Password -> {
+        val resumeThreadId = target.threadId ?: codexSnapshot.threadId
+        scope.launch {
+          reconnectCodexPassword(target.profile, target.password, target.cwd, resumeThreadId)
+        }
+      }
+      is CodexReconnectTarget.PrivateKey -> {
+        val resumeThreadId = target.threadId ?: codexSnapshot.threadId
+        scope.launch {
+          reconnectCodexPrivateKey(
+            target.profile,
+            target.privateKeyPem,
+            target.passphrase,
+            target.cwd,
+            resumeThreadId,
+          )
+        }
+      }
+      null -> Unit
+    }
+  }
+
+  ShellowTheme(colorScheme = displaySettings.colorScheme) {
+    Box(
+      modifier =
+        Modifier
+          .fillMaxSize()
+          .background(ShellowColors.TerminalBackground)
+          .statusBarsPadding()
+          .navigationBarsPadding()
+    ) {
+      when (screen) {
+        AppScreen.Terminal ->
+          TerminalScreen(
+            session = session,
+            displaySettings = displaySettings,
+            onBackToHosts = { screen = AppScreen.Hosts },
+            onInput = { input -> updateSession(core.sendTerminalInput(input)) },
+            onReconnect = if (reconnectTarget == null) null else ::reconnect,
+            onDisconnect = { updateSession(core.disconnectLiveShell()) },
+            onResize = { cols, rows -> updateSession(core.resizeTerminal(cols, rows)) },
+            onAttachRendererSurface = { surface, width, height -> core.attachAndroidSurface(surface, width, height) },
+            onSetRendererOverlay = { overlay -> core.setRendererOverlayJson(overlay) },
+            onRenderRendererSurface = { width, height, firstRow, rowCount ->
+              core.renderRendererSurfaceFrame(width, height, firstRow, rowCount)
+            },
+            onDetachRendererSurface = { core.detachRendererSurface() },
+            onClearTerminal = { updateSession(core.clearTerminal()) },
+            onResetTerminal = { updateSession(core.resetTerminal()) },
+          )
+        AppScreen.Codex ->
+          CodexScreen(
+            snapshot = codexSnapshot,
+            onBackToHosts = { screen = AppScreen.Hosts },
+            onSendMessage = { message ->
+              updateCodexSnapshot(core.sendCodexMessage(message))
+            },
+            onUpdateSettings = { model, approvalPolicy, sandbox ->
+              updateCodexSnapshot(core.updateCodexSettings(model, approvalPolicy, sandbox))
+            },
+            onBrowseDirectory = { path ->
+              updateCodexSnapshot(withContext(Dispatchers.IO) { core.browseCodexDirectory(path) })
+            },
+            onListThreads = { cwd, searchTerm, cursor, archived, append ->
+              updateCodexSnapshot(
+                withContext(Dispatchers.IO) {
+                  core.listCodexThreadsPage(cwd, searchTerm, cursor, archived, append)
+                },
+              )
+            },
+            onStartThread = { cwd ->
+              codexReconnectTarget = codexReconnectTarget?.withCwd(cwd)?.withThreadId(null)
+              updateCodexSnapshot(withContext(Dispatchers.IO) { core.startCodexThread(cwd) })
+            },
+            onStartThreadAndSend = { cwd, message ->
+              codexReconnectTarget = codexReconnectTarget?.withCwd(cwd)?.withThreadId(null)
+              val started = withContext(Dispatchers.IO) { core.startCodexThread(cwd) }
+              updateCodexSnapshot(started)
+              if (started.threadId != null && started.operation.lastError == null) {
+                updateCodexSnapshot(core.sendCodexMessage(message))
+              }
+            },
+            onResumeThread = { threadId ->
+              updateCodexSnapshot(withContext(Dispatchers.IO) { core.resumeCodexThread(threadId) })
+              codexSnapshot.cwd?.let { cwd ->
+                codexReconnectTarget = codexReconnectTarget?.withCwd(cwd)
+              }
+            },
+            onReadThread = { threadId ->
+              updateCodexSnapshot(withContext(Dispatchers.IO) { core.readCodexThread(threadId) })
+            },
+            onLoadMoreThreadTurns = { threadId, cursor ->
+              updateCodexSnapshot(withContext(Dispatchers.IO) { core.loadMoreCodexThreadTurns(threadId, cursor) })
+            },
+            onRenameThread = { threadId, name ->
+              updateCodexSnapshot(withContext(Dispatchers.IO) { core.renameCodexThread(threadId, name) })
+            },
+            onArchiveThread = { threadId ->
+              updateCodexSnapshot(withContext(Dispatchers.IO) { core.archiveCodexThread(threadId) })
+            },
+            onUnarchiveThread = { threadId ->
+              updateCodexSnapshot(withContext(Dispatchers.IO) { core.unarchiveCodexThread(threadId) })
+            },
+            onDeleteThread = { threadId ->
+              updateCodexSnapshot(withContext(Dispatchers.IO) { core.deleteCodexThread(threadId) })
+            },
+            onForkThread = { threadId, cwd ->
+              updateCodexSnapshot(withContext(Dispatchers.IO) { core.forkCodexThread(threadId, cwd) })
+              codexSnapshot.cwd?.let { nextCwd ->
+                codexReconnectTarget = codexReconnectTarget?.withCwd(nextCwd)
+              }
+            },
+            onInterruptTurn = {
+              updateCodexSnapshot(core.interruptCodexTurn())
+            },
+            onApprovalDecision = { requestId, decision ->
+              updateCodexSnapshot(core.answerCodexApproval(requestId, decision))
+            },
+            onDisconnect = {
+              updateCodexSnapshot(core.disconnectCodex())
+            },
+            onReconnect = if (codexReconnectTarget == null) null else ::reconnectCodex,
+          )
+        AppScreen.Hosts ->
+          HostsScreen(
+            profiles = profiles,
+            sshKeys = sshKeys,
+            secretStore = secretStore,
+            onOpenSettings = { screen = AppScreen.Settings },
+            onAddProfile = { profile ->
+              profiles.add(profile)
+              saveHostProfiles(context, profiles)
+            },
+            onAddKey = { credential ->
+              sshKeys.add(credential)
+              saveSSHKeyCredentials(context, sshKeys)
+            },
+            onDeleteKey = { credential ->
+              sshKeys.removeAll { it.id == credential.id }
+              secretStore.deleteKeySecret(credential.id, SSHSecretKind.PrivateKey)
+              secretStore.deleteKeySecret(credential.id, SSHSecretKind.Passphrase)
+              saveSSHKeyCredentials(context, sshKeys)
+            },
+            onConnectTerminal = { profile ->
+              connectHost(profile, HostConnectMode.Terminal)
+            },
+            onConnectCodex = { profile ->
+              connectHost(profile, HostConnectMode.Codex)
+            },
+          )
+        AppScreen.Settings ->
+          SettingsScreen(
+            report = session.integration,
+            displaySettings = displaySettings,
+            onBack = { screen = AppScreen.Hosts },
+            onDisplaySettingsChange = { displaySettings = it },
+          )
+      }
+
+      passwordPrompt?.let { request ->
+        PasswordPromptDialog(
+          request = request,
+          secretStore = secretStore,
+          onDismiss = { passwordPrompt = null },
+          onConnect = { password ->
+            passwordPrompt = null
+            startPasswordConnection(request.profile, password, request.mode)
+          },
+        )
+      }
+    }
+  }
+}
+
+@Composable
+private fun CodexScreen(
+  snapshot: CodexSnapshot,
+  onBackToHosts: () -> Unit,
+  onSendMessage: (String) -> Unit,
+  onUpdateSettings: (String, String, String) -> Unit,
+  onBrowseDirectory: suspend (String) -> Unit,
+  onListThreads: suspend (String, String, String, Boolean, Boolean) -> Unit,
+  onStartThread: suspend (String) -> Unit,
+  onStartThreadAndSend: suspend (String, String) -> Unit,
+  onResumeThread: suspend (String) -> Unit,
+  onReadThread: suspend (String) -> Unit,
+  onLoadMoreThreadTurns: suspend (String, String) -> Unit,
+  onRenameThread: suspend (String, String) -> Unit,
+  onArchiveThread: suspend (String) -> Unit,
+  onUnarchiveThread: suspend (String) -> Unit,
+  onDeleteThread: suspend (String) -> Unit,
+  onForkThread: suspend (String, String) -> Unit,
+  onInterruptTurn: () -> Unit,
+  onApprovalDecision: (String, String) -> Unit,
+  onDisconnect: () -> Unit,
+  onReconnect: (() -> Unit)?,
+) {
+  var draft by remember { mutableStateOf("") }
+  var selectedPath by remember { mutableStateOf("") }
+  var historySearch by remember { mutableStateOf("") }
+  var homeRoute by remember { mutableStateOf(CodexHomeRoute.Overview) }
+  var draftReturnRoute by remember { mutableStateOf(CodexHomeRoute.Overview) }
+  var threadReturnRoute by remember { mutableStateOf(CodexHomeRoute.Overview) }
+  var threadReturnScope by remember { mutableStateOf(CodexHistoryScope.AllProjects) }
+  var isShowingThread by remember { mutableStateOf(false) }
+  var historyScope by remember { mutableStateOf(CodexHistoryScope.AllProjects) }
+  var showArchivedThreads by remember { mutableStateOf(false) }
+  var didLoadProjectState by remember { mutableStateOf(false) }
+  var showSettings by remember { mutableStateOf(false) }
+  var settingsModel by remember { mutableStateOf("") }
+  var settingsApprovalPolicy by remember { mutableStateOf("") }
+  var settingsSandbox by remember { mutableStateOf("") }
+  var renameTarget by remember { mutableStateOf<CodexThreadSummary?>(null) }
+  var renameText by remember { mutableStateOf("") }
+  var deleteTarget by remember { mutableStateOf<CodexThreadSummary?>(null) }
+  var openingThreadId by remember { mutableStateOf<String?>(null) }
+  var isStartingDraftThread by remember { mutableStateOf(false) }
+  val listState = rememberLazyListState()
+  val scope = rememberCoroutineScope()
+  val selectedProjectPath = selectedPath.trim()
+  val historyCwd = if (historyScope == CodexHistoryScope.CurrentProject) selectedProjectPath else ""
+  val knownProjectPaths =
+    remember(snapshot.projects.recent, snapshot.projects.current, snapshot.cwd) {
+      mergeProjects(
+        snapshot.projects.recent,
+        listOfNotNull(snapshot.projects.current, snapshot.cwd),
+      )
+    }
+  val canSend =
+    snapshot.status == CodexStatus.Connected &&
+      snapshot.threadId != null &&
+      draft.trim().isNotEmpty()
+  val canSendInitialDraft =
+    snapshot.status == CodexStatus.Connected &&
+      !isStartingDraftThread &&
+      selectedProjectPath.isNotEmpty() &&
+      draft.trim().isNotEmpty()
+  val canUseProjectActions =
+    snapshot.status == CodexStatus.Connected && selectedProjectPath.isNotEmpty()
+  val canUseHistoryActions =
+    snapshot.status == CodexStatus.Connected &&
+      (historyScope == CodexHistoryScope.AllProjects || selectedProjectPath.isNotEmpty())
+  val modelOptions =
+    remember(snapshot.settings.availableModels, snapshot.settings.model) {
+      codexModelPickerOptions(snapshot.settings.availableModels, snapshot.settings.model.orEmpty())
+    }
+  val selectedModelTitle =
+    remember(modelOptions, snapshot.settings.model) {
+      codexSelectedModelTitle(modelOptions, snapshot.settings.model)
+    }
+
+  LaunchedEffect(snapshot.threadId, snapshot.messages.size, snapshot.pendingApprovals.size, snapshot.turnActive) {
+    if (snapshot.threadId != null) {
+      val visibleMessages = snapshot.messages.count { it.isVisibleInChat }
+      val itemCount =
+        1 +
+          snapshot.pendingApprovals.size +
+          visibleMessages +
+          if (snapshot.turnActive) 1 else 0
+      if (itemCount > 1) {
+        delay(80)
+        listState.scrollToItem(itemCount - 1)
+      }
+    }
+  }
+
+  LaunchedEffect(snapshot.cwd, snapshot.projects.current, snapshot.projects.recent) {
+    if (selectedPath.trim().isEmpty()) {
+      selectedPath =
+        snapshot.projects.current
+          ?: snapshot.cwd
+          ?: snapshot.projects.recent.firstOrNull()
+          ?: ""
+    }
+  }
+
+  LaunchedEffect(snapshot.settings) {
+    settingsModel = snapshot.settings.model.orEmpty()
+    settingsApprovalPolicy = snapshot.settings.approvalPolicy.orEmpty()
+    settingsSandbox = snapshot.settings.sandbox.orEmpty()
+  }
+
+  LaunchedEffect(snapshot.status, snapshot.threadId) {
+    if (snapshot.status != CodexStatus.Connected) {
+      didLoadProjectState = false
+    } else if (snapshot.threadId == null && !didLoadProjectState) {
+      didLoadProjectState = true
+      val path =
+        snapshot.projects.current
+          ?: snapshot.cwd
+          ?: snapshot.projects.recent.firstOrNull()
+          ?: selectedPath
+      if (path.trim().isNotEmpty()) {
+        selectedPath = path
+      }
+      onListThreads("", historySearch, "", showArchivedThreads, false)
+    }
+    isShowingThread = snapshot.threadId != null
+  }
+
+  val returnToThreadOrigin: () -> Unit = {
+    isShowingThread = false
+    when (threadReturnRoute) {
+      CodexHomeRoute.Project -> {
+        if (selectedProjectPath.isNotEmpty()) {
+          homeRoute = CodexHomeRoute.Project
+          historyScope = CodexHistoryScope.CurrentProject
+          scope.launch { onListThreads(selectedProjectPath, historySearch, "", showArchivedThreads, false) }
+        } else {
+          homeRoute = CodexHomeRoute.Overview
+          historyScope = CodexHistoryScope.AllProjects
+          scope.launch { onListThreads("", historySearch, "", showArchivedThreads, false) }
+        }
+      }
+      CodexHomeRoute.Overview -> {
+        homeRoute = CodexHomeRoute.Overview
+        historyScope = threadReturnScope
+        val cwd = if (threadReturnScope == CodexHistoryScope.CurrentProject) selectedProjectPath else ""
+        scope.launch { onListThreads(cwd, historySearch, "", showArchivedThreads, false) }
+      }
+      CodexHomeRoute.Draft -> {
+        homeRoute = draftReturnRoute
+      }
+    }
+  }
+
+  val handleCodexBack: () -> Unit = {
+    if (isShowingThread && snapshot.threadId != null) {
+      returnToThreadOrigin()
+    } else {
+      when (homeRoute) {
+        CodexHomeRoute.Overview -> onBackToHosts()
+        CodexHomeRoute.Project -> {
+          homeRoute = CodexHomeRoute.Overview
+          historyScope = CodexHistoryScope.AllProjects
+          scope.launch { onListThreads("", historySearch, "", showArchivedThreads, false) }
+        }
+        CodexHomeRoute.Draft -> {
+          if (draftReturnRoute == CodexHomeRoute.Project && selectedProjectPath.isNotEmpty()) {
+            homeRoute = CodexHomeRoute.Project
+            historyScope = CodexHistoryScope.CurrentProject
+            scope.launch { onListThreads(selectedProjectPath, historySearch, "", showArchivedThreads, false) }
+          } else {
+            homeRoute = CodexHomeRoute.Overview
+            historyScope = CodexHistoryScope.AllProjects
+            scope.launch { onListThreads("", historySearch, "", showArchivedThreads, false) }
+          }
+        }
+      }
+    }
+  }
+
+  BackHandler(onBack = handleCodexBack)
+
+  if (showSettings) {
+    CodexSettingsDialog(
+      model = settingsModel,
+      modelOptions = modelOptions,
+      isLoadingModels = snapshot.settings.isLoadingModels,
+      modelsError = snapshot.settings.modelsError,
+      approvalPolicy = settingsApprovalPolicy,
+      sandbox = settingsSandbox,
+      onModelChange = { settingsModel = it },
+      onApprovalPolicyChange = { settingsApprovalPolicy = it },
+      onSandboxChange = { settingsSandbox = it },
+      onDismiss = { showSettings = false },
+      onApply = {
+        onUpdateSettings(settingsModel.trim(), settingsApprovalPolicy, settingsSandbox)
+        showSettings = false
+      },
+    )
+  }
+
+  renameTarget?.let { thread ->
+    AlertDialog(
+      onDismissRequest = { renameTarget = null },
+      containerColor = ShellowColors.PanelBackground,
+      titleContentColor = ShellowColors.TerminalText,
+      textContentColor = ShellowColors.TerminalText,
+      title = { Text("Rename Thread") },
+      text = {
+        OutlinedTextField(
+          value = renameText,
+          onValueChange = { renameText = it },
+          label = { Text("Name") },
+          singleLine = true,
+        )
+      },
+      confirmButton = {
+        TextButton(
+          onClick = {
+            val nextName = renameText.trim()
+            scope.launch { onRenameThread(thread.id, nextName) }
+            renameTarget = null
+          },
+        ) { Text("Save") }
+      },
+      dismissButton = {
+        TextButton(onClick = { renameTarget = null }) { Text("Cancel") }
+      },
+    )
+  }
+
+  deleteTarget?.let { thread ->
+    AlertDialog(
+      onDismissRequest = { deleteTarget = null },
+      containerColor = ShellowColors.PanelBackground,
+      titleContentColor = ShellowColors.TerminalText,
+      textContentColor = ShellowColors.TerminalText,
+      title = { Text("Delete thread?") },
+      text = { Text(thread.displayTitle) },
+      confirmButton = {
+        TextButton(
+          onClick = {
+            scope.launch { onDeleteThread(thread.id) }
+            deleteTarget = null
+          },
+        ) { Text("Delete") }
+      },
+      dismissButton = {
+        TextButton(onClick = { deleteTarget = null }) { Text("Cancel") }
+      },
+    )
+  }
+
+  Column(
     modifier =
       Modifier
         .fillMaxSize()
-        .background(ShellowColors.TerminalBackground)
-        .statusBarsPadding()
-        .navigationBarsPadding()
+        .background(ShellowColors.TerminalBackground),
   ) {
-    when (screen) {
-      AppScreen.Terminal ->
-        TerminalScreen(
-          session = session,
-          displaySettings = displaySettings,
-          onBackToHosts = { screen = AppScreen.Hosts },
-          onInput = { input -> updateSession(core.sendTerminalInput(input)) },
-          onReconnect = if (reconnectTarget == null) null else ::reconnect,
-          onDisconnect = { updateSession(core.disconnectLiveShell()) },
-          onResize = { cols, rows -> updateSession(core.resizeTerminal(cols, rows)) },
-          onAttachRendererSurface = { surface, width, height -> core.attachAndroidSurface(surface, width, height) },
-          onSetRendererOverlay = { overlay -> core.setRendererOverlayJson(overlay) },
-          onRenderRendererSurface = { width, height, firstRow, rowCount ->
-            core.renderRendererSurfaceFrame(width, height, firstRow, rowCount)
+    Column(
+      modifier = Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 10.dp),
+      verticalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+      Row(
+        modifier = Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+      ) {
+        TextButton(onClick = handleCodexBack) { Text("Back") }
+        Column(Modifier.weight(1f)) {
+          Text(
+            snapshot.title,
+            color = ShellowColors.TerminalText,
+            style = MaterialTheme.typography.titleMedium,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+          )
+          Text(
+            listOfNotNull(snapshot.status.title, snapshot.endpoint, snapshot.cwd).joinToString("  "),
+            color = ShellowColors.TerminalMuted,
+            style = MaterialTheme.typography.labelSmall,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+          )
+        }
+      }
+      Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End),
+        verticalAlignment = Alignment.CenterVertically,
+      ) {
+        onReconnect?.let {
+          TextButton(onClick = it) { Text("Reconnect") }
+        }
+        TextButton(onClick = onDisconnect) { Text("Disconnect") }
+      }
+    }
+
+    snapshot.operation.lastError?.let { error ->
+      Text(
+        error,
+        color = ShellowColors.Warning,
+        style = MaterialTheme.typography.labelSmall,
+        modifier = Modifier.fillMaxWidth().background(ShellowColors.WarningBackground).padding(horizontal = 14.dp, vertical = 8.dp),
+        maxLines = 2,
+        overflow = TextOverflow.Ellipsis,
+      )
+    } ?: snapshot.operation.lastSuccess?.let { message ->
+      Text(
+        message,
+        color = ShellowColors.Success,
+        style = MaterialTheme.typography.labelSmall,
+        modifier = Modifier.fillMaxWidth().background(ShellowColors.SuccessBackground).padding(horizontal = 14.dp, vertical = 8.dp),
+        maxLines = 1,
+        overflow = TextOverflow.Ellipsis,
+      )
+    }
+
+    if (!isShowingThread || snapshot.threadId == null) {
+      val showSettingsAction = {
+        settingsModel = snapshot.settings.model.orEmpty()
+        settingsApprovalPolicy = snapshot.settings.approvalPolicy.orEmpty()
+        settingsSandbox = snapshot.settings.sandbox.orEmpty()
+        showSettings = true
+      }
+      val refreshCurrentHistory = {
+        if (canUseHistoryActions) {
+          scope.launch { onListThreads(historyCwd, historySearch, "", showArchivedThreads, false) }
+        }
+      }
+      val openThread: (String) -> Unit = { threadId ->
+        threadReturnRoute = homeRoute
+        threadReturnScope = historyScope
+        openingThreadId = threadId
+        scope.launch {
+          onResumeThread(threadId)
+          isShowingThread = true
+          if (openingThreadId == threadId) {
+            openingThreadId = null
+          }
+        }
+      }
+      val beginDraftChat = {
+        if (selectedProjectPath.isNotEmpty()) {
+          draftReturnRoute = homeRoute
+          homeRoute = CodexHomeRoute.Draft
+        }
+      }
+      val sendInitialDraft = {
+        val message = draft.trim()
+        val path = selectedProjectPath
+        if (message.isNotEmpty() && path.isNotEmpty() && !isStartingDraftThread) {
+          threadReturnRoute = draftReturnRoute
+          threadReturnScope = historyScope
+          draft = ""
+          isStartingDraftThread = true
+          scope.launch {
+            try {
+              onStartThreadAndSend(path, message)
+              isShowingThread = true
+            } finally {
+              isStartingDraftThread = false
+            }
+          }
+        }
+      }
+
+      when (homeRoute) {
+        CodexHomeRoute.Overview ->
+          CodexProjectHistoryPanel(
+            snapshot = snapshot,
+            selectedPath = selectedPath,
+            onSelectedPathChange = { selectedPath = it },
+            historySearch = historySearch,
+            onHistorySearchChange = { historySearch = it },
+            historyScope = historyScope,
+            onHistoryScopeChange = { nextScope ->
+              historyScope = nextScope
+              val nextCwd = if (nextScope == CodexHistoryScope.CurrentProject) selectedProjectPath else ""
+              if (snapshot.status == CodexStatus.Connected && (nextScope == CodexHistoryScope.AllProjects || selectedProjectPath.isNotEmpty())) {
+                scope.launch { onListThreads(nextCwd, historySearch, "", showArchivedThreads, false) }
+              }
+            },
+            showArchivedThreads = showArchivedThreads,
+            onToggleArchivedThreads = {
+              val nextArchived = !showArchivedThreads
+              showArchivedThreads = nextArchived
+              if (canUseHistoryActions) {
+                scope.launch { onListThreads(historyCwd, historySearch, "", nextArchived, false) }
+              }
+            },
+            onSelectProject = { path ->
+              selectedPath = path
+              historyScope = CodexHistoryScope.CurrentProject
+              homeRoute = CodexHomeRoute.Project
+              scope.launch {
+                onListThreads(path, historySearch, "", showArchivedThreads, false)
+              }
+            },
+            canUseProjectActions = canUseProjectActions,
+            canUseHistoryActions = canUseHistoryActions,
+            onUseTypedPath = {
+              val path = selectedProjectPath
+              if (path.isNotEmpty()) {
+                historyScope = CodexHistoryScope.CurrentProject
+                homeRoute = CodexHomeRoute.Project
+                scope.launch {
+                  onListThreads(path, historySearch, "", showArchivedThreads, false)
+                }
+              }
+            },
+            onRefreshHistory = refreshCurrentHistory,
+            onLoadMoreHistory = { cursor ->
+              if (canUseHistoryActions) {
+                scope.launch { onListThreads(historyCwd, historySearch, cursor, showArchivedThreads, true) }
+              }
+            },
+            onStartThread = beginDraftChat,
+            onResumeThread = openThread,
+            onReadThread = { threadId -> scope.launch { onReadThread(threadId) } },
+            onRenameThread = { thread ->
+              renameTarget = thread
+              renameText = thread.displayTitle
+            },
+            onArchiveThread = { threadId -> scope.launch { onArchiveThread(threadId) } },
+            onUnarchiveThread = { threadId -> scope.launch { onUnarchiveThread(threadId) } },
+            onDeleteThread = { thread -> deleteTarget = thread },
+            onForkThread = { thread ->
+              scope.launch { onForkThread(thread.id, selectedProjectPath.ifBlank { thread.cwd }) }
+            },
+            openingThreadId = openingThreadId,
+            modelTitle = selectedModelTitle,
+            onShowSettings = showSettingsAction,
+            modifier = Modifier.weight(1f),
+          )
+
+        CodexHomeRoute.Project ->
+          CodexProjectThreadsPanel(
+            snapshot = snapshot,
+            selectedPath = selectedProjectPath,
+            historySearch = historySearch,
+            onHistorySearchChange = { historySearch = it },
+            showArchivedThreads = showArchivedThreads,
+            onToggleArchivedThreads = {
+              val nextArchived = !showArchivedThreads
+              showArchivedThreads = nextArchived
+              if (canUseProjectActions) {
+                scope.launch { onListThreads(selectedProjectPath, historySearch, "", nextArchived, false) }
+              }
+            },
+            onBackToOverview = {
+              homeRoute = CodexHomeRoute.Overview
+              historyScope = CodexHistoryScope.AllProjects
+              scope.launch { onListThreads("", historySearch, "", showArchivedThreads, false) }
+            },
+            onRefreshHistory = {
+              if (canUseProjectActions) {
+                scope.launch { onListThreads(selectedProjectPath, historySearch, "", showArchivedThreads, false) }
+              }
+            },
+            onLoadMoreHistory = { cursor ->
+              if (canUseProjectActions) {
+                scope.launch { onListThreads(selectedProjectPath, historySearch, cursor, showArchivedThreads, true) }
+              }
+            },
+            onStartThread = beginDraftChat,
+            onResumeThread = openThread,
+            onRenameThread = { thread ->
+              renameTarget = thread
+              renameText = thread.displayTitle
+            },
+            onArchiveThread = { threadId -> scope.launch { onArchiveThread(threadId) } },
+            onUnarchiveThread = { threadId -> scope.launch { onUnarchiveThread(threadId) } },
+            onDeleteThread = { thread -> deleteTarget = thread },
+            onForkThread = { thread ->
+              scope.launch { onForkThread(thread.id, selectedProjectPath.ifBlank { thread.cwd }) }
+            },
+            openingThreadId = openingThreadId,
+            modelTitle = selectedModelTitle,
+            onShowSettings = showSettingsAction,
+            modifier = Modifier.weight(1f),
+          )
+
+        CodexHomeRoute.Draft ->
+          CodexDraftChatPanel(
+            selectedPath = selectedPath,
+            onSelectedPathChange = { selectedPath = it },
+            knownProjectPaths = knownProjectPaths,
+            draft = draft,
+            onDraftChange = { draft = it },
+            modelTitle = selectedModelTitle,
+            canSend = canSendInitialDraft,
+            isStarting = isStartingDraftThread,
+            backTitle = if (draftReturnRoute == CodexHomeRoute.Project) lastPathComponent(selectedProjectPath) else "Projects",
+            onShowSettings = showSettingsAction,
+            onSend = sendInitialDraft,
+            onShowProject = {
+              val path = selectedProjectPath
+              if (path.isNotEmpty()) {
+                historyScope = CodexHistoryScope.CurrentProject
+                homeRoute = CodexHomeRoute.Project
+                scope.launch { onListThreads(path, historySearch, "", showArchivedThreads, false) }
+              }
+            },
+            onBack = {
+              homeRoute = draftReturnRoute
+            },
+            modifier = Modifier.weight(1f),
+          )
+      }
+    } else {
+      LazyColumn(
+        modifier = Modifier.weight(1f).fillMaxWidth().padding(horizontal = 12.dp),
+        state = listState,
+        verticalArrangement = Arrangement.spacedBy(10.dp),
+      ) {
+        item("thread-toolbar") {
+          CodexThreadToolbar(
+            snapshot = snapshot,
+            selectedPath = selectedProjectPath,
+            onLoadMore = { threadId, cursor ->
+              scope.launch { onLoadMoreThreadTurns(threadId, cursor) }
+            },
+            onFork = { threadId, cwd ->
+              scope.launch { onForkThread(threadId, cwd) }
+            },
+          )
+        }
+
+        items(snapshot.pendingApprovals, key = { "approval-${it.requestId}" }) { approval ->
+          CodexApprovalCard(
+            approval = approval,
+            onDecision = { decision -> onApprovalDecision(approval.requestId, decision) },
+          )
+        }
+
+        items(snapshot.messages.filter { it.isVisibleInChat }, key = { it.id }) { message ->
+          CodexMessageBubble(message)
+        }
+
+        if (snapshot.turnActive) {
+          item("turn-active") {
+            Row(
+              modifier = Modifier.fillMaxWidth().padding(8.dp),
+              horizontalArrangement = Arrangement.spacedBy(8.dp),
+              verticalAlignment = Alignment.CenterVertically,
+            ) {
+              Text("Codex is working...", color = ShellowColors.TerminalMuted, modifier = Modifier.weight(1f))
+              TextButton(onClick = onInterruptTurn) { Text("Interrupt") }
+            }
+          }
+        }
+      }
+
+      Row(
+        modifier =
+          Modifier
+            .fillMaxWidth()
+            .imePadding()
+            .padding(12.dp),
+        verticalAlignment = Alignment.Bottom,
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+      ) {
+        CodexModelSettingsButton(
+          title = selectedModelTitle,
+          onClick = {
+            settingsModel = snapshot.settings.model.orEmpty()
+            settingsApprovalPolicy = snapshot.settings.approvalPolicy.orEmpty()
+            settingsSandbox = snapshot.settings.sandbox.orEmpty()
+            showSettings = true
           },
-          onDetachRendererSurface = { core.detachRendererSurface() },
-          onClearTerminal = { updateSession(core.clearTerminal()) },
-          onResetTerminal = { updateSession(core.resetTerminal()) },
         )
-      AppScreen.Hosts ->
-        HostsScreen(
-          profiles = profiles,
-          secretStore = secretStore,
-          onOpenSettings = { screen = AppScreen.Settings },
-          onAddProfile = { profile ->
-            profiles.add(profile)
-            saveHostProfiles(context, profiles)
-          },
-          onPreview = { profile ->
-            reconnectTarget = ReconnectTarget.Preview(profile)
-            updateSession(core.connectPreview(profile))
-            screen = AppScreen.Terminal
-          },
-          onConnectPassword = { profile, password, startup ->
-            reconnectTarget = ReconnectTarget.Password(profile, password, startup)
-            connectPasswordShell(profile, password, startup)
-          },
-          onConnectPrivateKey = { profile, privateKeyPem, passphrase, startup ->
-            reconnectTarget = ReconnectTarget.PrivateKey(profile, privateKeyPem, passphrase, startup)
-            connectPrivateKeyShell(profile, privateKeyPem, passphrase, startup)
-          },
+        OutlinedTextField(
+          value = draft,
+          onValueChange = { draft = it },
+          modifier = Modifier.weight(1f),
+          label = { Text("Message Codex") },
+          minLines = 1,
+          maxLines = 5,
         )
-      AppScreen.Settings ->
-        SettingsScreen(
-          report = session.integration,
-          displaySettings = displaySettings,
-          onBack = { screen = AppScreen.Hosts },
-          onDisplaySettingsChange = { displaySettings = it },
+        Button(
+          onClick = {
+            val message = draft.trim()
+            if (message.isNotEmpty()) {
+              draft = ""
+              scope.launch { onSendMessage(message) }
+            }
+          },
+          enabled = canSend,
+        ) {
+          Text(if (snapshot.turnActive) "Steer" else "Send")
+        }
+      }
+    }
+  }
+}
+
+private enum class CodexHomeRoute {
+  Overview,
+  Project,
+  Draft,
+}
+
+private enum class CodexHistoryScope {
+  CurrentProject,
+  AllProjects,
+}
+
+@Composable
+private fun CodexModelSettingsButton(
+  title: String,
+  onClick: () -> Unit,
+  modifier: Modifier = Modifier,
+) {
+  TextButton(
+    onClick = onClick,
+    modifier = modifier.widthIn(max = 142.dp),
+  ) {
+    Text(
+      title,
+      maxLines = 1,
+      overflow = TextOverflow.Ellipsis,
+    )
+  }
+}
+
+private fun codexModelPickerOptions(
+  options: List<CodexModelOption>,
+  current: String,
+): List<CodexModelOption> {
+  val normalized = normalizeCodexModel(current)
+  return if (normalized != null && options.none { it.id == normalized }) {
+    options + CodexModelOption(normalized, normalized)
+  } else {
+    options
+  }
+}
+
+private fun codexSelectedModelTitle(
+  options: List<CodexModelOption>,
+  current: String?,
+): String {
+  val normalized = normalizeCodexModel(current) ?: return "Default"
+  return options.firstOrNull { it.id == normalized }?.name ?: normalized
+}
+
+private fun normalizeCodexModel(value: String?): String? =
+  value?.trim()?.takeIf { it.isNotEmpty() }
+
+@Composable
+private fun CodexProjectHistoryPanel(
+  snapshot: CodexSnapshot,
+  selectedPath: String,
+  onSelectedPathChange: (String) -> Unit,
+  historySearch: String,
+  onHistorySearchChange: (String) -> Unit,
+  historyScope: CodexHistoryScope,
+  onHistoryScopeChange: (CodexHistoryScope) -> Unit,
+  showArchivedThreads: Boolean,
+  onToggleArchivedThreads: () -> Unit,
+  onSelectProject: (String) -> Unit,
+  canUseProjectActions: Boolean,
+  canUseHistoryActions: Boolean,
+  onUseTypedPath: () -> Unit,
+  onRefreshHistory: () -> Unit,
+  onLoadMoreHistory: (String) -> Unit,
+  onStartThread: () -> Unit,
+  onResumeThread: (String) -> Unit,
+  onReadThread: (String) -> Unit,
+  onRenameThread: (CodexThreadSummary) -> Unit,
+  onArchiveThread: (String) -> Unit,
+  onUnarchiveThread: (String) -> Unit,
+  onDeleteThread: (CodexThreadSummary) -> Unit,
+  onForkThread: (CodexThreadSummary) -> Unit,
+  openingThreadId: String?,
+  modelTitle: String,
+  onShowSettings: () -> Unit,
+  modifier: Modifier = Modifier,
+) {
+  val selectedProjectPath = selectedPath.trim()
+  val homeSearchTerm = historySearch.trim()
+  val knownProjectPaths =
+    mergeProjects(
+      snapshot.projects.recent,
+      listOfNotNull(snapshot.projects.current, snapshot.cwd),
+    )
+  val visibleProjectPaths = knownProjectPaths.filter { matchesHomeSearch(it, homeSearchTerm) }
+  val visibleThreads =
+    snapshot.threads.threads.filter { thread ->
+      homeSearchTerm.isBlank() ||
+        matchesHomeSearch(thread.displayTitle, homeSearchTerm) ||
+        matchesHomeSearch(thread.preview, homeSearchTerm) ||
+        matchesHomeSearch(thread.cwd, homeSearchTerm)
+    }
+
+  Column(modifier = modifier.fillMaxWidth()) {
+    LazyColumn(
+      modifier = Modifier.weight(1f).fillMaxWidth().padding(horizontal = 12.dp),
+      verticalArrangement = Arrangement.spacedBy(18.dp),
+    ) {
+      item("projects") {
+        CodexProjectsSection(
+          snapshot = snapshot,
+          selectedPath = selectedPath,
+          onSelectedPathChange = onSelectedPathChange,
+          visibleProjectPaths = visibleProjectPaths,
+          homeSearchTerm = homeSearchTerm,
+          onSelectProject = onSelectProject,
+          onUseTypedPath = onUseTypedPath,
+          canUseProjectActions = canUseProjectActions,
+          selectedProjectPath = selectedProjectPath,
         )
+      }
+
+      item("recent-conversations") {
+        CodexRecentConversationsSection(
+          snapshot = snapshot,
+          visibleThreads = visibleThreads,
+          homeSearchTerm = homeSearchTerm,
+          historyScope = historyScope,
+          onHistoryScopeChange = onHistoryScopeChange,
+          showArchivedThreads = showArchivedThreads,
+          onToggleArchivedThreads = onToggleArchivedThreads,
+          onRefreshHistory = onRefreshHistory,
+          onLoadMoreHistory = onLoadMoreHistory,
+          onResumeThread = onResumeThread,
+          onReadThread = onReadThread,
+          onRenameThread = onRenameThread,
+          onArchiveThread = onArchiveThread,
+          onUnarchiveThread = onUnarchiveThread,
+          onDeleteThread = onDeleteThread,
+          onForkThread = onForkThread,
+          openingThreadId = openingThreadId,
+          canRefresh = canUseHistoryActions,
+        )
+      }
+    }
+
+    Row(
+      modifier =
+        Modifier
+          .fillMaxWidth()
+          .imePadding()
+          .background(ShellowColors.PanelBackground)
+          .padding(12.dp),
+      horizontalArrangement = Arrangement.spacedBy(8.dp),
+      verticalAlignment = Alignment.CenterVertically,
+    ) {
+      CodexModelSettingsButton(
+        title = modelTitle,
+        onClick = onShowSettings,
+      )
+      OutlinedTextField(
+        value = historySearch,
+        onValueChange = onHistorySearchChange,
+        modifier = Modifier.weight(1f),
+        label = { Text("Search projects or conversations") },
+        singleLine = true,
+        keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
+        keyboardActions = KeyboardActions(onSearch = { onRefreshHistory() }),
+      )
+      Button(onClick = onStartThread, enabled = canUseProjectActions) {
+        Text("Chat")
+      }
+    }
+  }
+}
+
+@Composable
+private fun CodexProjectThreadsPanel(
+  snapshot: CodexSnapshot,
+  selectedPath: String,
+  historySearch: String,
+  onHistorySearchChange: (String) -> Unit,
+  showArchivedThreads: Boolean,
+  onToggleArchivedThreads: () -> Unit,
+  onBackToOverview: () -> Unit,
+  onRefreshHistory: () -> Unit,
+  onLoadMoreHistory: (String) -> Unit,
+  onStartThread: () -> Unit,
+  onResumeThread: (String) -> Unit,
+  onRenameThread: (CodexThreadSummary) -> Unit,
+  onArchiveThread: (String) -> Unit,
+  onUnarchiveThread: (String) -> Unit,
+  onDeleteThread: (CodexThreadSummary) -> Unit,
+  onForkThread: (CodexThreadSummary) -> Unit,
+  openingThreadId: String?,
+  modelTitle: String,
+  onShowSettings: () -> Unit,
+  modifier: Modifier = Modifier,
+) {
+  val homeSearchTerm = historySearch.trim()
+  val visibleThreads =
+    snapshot.threads.threads.filter { thread ->
+      homeSearchTerm.isBlank() ||
+        matchesHomeSearch(thread.displayTitle, homeSearchTerm) ||
+        matchesHomeSearch(thread.preview, homeSearchTerm) ||
+        matchesHomeSearch(thread.cwd, homeSearchTerm)
+    }
+
+  Column(modifier = modifier.fillMaxWidth()) {
+    LazyColumn(
+      modifier = Modifier.weight(1f).fillMaxWidth().padding(horizontal = 12.dp),
+      verticalArrangement = Arrangement.spacedBy(10.dp),
+    ) {
+      item("project-header") {
+        Column(
+          modifier = Modifier.fillMaxWidth().padding(top = 12.dp),
+          verticalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+          TextButton(onClick = onBackToOverview) { Text("Projects") }
+          CodexSectionHeader(
+            title = lastPathComponent(selectedPath),
+            detail = selectedPath,
+          )
+          Row(
+            modifier = Modifier.horizontalScroll(rememberScrollState()),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+          ) {
+            FilterChip(
+              selected = showArchivedThreads,
+              onClick = onToggleArchivedThreads,
+              label = { Text("Archived") },
+            )
+            FilterChip(
+              selected = false,
+              onClick = onRefreshHistory,
+              label = { Text("Refresh") },
+            )
+          }
+        }
+      }
+
+      if (snapshot.threads.isLoading) {
+        item("project-loading") {
+          Text("Loading history...", color = ShellowColors.TerminalMuted, modifier = Modifier.padding(8.dp))
+        }
+      }
+      snapshot.threads.error?.let { error ->
+        item("project-error") {
+          Text(error, color = ShellowColors.Warning, modifier = Modifier.padding(8.dp))
+        }
+      }
+      items(visibleThreads, key = { it.id }) { thread ->
+        CodexThreadRow(
+          thread = thread,
+          archived = showArchivedThreads,
+          isOpening = openingThreadId == thread.id,
+          onResume = { onResumeThread(thread.id) },
+          onRename = { onRenameThread(thread) },
+          onArchive = { onArchiveThread(thread.id) },
+          onUnarchive = { onUnarchiveThread(thread.id) },
+          onDelete = { onDeleteThread(thread) },
+          onFork = { onForkThread(thread) },
+        )
+      }
+      snapshot.threads.nextCursor?.let { cursor ->
+        if (homeSearchTerm.isBlank()) {
+          item("project-load-more") {
+            Button(
+              onClick = { onLoadMoreHistory(cursor) },
+              enabled = !snapshot.threads.isLoadingMore,
+              modifier = Modifier.fillMaxWidth(),
+            ) {
+              Text(if (snapshot.threads.isLoadingMore) "Loading..." else "Load More")
+            }
+          }
+        }
+      }
+      if (visibleThreads.isEmpty() && !snapshot.threads.isLoading && snapshot.threads.error == null) {
+        item("project-empty") {
+          Text(
+            if (homeSearchTerm.isBlank()) "No conversations in this project" else "No matching conversations",
+            color = ShellowColors.TerminalMuted,
+            modifier = Modifier.fillMaxWidth().padding(24.dp),
+          )
+        }
+      }
+    }
+
+    Row(
+      modifier =
+        Modifier
+          .fillMaxWidth()
+          .imePadding()
+          .background(ShellowColors.PanelBackground)
+          .padding(12.dp),
+      horizontalArrangement = Arrangement.spacedBy(8.dp),
+      verticalAlignment = Alignment.CenterVertically,
+    ) {
+      CodexModelSettingsButton(
+        title = modelTitle,
+        onClick = onShowSettings,
+      )
+      OutlinedTextField(
+        value = historySearch,
+        onValueChange = onHistorySearchChange,
+        modifier = Modifier.weight(1f),
+        label = { Text("Search this project") },
+        singleLine = true,
+        keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
+        keyboardActions = KeyboardActions(onSearch = { onRefreshHistory() }),
+      )
+      Button(onClick = onStartThread, enabled = selectedPath.isNotBlank()) {
+        Text("Chat")
+      }
+    }
+  }
+}
+
+@Composable
+private fun CodexDraftChatPanel(
+  selectedPath: String,
+  onSelectedPathChange: (String) -> Unit,
+  knownProjectPaths: List<String>,
+  draft: String,
+  onDraftChange: (String) -> Unit,
+  modelTitle: String,
+  canSend: Boolean,
+  isStarting: Boolean,
+  backTitle: String,
+  onShowSettings: () -> Unit,
+  onSend: () -> Unit,
+  onShowProject: () -> Unit,
+  onBack: () -> Unit,
+  modifier: Modifier = Modifier,
+) {
+  Column(modifier = modifier.fillMaxWidth()) {
+    LazyColumn(
+      modifier = Modifier.weight(1f).fillMaxWidth().padding(horizontal = 12.dp),
+      verticalArrangement = Arrangement.spacedBy(10.dp),
+    ) {
+      item("draft-header") {
+        Column(
+          modifier = Modifier.fillMaxWidth().padding(top = 12.dp),
+          verticalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+          TextButton(onClick = onBack) { Text(backTitle) }
+          CodexSectionHeader(
+            title = "New Conversation",
+            detail = selectedPath.ifBlank { "Choose a workspace before sending" },
+          )
+          Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+            OutlinedTextField(
+              value = selectedPath,
+              onValueChange = onSelectedPathChange,
+              modifier = Modifier.weight(1f),
+              label = { Text("Workspace path") },
+              singleLine = true,
+            )
+            Button(onClick = onShowProject, enabled = selectedPath.isNotBlank()) { Text("Show") }
+          }
+        }
+      }
+
+      items(knownProjectPaths, key = { it }) { path ->
+        CodexDirectoryRow(lastPathComponent(path), path) { onSelectedPathChange(path) }
+      }
+    }
+
+    Row(
+      modifier =
+        Modifier
+          .fillMaxWidth()
+          .imePadding()
+          .background(ShellowColors.PanelBackground)
+          .padding(12.dp),
+      verticalAlignment = Alignment.Bottom,
+      horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+      CodexModelSettingsButton(
+        title = modelTitle,
+        onClick = onShowSettings,
+      )
+      OutlinedTextField(
+        value = draft,
+        onValueChange = onDraftChange,
+        modifier = Modifier.weight(1f),
+        label = { Text("Message Codex") },
+        minLines = 1,
+        maxLines = 5,
+      )
+      Button(onClick = onSend, enabled = canSend) {
+        Text(if (isStarting) "Starting" else "Send")
+      }
+    }
+  }
+}
+
+@Composable
+private fun CodexProjectsSection(
+  snapshot: CodexSnapshot,
+  selectedPath: String,
+  onSelectedPathChange: (String) -> Unit,
+  visibleProjectPaths: List<String>,
+  homeSearchTerm: String,
+  onSelectProject: (String) -> Unit,
+  onUseTypedPath: () -> Unit,
+  canUseProjectActions: Boolean,
+  selectedProjectPath: String,
+) {
+  Column(
+    modifier = Modifier.fillMaxWidth().padding(top = 12.dp),
+    verticalArrangement = Arrangement.spacedBy(10.dp),
+  ) {
+    CodexSectionHeader(
+      title = "Projects",
+      detail = selectedProjectPath.ifBlank { "No project selected" },
+    )
+
+    Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+      OutlinedTextField(
+        value = selectedPath,
+        onValueChange = onSelectedPathChange,
+        modifier = Modifier.weight(1f),
+        label = { Text("Project path") },
+        singleLine = true,
+      )
+      Button(onClick = onUseTypedPath, enabled = canUseProjectActions) { Text("Show") }
+    }
+
+    visibleProjectPaths.forEach { path ->
+      CodexDirectoryRow(lastPathComponent(path), path) { onSelectProject(path) }
+    }
+
+    if (
+      visibleProjectPaths.isEmpty() &&
+        !snapshot.threads.isLoading
+    ) {
+      Text(
+        if (homeSearchTerm.isBlank()) "No projects" else "No matching projects",
+        color = ShellowColors.TerminalMuted,
+        modifier = Modifier.fillMaxWidth().padding(24.dp),
+      )
+    }
+  }
+}
+
+@Composable
+private fun CodexRecentConversationsSection(
+  snapshot: CodexSnapshot,
+  visibleThreads: List<CodexThreadSummary>,
+  homeSearchTerm: String,
+  historyScope: CodexHistoryScope,
+  onHistoryScopeChange: (CodexHistoryScope) -> Unit,
+  showArchivedThreads: Boolean,
+  onToggleArchivedThreads: () -> Unit,
+  onRefreshHistory: () -> Unit,
+  onLoadMoreHistory: (String) -> Unit,
+  onResumeThread: (String) -> Unit,
+  onReadThread: (String) -> Unit,
+  onRenameThread: (CodexThreadSummary) -> Unit,
+  onArchiveThread: (String) -> Unit,
+  onUnarchiveThread: (String) -> Unit,
+  onDeleteThread: (CodexThreadSummary) -> Unit,
+  onForkThread: (CodexThreadSummary) -> Unit,
+  openingThreadId: String?,
+  canRefresh: Boolean,
+) {
+  Column(
+    modifier = Modifier.fillMaxWidth().padding(bottom = 12.dp),
+    verticalArrangement = Arrangement.spacedBy(10.dp),
+  ) {
+    CodexSectionHeader(
+      title = "Recent Conversations",
+      detail = if (historyScope == CodexHistoryScope.CurrentProject) "Current project" else "All projects",
+    )
+
+    Row(
+      modifier = Modifier.horizontalScroll(rememberScrollState()),
+      horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+      FilterChip(
+        selected = historyScope == CodexHistoryScope.CurrentProject,
+        onClick = { onHistoryScopeChange(CodexHistoryScope.CurrentProject) },
+        label = { Text("Current") },
+      )
+      FilterChip(
+        selected = historyScope == CodexHistoryScope.AllProjects,
+        onClick = { onHistoryScopeChange(CodexHistoryScope.AllProjects) },
+        label = { Text("All") },
+      )
+      FilterChip(
+        selected = showArchivedThreads,
+        onClick = onToggleArchivedThreads,
+        label = { Text("Archived") },
+      )
+      FilterChip(
+        selected = false,
+        onClick = onRefreshHistory,
+        enabled = canRefresh,
+        label = { Text("Refresh") },
+      )
+    }
+
+    if (snapshot.threads.isLoading) {
+      Text("Loading history...", color = ShellowColors.TerminalMuted, modifier = Modifier.padding(8.dp))
+    }
+    snapshot.threads.error?.let { error ->
+      Text(error, color = ShellowColors.Warning, modifier = Modifier.padding(8.dp))
+    }
+    visibleThreads.forEach { thread ->
+      CodexThreadRow(
+        thread = thread,
+        archived = showArchivedThreads,
+        isOpening = openingThreadId == thread.id,
+        onResume = { onResumeThread(thread.id) },
+        onRename = { onRenameThread(thread) },
+        onArchive = { onArchiveThread(thread.id) },
+        onUnarchive = { onUnarchiveThread(thread.id) },
+        onDelete = { onDeleteThread(thread) },
+        onFork = { onForkThread(thread) },
+      )
+    }
+    snapshot.threads.nextCursor?.let { cursor ->
+      if (homeSearchTerm.isBlank()) {
+        Button(
+          onClick = { onLoadMoreHistory(cursor) },
+          enabled = !snapshot.threads.isLoadingMore,
+          modifier = Modifier.fillMaxWidth(),
+        ) {
+          Text(if (snapshot.threads.isLoadingMore) "Loading..." else "Load More")
+        }
+      }
+    }
+    if (visibleThreads.isEmpty() && !snapshot.threads.isLoading && snapshot.threads.error == null) {
+      Text(
+        if (homeSearchTerm.isBlank()) "No recent conversations" else "No matching conversations",
+        color = ShellowColors.TerminalMuted,
+        modifier = Modifier.fillMaxWidth().padding(24.dp),
+      )
+    }
+  }
+}
+
+@Composable
+private fun CodexSectionHeader(
+  title: String,
+  detail: String,
+) {
+  Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+    Text(title, color = ShellowColors.TerminalText, style = MaterialTheme.typography.titleSmall)
+    Text(detail, color = ShellowColors.TerminalMuted, style = MaterialTheme.typography.labelSmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
+  }
+}
+
+@Composable
+private fun CodexProjectChip(
+  path: String,
+  favorite: Boolean,
+  onClick: () -> Unit,
+) {
+  Column(
+    modifier =
+      Modifier
+        .clickable(onClick = onClick)
+        .background(ShellowColors.PanelBackground, RoundedCornerShape(8.dp))
+        .padding(horizontal = 10.dp, vertical = 7.dp),
+    verticalArrangement = Arrangement.spacedBy(2.dp),
+  ) {
+    Text(
+      if (favorite) "★ ${lastPathComponent(path)}" else lastPathComponent(path),
+      color = ShellowColors.TerminalText,
+      style = MaterialTheme.typography.labelMedium,
+      maxLines = 1,
+      overflow = TextOverflow.Ellipsis,
+    )
+    Text(path, color = ShellowColors.TerminalMuted, style = MaterialTheme.typography.labelSmall, maxLines = 1)
+  }
+}
+
+@Composable
+private fun CodexDirectoryList(
+  snapshot: CodexSnapshot,
+  onOpenDirectory: (String) -> Unit,
+  modifier: Modifier = Modifier,
+) {
+  LazyColumn(
+    modifier = modifier.fillMaxWidth().padding(horizontal = 12.dp),
+    verticalArrangement = Arrangement.spacedBy(8.dp),
+  ) {
+    if (snapshot.directory.isLoading) {
+      item("directory-loading") {
+        Text("Loading folders...", color = ShellowColors.TerminalMuted, modifier = Modifier.padding(8.dp))
+      }
+    }
+    snapshot.directory.error?.let { error ->
+      item("directory-error") {
+        Text(error, color = ShellowColors.Warning, modifier = Modifier.padding(8.dp))
+      }
+    }
+    snapshot.directory.parent?.let { parent ->
+      item("parent") {
+        CodexDirectoryRow("..", parent) { onOpenDirectory(parent) }
+      }
+    }
+    val folders = snapshot.directory.entries.filter { it.isDirectory }
+    items(folders, key = { it.path }) { entry ->
+      CodexDirectoryRow(entry.name, entry.path) { onOpenDirectory(entry.path) }
+    }
+    if (folders.isEmpty() && !snapshot.directory.isLoading && snapshot.directory.error == null) {
+      item("empty-folders") {
+        Text("No folders", color = ShellowColors.TerminalMuted, modifier = Modifier.fillMaxWidth().padding(24.dp))
+      }
+    }
+  }
+}
+
+@Composable
+private fun CodexDirectoryRow(
+  title: String,
+  path: String,
+  onClick: () -> Unit,
+) {
+  Column(
+    modifier =
+      Modifier
+        .fillMaxWidth()
+        .clickable(onClick = onClick)
+        .background(ShellowColors.PanelBackground, RoundedCornerShape(8.dp))
+        .padding(10.dp),
+    verticalArrangement = Arrangement.spacedBy(3.dp),
+  ) {
+    Text(title, color = ShellowColors.TerminalText, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold)
+    Text(path, color = ShellowColors.TerminalMuted, style = MaterialTheme.typography.labelSmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
+  }
+}
+
+@Composable
+private fun CodexHistoryList(
+  snapshot: CodexSnapshot,
+  historySearch: String,
+  onHistorySearchChange: (String) -> Unit,
+  historyScope: CodexHistoryScope,
+  onHistoryScopeChange: (CodexHistoryScope) -> Unit,
+  showArchivedThreads: Boolean,
+  onToggleArchivedThreads: () -> Unit,
+  onRefreshHistory: () -> Unit,
+  onLoadMoreHistory: (String) -> Unit,
+  onResumeThread: (String) -> Unit,
+  onReadThread: (String) -> Unit,
+  onRenameThread: (CodexThreadSummary) -> Unit,
+  onArchiveThread: (String) -> Unit,
+  onUnarchiveThread: (String) -> Unit,
+  onDeleteThread: (CodexThreadSummary) -> Unit,
+  onForkThread: (CodexThreadSummary) -> Unit,
+  canRefresh: Boolean,
+  modifier: Modifier = Modifier,
+) {
+  Column(modifier = modifier.fillMaxWidth()) {
+    Column(
+      modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp),
+      verticalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+      Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        FilterChip(
+          selected = historyScope == CodexHistoryScope.CurrentProject,
+          onClick = { onHistoryScopeChange(CodexHistoryScope.CurrentProject) },
+          label = { Text("Current") },
+        )
+        FilterChip(
+          selected = historyScope == CodexHistoryScope.AllProjects,
+          onClick = { onHistoryScopeChange(CodexHistoryScope.AllProjects) },
+          label = { Text("All") },
+        )
+        FilterChip(
+          selected = showArchivedThreads,
+          onClick = onToggleArchivedThreads,
+          label = { Text("Archived") },
+        )
+      }
+      Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+        OutlinedTextField(
+          value = historySearch,
+          onValueChange = onHistorySearchChange,
+          modifier = Modifier.weight(1f),
+          label = { Text("Search threads") },
+          singleLine = true,
+        )
+        Button(onClick = onRefreshHistory, enabled = canRefresh) { Text("Search") }
+      }
+    }
+
+    LazyColumn(
+      modifier = Modifier.weight(1f).fillMaxWidth().padding(horizontal = 12.dp),
+      verticalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+      if (snapshot.threads.isLoading) {
+        item("history-loading") {
+          Text("Loading history...", color = ShellowColors.TerminalMuted, modifier = Modifier.padding(8.dp))
+        }
+      }
+      snapshot.threads.error?.let { error ->
+        item("history-error") {
+          Text(error, color = ShellowColors.Warning, modifier = Modifier.padding(8.dp))
+        }
+      }
+      items(snapshot.threads.threads, key = { it.id }) { thread ->
+        CodexThreadRow(
+          thread = thread,
+          archived = showArchivedThreads,
+          onResume = { onResumeThread(thread.id) },
+          onRename = { onRenameThread(thread) },
+          onArchive = { onArchiveThread(thread.id) },
+          onUnarchive = { onUnarchiveThread(thread.id) },
+          onDelete = { onDeleteThread(thread) },
+          onFork = { onForkThread(thread) },
+        )
+      }
+      snapshot.threads.nextCursor?.let { cursor ->
+        item("load-more-history") {
+          Button(
+            onClick = { onLoadMoreHistory(cursor) },
+            enabled = !snapshot.threads.isLoadingMore,
+            modifier = Modifier.fillMaxWidth(),
+          ) {
+            Text(if (snapshot.threads.isLoadingMore) "Loading..." else "Load More")
+          }
+        }
+      }
+      if (snapshot.threads.threads.isEmpty() && !snapshot.threads.isLoading && snapshot.threads.error == null) {
+        item("empty-history") {
+          Text("No history", color = ShellowColors.TerminalMuted, modifier = Modifier.fillMaxWidth().padding(24.dp))
+        }
+      }
+    }
+  }
+}
+
+@Composable
+private fun CodexThreadRow(
+  thread: CodexThreadSummary,
+  archived: Boolean,
+  isOpening: Boolean = false,
+  onResume: () -> Unit,
+  onRename: () -> Unit,
+  onArchive: () -> Unit,
+  onUnarchive: () -> Unit,
+  onDelete: () -> Unit,
+  onFork: () -> Unit,
+) {
+  Column(
+    modifier =
+      Modifier
+        .fillMaxWidth()
+        .background(ShellowColors.PanelBackground, RoundedCornerShape(8.dp))
+        .padding(10.dp),
+    verticalArrangement = Arrangement.spacedBy(4.dp),
+  ) {
+    Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.Top) {
+      Column(
+        modifier = Modifier.weight(1f).clickable(enabled = !isOpening, onClick = onResume),
+        verticalArrangement = Arrangement.spacedBy(4.dp),
+      ) {
+        Text(thread.displayTitle, color = ShellowColors.TerminalText, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold)
+        Text(thread.cwd, color = ShellowColors.TerminalMuted, style = MaterialTheme.typography.labelSmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        Text(formatCodexThreadMeta(thread), color = ShellowColors.TerminalMuted, style = MaterialTheme.typography.labelSmall)
+      }
+      if (isOpening) {
+        Text("Opening", color = ShellowColors.TerminalMuted, style = MaterialTheme.typography.labelMedium, modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp))
+      } else {
+        TextButton(onClick = onResume) { Text("Open") }
+      }
+    }
+    Row(modifier = Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+      TextButton(onClick = onRename) { Text("Rename") }
+      TextButton(onClick = onFork) { Text("Fork") }
+      TextButton(onClick = if (archived) onUnarchive else onArchive) { Text(if (archived) "Unarchive" else "Archive") }
+      TextButton(onClick = onDelete) { Text("Delete") }
+    }
+  }
+}
+
+private fun formatCodexThreadMeta(thread: CodexThreadSummary): String {
+  val timestampMs = thread.updatedAt.coerceAtLeast(0L) * 1000L
+  val formatted = SimpleDateFormat("MMM d, HH:mm", Locale.getDefault()).format(Date(timestampMs))
+  val fork = if (thread.forkedFromId != null) "fork" else ""
+  return listOf(formatted, thread.status, fork).filter { it.isNotBlank() }.joinToString("  ")
+}
+
+@Composable
+private fun CodexThreadToolbar(
+  snapshot: CodexSnapshot,
+  selectedPath: String,
+  onLoadMore: (String, String) -> Unit,
+  onFork: (String, String) -> Unit,
+) {
+  Row(
+    modifier =
+      Modifier
+        .fillMaxWidth()
+        .background(ShellowColors.PanelBackground, RoundedCornerShape(8.dp))
+        .padding(10.dp),
+    horizontalArrangement = Arrangement.spacedBy(8.dp),
+    verticalAlignment = Alignment.CenterVertically,
+  ) {
+    Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+      Text(snapshot.threadDetail.thread?.displayTitle ?: "Active Thread", color = ShellowColors.TerminalText, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold)
+      Text(snapshot.cwd ?: snapshot.threadDetail.thread?.cwd ?: "No project", color = ShellowColors.TerminalMuted, style = MaterialTheme.typography.labelSmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
+    }
+    val threadId = snapshot.threadId
+    val cursor = snapshot.threadDetail.turnsNextCursor
+    if (threadId != null && !cursor.isNullOrBlank()) {
+      TextButton(onClick = { onLoadMore(threadId, cursor) }) { Text("More") }
+    }
+    if (threadId != null) {
+      TextButton(onClick = { onFork(threadId, selectedPath.ifBlank { snapshot.cwd.orEmpty() }) }) { Text("Fork") }
+    }
+  }
+}
+
+@Composable
+private fun CodexSettingsDialog(
+  model: String,
+  modelOptions: List<CodexModelOption>,
+  isLoadingModels: Boolean,
+  modelsError: String?,
+  approvalPolicy: String,
+  sandbox: String,
+  onModelChange: (String) -> Unit,
+  onApprovalPolicyChange: (String) -> Unit,
+  onSandboxChange: (String) -> Unit,
+  onDismiss: () -> Unit,
+  onApply: () -> Unit,
+) {
+  val modelChoices =
+    remember(modelOptions, model) {
+      listOf("" to "Default") +
+        codexModelPickerOptions(modelOptions, model).map { it.id to it.name }
+    }
+
+  AlertDialog(
+    onDismissRequest = onDismiss,
+    containerColor = ShellowColors.PanelBackground,
+    titleContentColor = ShellowColors.TerminalText,
+    textContentColor = ShellowColors.TerminalText,
+    title = { Text("Codex Settings") },
+    text = {
+      Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        CodexOptionRow("Model", model, modelChoices, onModelChange)
+        if (isLoadingModels) {
+          Text("Loading models...", color = ShellowColors.TerminalMuted, style = MaterialTheme.typography.labelSmall)
+        } else if (!modelsError.isNullOrBlank()) {
+          Text(modelsError, color = ShellowColors.TerminalMuted, style = MaterialTheme.typography.labelSmall, maxLines = 2, overflow = TextOverflow.Ellipsis)
+        }
+        CodexOptionRow("Approval", approvalPolicy, listOf("" to "Default", "untrusted" to "Untrusted", "on-failure" to "On failure", "on-request" to "On request", "never" to "Never"), onApprovalPolicyChange)
+        CodexOptionRow("Sandbox", sandbox, listOf("" to "Default", "read-only" to "Read only", "workspace-write" to "Workspace write", "danger-full-access" to "Danger full access"), onSandboxChange)
+      }
+    },
+    confirmButton = { TextButton(onClick = onApply) { Text("Apply") } },
+    dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
+  )
+}
+
+@Composable
+@OptIn(ExperimentalLayoutApi::class)
+private fun CodexOptionRow(
+  title: String,
+  selected: String,
+  options: List<Pair<String, String>>,
+  onSelected: (String) -> Unit,
+) {
+  Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+    Text(title, color = ShellowColors.TerminalMuted, style = MaterialTheme.typography.labelSmall)
+    FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+      options.forEach { (value, label) ->
+        FilterChip(selected = selected == value, onClick = { onSelected(value) }, label = { Text(label) })
+      }
+    }
+  }
+}
+
+private val CodexThreadSummary.displayTitle: String
+  get() = name?.takeIf { it.isNotBlank() } ?: preview.ifBlank { id }
+
+private fun matchesHomeSearch(value: String, query: String): Boolean =
+  query.isBlank() || value.contains(query, ignoreCase = true)
+
+private fun mergeProjects(vararg groups: List<String>): List<String> {
+  val result = mutableListOf<String>()
+  groups.asList().flatten().forEach { path ->
+    val trimmed = path.trim()
+    if (trimmed.isNotEmpty() && trimmed !in result) {
+      result += trimmed
+    }
+  }
+  return result.take(20)
+}
+
+private fun lastPathComponent(path: String): String =
+  path.trim('/').split('/').lastOrNull()?.takeIf { it.isNotBlank() } ?: path
+
+private val CodexMessage.isVisibleInChat: Boolean
+  get() = visibility == CodexMessageVisibility.Primary || visibility == CodexMessageVisibility.Compact
+
+@Composable
+private fun CodexMessageBubble(message: CodexMessage) {
+  if (message.visibility == CodexMessageVisibility.Compact) {
+    CodexCompactMessageRow(message)
+    return
+  }
+
+  val container =
+    when (message.role) {
+      CodexMessageRole.User -> ShellowColors.UserMessageBackground
+      CodexMessageRole.Assistant -> ShellowColors.AssistantMessageBackground
+      CodexMessageRole.Status -> ShellowColors.StatusMessageBackground
+      CodexMessageRole.Tool,
+      CodexMessageRole.CommandOutput -> ShellowColors.ToolMessageBackground
+    }
+  val label =
+    when (message.role) {
+      CodexMessageRole.User -> "You"
+      CodexMessageRole.Assistant -> "Codex"
+      CodexMessageRole.Status -> "Status"
+      CodexMessageRole.Tool -> "Tool"
+      CodexMessageRole.CommandOutput -> "Output"
+    }
+  Column(
+    modifier =
+      Modifier
+        .fillMaxWidth()
+        .background(container, RoundedCornerShape(8.dp))
+        .padding(10.dp),
+    verticalArrangement = Arrangement.spacedBy(4.dp),
+  ) {
+    Text(label, color = ShellowColors.TerminalMuted, style = MaterialTheme.typography.labelSmall)
+    CodexMarkdownContent(message)
+  }
+}
+
+@Composable
+private fun CodexCompactMessageRow(message: CodexMessage) {
+  var expanded by remember(message.id) { mutableStateOf(false) }
+  val title = message.title ?: compactMessageTitle(message)
+  val body = message.text.ifBlank { message.detail.orEmpty() }
+  val hasDetails = !message.transcript.isNullOrBlank() || (!message.detail.isNullOrBlank() && message.detail != body)
+
+  Column(
+    modifier =
+      Modifier
+        .fillMaxWidth()
+        .background(ShellowColors.ToolMessageBackground.copy(alpha = 0.72f), RoundedCornerShape(8.dp))
+        .clickable(enabled = hasDetails) { expanded = !expanded }
+        .padding(horizontal = 10.dp, vertical = 8.dp),
+    verticalArrangement = Arrangement.spacedBy(6.dp),
+  ) {
+    Row(
+      modifier = Modifier.fillMaxWidth(),
+      horizontalArrangement = Arrangement.spacedBy(8.dp),
+      verticalAlignment = Alignment.Top,
+    ) {
+      Text(compactMessageGlyph(message), color = ShellowColors.TerminalMuted, style = MaterialTheme.typography.labelMedium)
+      Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+        Text(title, color = ShellowColors.TerminalText, style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.SemiBold)
+        if (body.isNotBlank()) {
+          Text(
+            body,
+            color = ShellowColors.TerminalMuted,
+            style = MaterialTheme.typography.bodySmall,
+            maxLines = if (expanded) Int.MAX_VALUE else 2,
+            overflow = TextOverflow.Ellipsis,
+          )
+        }
+      }
+      if (message.isStreaming) {
+        Text("live", color = ShellowColors.TerminalMuted, style = MaterialTheme.typography.labelSmall)
+      } else if (hasDetails) {
+        Text(if (expanded) "Hide" else "Details", color = ShellowColors.TerminalMuted, style = MaterialTheme.typography.labelSmall)
+      }
+    }
+
+    if (expanded) {
+      message.detail?.takeIf { it.isNotBlank() && it != body }?.let { detail ->
+        Text(detail, color = ShellowColors.TerminalMuted, style = MaterialTheme.typography.bodySmall)
+      }
+      message.transcript?.takeIf { it.isNotBlank() }?.let { transcript ->
+        Text(
+          transcript,
+          color = ShellowColors.TerminalText,
+          style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
+          modifier =
+            Modifier
+              .fillMaxWidth()
+              .background(ShellowColors.CodeBackground, RoundedCornerShape(6.dp))
+              .padding(8.dp),
+        )
+      }
+    }
+  }
+}
+
+private fun compactMessageTitle(message: CodexMessage): String =
+  when (message.kind) {
+    CodexMessageKind.Command -> "Command"
+    CodexMessageKind.CommandOutput -> "Command output"
+    CodexMessageKind.FileChange -> "File change"
+    CodexMessageKind.ReasoningSummary -> "Thinking"
+    CodexMessageKind.Status -> "Status"
+    CodexMessageKind.ToolCall,
+    CodexMessageKind.ToolResult -> "Tool"
+    CodexMessageKind.Plan -> "Plan"
+    CodexMessageKind.Commentary,
+    CodexMessageKind.FinalAnswer -> "Codex"
+    CodexMessageKind.UserMessage -> "You"
+  }
+
+private fun compactMessageGlyph(message: CodexMessage): String =
+  when (message.kind) {
+    CodexMessageKind.Command,
+    CodexMessageKind.CommandOutput -> "$"
+    CodexMessageKind.FileChange -> "+"
+    CodexMessageKind.ReasoningSummary -> "..."
+    CodexMessageKind.Status -> "i"
+    CodexMessageKind.ToolCall,
+    CodexMessageKind.ToolResult -> ">"
+    CodexMessageKind.Plan -> "#"
+    CodexMessageKind.Commentary,
+    CodexMessageKind.FinalAnswer -> "*"
+    CodexMessageKind.UserMessage -> "@"
+  }
+
+@Composable
+private fun CodexMarkdownContent(message: CodexMessage) {
+  Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+    if (message.blocks.isEmpty()) {
+      Text(
+        message.text.ifBlank { "..." },
+        color = if (message.role == CodexMessageRole.Status) ShellowColors.TerminalMuted else ShellowColors.TerminalText,
+        style =
+          if (message.role == CodexMessageRole.CommandOutput) {
+            MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace)
+          } else {
+            MaterialTheme.typography.bodyMedium
+          },
+      )
+    } else {
+      message.blocks.forEach { block ->
+        CodexMarkdownBlockView(block)
+      }
+    }
+
+    if (message.isStreaming) {
+      Text("Streaming", color = ShellowColors.TerminalMuted, style = MaterialTheme.typography.labelSmall)
+    }
+  }
+}
+
+@Composable
+private fun CodexMarkdownBlockView(block: CodexMarkdownBlock) {
+  when (block.kind) {
+    CodexMarkdownBlockKind.Paragraph ->
+      Text(
+        markdownAnnotatedString(block.runs, block.text),
+        color = ShellowColors.TerminalText,
+        style = MaterialTheme.typography.bodyMedium,
+      )
+    CodexMarkdownBlockKind.Heading ->
+      Text(
+        markdownAnnotatedString(block.runs, block.text),
+        color = ShellowColors.TerminalText,
+        style =
+          when (block.level ?: 2) {
+            1 -> MaterialTheme.typography.titleMedium
+            2 -> MaterialTheme.typography.titleSmall
+            else -> MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.SemiBold)
+          },
+      )
+    CodexMarkdownBlockKind.List ->
+      Column(verticalArrangement = Arrangement.spacedBy(5.dp)) {
+        block.items.forEachIndexed { index, item ->
+          Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.Top) {
+            Text(
+              if (block.ordered) "${index + 1}." else "•",
+              color = ShellowColors.TerminalMuted,
+              style = MaterialTheme.typography.bodyMedium.copy(fontFamily = FontFamily.Monospace),
+              modifier = Modifier.width(24.dp),
+            )
+            Text(
+              markdownAnnotatedString(item.runs, item.text),
+              color = ShellowColors.TerminalText,
+              style = MaterialTheme.typography.bodyMedium,
+              modifier = Modifier.weight(1f),
+            )
+          }
+        }
+      }
+    CodexMarkdownBlockKind.BlockQuote ->
+      Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.Top) {
+        Box(
+          modifier =
+            Modifier
+              .width(3.dp)
+              .height(22.dp)
+              .background(ShellowColors.TerminalMuted, RoundedCornerShape(2.dp)),
+        )
+        Text(
+          markdownAnnotatedString(block.runs, block.text),
+          color = ShellowColors.TerminalMuted,
+          style = MaterialTheme.typography.bodyMedium,
+          modifier = Modifier.weight(1f),
+        )
+      }
+    CodexMarkdownBlockKind.CodeBlock -> CodexCodeBlock(block)
+    CodexMarkdownBlockKind.Table -> CodexTableBlock(block)
+    CodexMarkdownBlockKind.HorizontalRule ->
+      Box(
+        modifier =
+          Modifier
+            .fillMaxWidth()
+            .height(1.dp)
+            .background(ShellowColors.TerminalMuted.copy(alpha = 0.35f)),
+      )
+    CodexMarkdownBlockKind.Image -> CodexImageBlock(block)
+  }
+}
+
+@Composable
+private fun CodexImageBlock(block: CodexMarkdownBlock) {
+  val source = block.imageUrl ?: block.text
+  val alt = block.imageAlt ?: block.text
+  val bitmapState =
+    produceState<Bitmap?>(initialValue = null, source) {
+      value = withContext(Dispatchers.IO) { loadCodexBitmap(source) }
+    }
+
+  Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+    val bitmap = bitmapState.value
+    if (bitmap != null) {
+      Image(
+        bitmap = bitmap.asImageBitmap(),
+        contentDescription = alt.ifBlank { null },
+        modifier = Modifier.fillMaxWidth().heightIn(max = 280.dp),
+        contentScale = ContentScale.Fit,
+      )
+    } else {
+      Row(
+        modifier =
+          Modifier
+            .fillMaxWidth()
+            .heightIn(min = 76.dp)
+            .background(ShellowColors.CodeBackground, RoundedCornerShape(8.dp))
+            .padding(10.dp),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+      ) {
+        Text("Image", color = ShellowColors.TerminalMuted, style = MaterialTheme.typography.labelMedium)
+        Text(source.ifBlank { "Image unavailable" }, color = ShellowColors.TerminalMuted, style = MaterialTheme.typography.labelSmall, maxLines = 2, overflow = TextOverflow.Ellipsis)
+      }
+    }
+    if (alt.isNotBlank()) {
+      Text(alt, color = ShellowColors.TerminalMuted, style = MaterialTheme.typography.labelSmall, maxLines = 2, overflow = TextOverflow.Ellipsis)
+    }
+  }
+}
+
+private fun loadCodexBitmap(source: String): Bitmap? {
+  val trimmed = source.trim()
+  if (trimmed.isEmpty()) return null
+  return runCatching {
+    when {
+      trimmed.startsWith("data:image/") -> {
+        val payload = trimmed.substringAfter(",", "")
+        if (payload.isBlank()) {
+          null
+        } else {
+          val bytes = Base64.decode(payload, Base64.DEFAULT)
+          BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+        }
+      }
+      trimmed.startsWith("http://") || trimmed.startsWith("https://") ->
+        URL(trimmed).openStream().use(BitmapFactory::decodeStream)
+      trimmed.startsWith("file://") ->
+        BitmapFactory.decodeFile(URL(trimmed).path)
+      trimmed.startsWith("/") || trimmed.startsWith("~") ->
+        BitmapFactory.decodeFile(trimmed.replaceFirst("^~".toRegex(), System.getProperty("user.home") ?: "~"))
+      else -> null
+    }
+  }.getOrNull()
+}
+
+@Composable
+private fun CodexTableBlock(block: CodexMarkdownBlock) {
+  val columnCount =
+    maxOf(
+      block.tableHeaders.size,
+      block.tableRows.maxOfOrNull { it.size } ?: 0,
+      1,
+    )
+  Column(
+    modifier =
+      Modifier
+        .fillMaxWidth()
+        .horizontalScroll(rememberScrollState())
+        .background(ShellowColors.TableBackground, RoundedCornerShape(8.dp)),
+  ) {
+    if (block.tableHeaders.isNotEmpty()) {
+      CodexTableRow(block.tableHeaders, columnCount, isHeader = true)
+    }
+    block.tableRows.forEach { row ->
+      CodexTableRow(row, columnCount, isHeader = false)
+    }
+  }
+}
+
+@Composable
+private fun CodexTableRow(
+  cells: List<CodexMarkdownTableCell>,
+  columnCount: Int,
+  isHeader: Boolean,
+) {
+  Row {
+    for (index in 0 until columnCount) {
+      val cell = cells.getOrNull(index) ?: CodexMarkdownTableCell("", emptyList())
+      Box(
+        modifier =
+          Modifier
+            .width(132.dp)
+            .background(if (isHeader) ShellowColors.TableHeaderBackground else ShellowColors.TableBackground)
+            .padding(horizontal = 9.dp, vertical = 8.dp),
+      ) {
+        Text(
+          markdownAnnotatedString(cell.runs, cell.text),
+          color = ShellowColors.TerminalText,
+          style =
+            if (isHeader) {
+              MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.SemiBold)
+            } else {
+              MaterialTheme.typography.bodySmall
+            },
+        )
+      }
+    }
+  }
+}
+
+@Composable
+private fun CodexCodeBlock(block: CodexMarkdownBlock) {
+  val clipboard = LocalClipboardManager.current
+  Column(
+    modifier =
+      Modifier
+        .fillMaxWidth()
+        .background(ShellowColors.CodeBackground, RoundedCornerShape(8.dp)),
+  ) {
+    Row(
+      modifier = Modifier.fillMaxWidth().background(ShellowColors.CodeHeaderBackground).padding(horizontal = 10.dp, vertical = 7.dp),
+      horizontalArrangement = Arrangement.spacedBy(8.dp),
+      verticalAlignment = Alignment.CenterVertically,
+    ) {
+      Text(block.language ?: "code", color = ShellowColors.TerminalMuted, style = MaterialTheme.typography.labelSmall, modifier = Modifier.weight(1f))
+      if (block.incomplete) {
+        Text("streaming", color = ShellowColors.TerminalMuted, style = MaterialTheme.typography.labelSmall)
+      }
+      TextButton(onClick = { clipboard.setText(AnnotatedString(block.text)) }) { Text("Copy") }
+    }
+    Row(modifier = Modifier.horizontalScroll(rememberScrollState()).padding(10.dp)) {
+      Text(
+        block.text.ifBlank { " " },
+        color = ShellowColors.TerminalText,
+        style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
+      )
+    }
+  }
+}
+
+private fun markdownAnnotatedString(
+  runs: List<CodexMarkdownInlineRun>,
+  fallback: String,
+): AnnotatedString =
+  buildAnnotatedString {
+    val usableRuns =
+      if (runs.isEmpty()) {
+        listOf(CodexMarkdownInlineRun(fallback, CodexMarkdownInlineStyle.Text, null))
+      } else {
+        runs
+      }
+    usableRuns.forEach { run ->
+      val style =
+        when (run.style) {
+          CodexMarkdownInlineStyle.Text -> SpanStyle()
+          CodexMarkdownInlineStyle.Bold -> SpanStyle(fontWeight = FontWeight.SemiBold)
+          CodexMarkdownInlineStyle.Italic -> SpanStyle(fontStyle = FontStyle.Italic)
+          CodexMarkdownInlineStyle.BoldItalic -> SpanStyle(fontWeight = FontWeight.SemiBold, fontStyle = FontStyle.Italic)
+          CodexMarkdownInlineStyle.Code -> SpanStyle(fontFamily = FontFamily.Monospace, background = ShellowColors.InlineCodeBackground)
+          CodexMarkdownInlineStyle.Link -> SpanStyle(color = ShellowColors.Accent, textDecoration = TextDecoration.Underline)
+        }
+      pushStyle(style)
+      append(run.text)
+      pop()
+    }
+  }
+
+@Composable
+private fun CodexApprovalCard(
+  approval: CodexApproval,
+  onDecision: (String) -> Unit,
+) {
+  Column(
+    modifier =
+      Modifier
+        .fillMaxWidth()
+        .background(ShellowColors.ApprovalBackground, RoundedCornerShape(8.dp))
+        .padding(12.dp),
+    verticalArrangement = Arrangement.spacedBy(8.dp),
+  ) {
+    Text(approval.title, color = ShellowColors.TerminalText, style = MaterialTheme.typography.titleSmall)
+    Text(approval.detail, color = ShellowColors.TerminalText, style = MaterialTheme.typography.bodySmall)
+    approval.cwd?.let {
+      Text(it, color = ShellowColors.TerminalMuted, style = MaterialTheme.typography.labelSmall.copy(fontFamily = FontFamily.Monospace))
+    }
+    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+      Button(onClick = { onDecision("accept") }) { Text("Allow") }
+      TextButton(onClick = { onDecision("acceptForSession") }) { Text("Session") }
+      TextButton(onClick = { onDecision("decline") }) { Text("Deny") }
     }
   }
 }
@@ -474,7 +2873,10 @@ private fun TerminalScreen(
   val terminalListState = rememberLazyListState()
   val terminalScope = rememberCoroutineScope()
   val keyboardOffsetPx = WindowInsets.ime.getBottom(density)
-  val keyboardOffsetDp = with(density) { keyboardOffsetPx.toDp() }
+  var layoutKeyboardOffsetPx by remember { mutableStateOf(keyboardOffsetPx) }
+  val keyboardVisualDeltaDp = with(density) { (keyboardOffsetPx - layoutKeyboardOffsetPx).toDp() }
+  val keyboardLayoutOffsetDp = with(density) { layoutKeyboardOffsetPx.toDp() }
+  val terminalLiftDp = with(density) { (keyboardOffsetPx - layoutKeyboardOffsetPx).coerceAtLeast(0).toDp() }
   val terminalHeaderInsetDp = 76.dp
   val terminalSearchBarTopDp = 64.dp
   val terminalSearchInsetDp = 130.dp
@@ -554,6 +2956,11 @@ private fun TerminalScreen(
 
   LaunchedEffect(gridCellWidthPx, terminalRowHeightPx, viewportWidthPx, viewportHeightPx) {
     reportViewportSize(viewportWidthPx, viewportHeightPx)
+  }
+
+  LaunchedEffect(keyboardOffsetPx) {
+    delay(TerminalKeyboardLayoutCommitDelayMs)
+    layoutKeyboardOffsetPx = keyboardOffsetPx
   }
 
   LaunchedEffect(Unit) {
@@ -737,7 +3144,8 @@ private fun TerminalScreen(
         Modifier
           .weight(1f)
           .fillMaxWidth()
-          .clickable { focusTerminalInput() },
+          .clickable { focusTerminalInput() }
+          .offset(y = -terminalLiftDp),
     ) {
       if (visibleGrid != null && rustSurfaceEnabled) {
         val surfaceHeightDp = with(density) { (viewportRowCount * terminalRowHeightPx).coerceAtLeast(1f).toDp() }
@@ -874,7 +3282,8 @@ private fun TerminalScreen(
         Modifier
           .fillMaxWidth()
           .background(ShellowColors.PanelBackground)
-          .padding(horizontal = 12.dp, vertical = 8.dp),
+          .padding(horizontal = 12.dp, vertical = 8.dp)
+          .offset(y = -keyboardVisualDeltaDp),
       horizontalArrangement = Arrangement.spacedBy(8.dp),
       verticalAlignment = Alignment.CenterVertically,
     ) {
@@ -929,7 +3338,8 @@ private fun TerminalScreen(
           .fillMaxWidth()
           .background(ShellowColors.PanelBackground)
           .horizontalScroll(rememberScrollState())
-          .padding(horizontal = 12.dp, vertical = 6.dp),
+          .padding(horizontal = 12.dp, vertical = 6.dp)
+          .offset(y = -keyboardVisualDeltaDp),
       horizontalArrangement = Arrangement.spacedBy(8.dp),
       verticalAlignment = Alignment.CenterVertically,
     ) {
@@ -969,12 +3379,15 @@ private fun TerminalScreen(
         TerminalKey(key.label) { sendToolbarInput(key.sequence) }
       }
     }
-    Spacer(Modifier.height(6.dp + keyboardOffsetDp).fillMaxWidth().background(ShellowColors.PanelBackground))
+    Spacer(Modifier.height(6.dp + keyboardLayoutOffsetDp).fillMaxWidth().background(ShellowColors.PanelBackground))
   }
 
   pendingPaste?.let { paste ->
     AlertDialog(
       onDismissRequest = { pendingPaste = null },
+      containerColor = ShellowColors.PanelBackground,
+      titleContentColor = ShellowColors.TerminalText,
+      textContentColor = ShellowColors.TerminalText,
       title = { Text("Confirm Paste") },
       text = { Text("Send ${paste.terminalPasteLineCount()} lines and ${paste.length} characters to the terminal?") },
       confirmButton = {
@@ -994,6 +3407,9 @@ private fun TerminalScreen(
   pendingRemoteClipboard?.let { request ->
     AlertDialog(
       onDismissRequest = { pendingRemoteClipboard = null },
+      containerColor = ShellowColors.PanelBackground,
+      titleContentColor = ShellowColors.TerminalText,
+      textContentColor = ShellowColors.TerminalText,
       title = { Text("Remote Clipboard") },
       text = {
         Text("Copy ${request.text.terminalPasteLineCount()} lines and ${request.text.length} characters from the remote terminal?")
@@ -1015,6 +3431,9 @@ private fun TerminalScreen(
   transcriptSaveResult?.let { result ->
     AlertDialog(
       onDismissRequest = { transcriptSaveResult = null },
+      containerColor = ShellowColors.PanelBackground,
+      titleContentColor = ShellowColors.TerminalText,
+      textContentColor = ShellowColors.TerminalText,
       title = { Text(result.title) },
       text = { Text(result.message) },
       confirmButton = {
@@ -1550,16 +3969,17 @@ private fun terminalSelectionPointFromOffset(
 @Composable
 private fun HostsScreen(
   profiles: List<HostProfile>,
+  sshKeys: List<SSHKeyCredential>,
   secretStore: SSHSecretStore,
   onOpenSettings: () -> Unit,
   onAddProfile: (HostProfile) -> Unit,
-  onPreview: (HostProfile) -> Unit,
-  onConnectPassword: (HostProfile, String, String) -> Unit,
-  onConnectPrivateKey: (HostProfile, String, String, String) -> Unit,
+  onAddKey: (SSHKeyCredential) -> Unit,
+  onDeleteKey: (SSHKeyCredential) -> Unit,
+  onConnectTerminal: (HostProfile) -> Unit,
+  onConnectCodex: (HostProfile) -> Unit,
 ) {
-  var passwordProfile by remember { mutableStateOf<HostProfile?>(null) }
-  var privateKeyProfile by remember { mutableStateOf<HostProfile?>(null) }
   var addingProfile by remember { mutableStateOf(false) }
+  var managingKeys by remember { mutableStateOf(false) }
 
   LazyColumn(
     modifier =
@@ -1582,6 +4002,7 @@ private fun HostsScreen(
           style = MaterialTheme.typography.titleLarge,
         )
         TextButton(onClick = onOpenSettings) { Text("Settings") }
+        TextButton(onClick = { managingKeys = true }) { Text("Keys") }
         Button(onClick = { addingProfile = true }) {
           Text("Add")
         }
@@ -1590,22 +4011,31 @@ private fun HostsScreen(
 
     items(profiles, key = { it.id }) { profile ->
       Card(
-        onClick = {
-          if (profile.authentication == AuthenticationKind.Password) {
-            passwordProfile = profile
-          } else {
-            privateKeyProfile = profile
-          }
-        },
         colors = CardDefaults.cardColors(containerColor = ShellowColors.PanelBackground),
       ) {
-        Row(Modifier.fillMaxWidth().padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
-          Column(Modifier.weight(1f)) {
+        Column(
+          Modifier.fillMaxWidth().padding(14.dp),
+          verticalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+          Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
             Text(profile.name, color = ShellowColors.TerminalText, style = MaterialTheme.typography.titleSmall)
             Text(profile.endpoint, color = ShellowColors.TerminalMuted)
             Text(profile.hostKeyTrustTitle, color = ShellowColors.TerminalMuted, style = MaterialTheme.typography.labelSmall)
           }
-          Text(profile.authentication.title, color = ShellowColors.TerminalMuted, style = MaterialTheme.typography.labelMedium)
+          Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            TextButton(
+              onClick = { onConnectTerminal(profile) },
+              modifier = Modifier.weight(1f),
+            ) {
+              Text("Terminal")
+            }
+            Button(
+              onClick = { onConnectCodex(profile) },
+              modifier = Modifier.weight(1f),
+            ) {
+              Text("Codex")
+            }
+          }
         }
       }
     }
@@ -1621,31 +4051,13 @@ private fun HostsScreen(
     )
   }
 
-  passwordProfile?.let { profile ->
-    PasswordDialog(
-      profile = profile,
+  if (managingKeys) {
+    SSHKeyManagementDialog(
+      credentials = sshKeys,
       secretStore = secretStore,
-      onDismiss = { passwordProfile = null },
-      onConnect = { password, startup ->
-        passwordProfile = null
-        onConnectPassword(profile, password, startup)
-      },
-    )
-  }
-
-  privateKeyProfile?.let { profile ->
-    PrivateKeyDialog(
-      profile = profile,
-      secretStore = secretStore,
-      onPreview = {
-        privateKeyProfile = null
-        onPreview(profile)
-      },
-      onDismiss = { privateKeyProfile = null },
-      onConnect = { privateKeyPem, passphrase, startup ->
-        privateKeyProfile = null
-        onConnectPrivateKey(profile, privateKeyPem, passphrase, startup)
-      },
+      onDismiss = { managingKeys = false },
+      onAddKey = onAddKey,
+      onDeleteKey = onDeleteKey,
     )
   }
 }
@@ -1659,8 +4071,6 @@ private fun AddHostDialog(
   var host by remember { mutableStateOf("") }
   var port by remember { mutableStateOf("22") }
   var username by remember { mutableStateOf("") }
-  var trustedHostKey by remember { mutableStateOf("") }
-  var auth by remember { mutableStateOf(AuthenticationKind.PrivateKey) }
   val parsedPort = port.toIntOrNull()
   val canAdd =
     name.isNotBlank() &&
@@ -1671,6 +4081,9 @@ private fun AddHostDialog(
 
   AlertDialog(
     onDismissRequest = onDismiss,
+    containerColor = ShellowColors.PanelBackground,
+    titleContentColor = ShellowColors.TerminalText,
+    textContentColor = ShellowColors.TerminalText,
     title = { Text("Add Host") },
     text = {
       Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
@@ -1684,25 +4097,6 @@ private fun AddHostDialog(
           keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
         )
         OutlinedTextField(value = username, onValueChange = { username = it }, label = { Text("User") }, singleLine = true)
-        OutlinedTextField(
-          value = trustedHostKey,
-          onValueChange = { trustedHostKey = it },
-          label = { Text("Host key SHA256") },
-          singleLine = true,
-          textStyle = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
-        )
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-          FilterChip(
-            selected = auth == AuthenticationKind.PrivateKey,
-            onClick = { auth = AuthenticationKind.PrivateKey },
-            label = { Text(AuthenticationKind.PrivateKey.title) },
-          )
-          FilterChip(
-            selected = auth == AuthenticationKind.Password,
-            onClick = { auth = AuthenticationKind.Password },
-            label = { Text(AuthenticationKind.Password.title) },
-          )
-        }
       }
     },
     confirmButton = {
@@ -1715,8 +4109,8 @@ private fun AddHostDialog(
               host = host.trim(),
               port = parsedPort ?: 22,
               username = username.trim(),
-              authentication = auth,
-              trustedHostKeySha256 = trustedHostKey.trim().takeIf { it.isNotBlank() },
+              authentication = AuthenticationKind.PrivateKey,
+              trustedHostKeySha256 = null,
             ),
           )
         },
@@ -1727,33 +4121,148 @@ private fun AddHostDialog(
 }
 
 @Composable
-private fun PasswordDialog(
-  profile: HostProfile,
+private fun SSHKeyManagementDialog(
+  credentials: List<SSHKeyCredential>,
   secretStore: SSHSecretStore,
   onDismiss: () -> Unit,
-  onConnect: (String, String) -> Unit,
+  onAddKey: (SSHKeyCredential) -> Unit,
+  onDeleteKey: (SSHKeyCredential) -> Unit,
 ) {
-  var password by remember { mutableStateOf("") }
-  var startup by remember { mutableStateOf("") }
-  var rememberPassword by remember { mutableStateOf(false) }
-  var hasSavedPassword by remember { mutableStateOf(false) }
-  var keychainStatus by remember { mutableStateOf<String?>(null) }
-
-  LaunchedEffect(profile.id) {
-    hasSavedPassword = secretStore.hasSecret(profile, SSHSecretKind.Password)
-    rememberPassword = !hasSavedPassword
-  }
+  var addingKey by remember { mutableStateOf(false) }
 
   AlertDialog(
     onDismissRequest = onDismiss,
-    title = { Text("Live SSH") },
+    containerColor = ShellowColors.PanelBackground,
+    titleContentColor = ShellowColors.TerminalText,
+    textContentColor = ShellowColors.TerminalText,
+    title = { Text("SSH Keys") },
     text = {
       Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-        Text(profile.endpoint, color = ShellowColors.TerminalMuted)
-        Text(profile.hostKeyTrustTitle, color = ShellowColors.TerminalMuted)
-        if (hasSavedPassword) {
-          Text("Saved password available", color = ShellowColors.TerminalMuted)
+        if (credentials.isEmpty()) {
+          Text("No private keys saved", color = ShellowColors.TerminalMuted)
+        } else {
+          credentials.forEach { credential ->
+            Row(
+              modifier = Modifier.fillMaxWidth(),
+              verticalAlignment = Alignment.CenterVertically,
+              horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+              Column(Modifier.weight(1f)) {
+                Text(credential.name, color = ShellowColors.TerminalText, style = MaterialTheme.typography.bodyMedium)
+                Text(credential.id, color = ShellowColors.TerminalMuted, style = MaterialTheme.typography.labelSmall, maxLines = 1)
+              }
+              TextButton(onClick = { onDeleteKey(credential) }) { Text("Delete") }
+            }
+          }
         }
+      }
+    },
+    confirmButton = {
+      Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        TextButton(onClick = { addingKey = true }) { Text("Add") }
+        TextButton(onClick = onDismiss) { Text("Done") }
+      }
+    },
+  )
+
+  if (addingKey) {
+    AddSSHKeyDialog(
+      secretStore = secretStore,
+      onDismiss = { addingKey = false },
+      onAdd = { credential ->
+        addingKey = false
+        onAddKey(credential)
+      },
+    )
+  }
+}
+
+@Composable
+private fun AddSSHKeyDialog(
+  secretStore: SSHSecretStore,
+  onDismiss: () -> Unit,
+  onAdd: (SSHKeyCredential) -> Unit,
+) {
+  var name by remember { mutableStateOf("") }
+  var privateKeyPem by remember { mutableStateOf("") }
+  var passphrase by remember { mutableStateOf("") }
+  var status by remember { mutableStateOf<String?>(null) }
+  val canAdd = name.isNotBlank() && privateKeyLooksUsable(privateKeyPem)
+
+  AlertDialog(
+    onDismissRequest = onDismiss,
+    containerColor = ShellowColors.PanelBackground,
+    titleContentColor = ShellowColors.TerminalText,
+    textContentColor = ShellowColors.TerminalText,
+    title = { Text("New Key") },
+    text = {
+      Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        OutlinedTextField(value = name, onValueChange = { name = it }, label = { Text("Name") }, singleLine = true)
+        OutlinedTextField(
+          value = privateKeyPem,
+          onValueChange = { privateKeyPem = it },
+          label = { Text("OpenSSH private key") },
+          minLines = 7,
+          textStyle = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
+          keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Ascii),
+        )
+        OutlinedTextField(
+          value = passphrase,
+          onValueChange = { passphrase = it },
+          label = { Text("Optional passphrase") },
+          singleLine = true,
+          visualTransformation = PasswordVisualTransformation(),
+          keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+        )
+        status?.let { Text(it, color = ShellowColors.TerminalMuted) }
+      }
+    },
+    confirmButton = {
+      TextButton(
+        enabled = canAdd,
+        onClick = {
+          val credential = SSHKeyCredential(name = name.trim())
+          runCatching {
+            secretStore.saveKeySecret(privateKeyPem, credential.id, SSHSecretKind.PrivateKey)
+            if (passphrase.isNotBlank()) {
+              secretStore.saveKeySecret(passphrase, credential.id, SSHSecretKind.Passphrase)
+            }
+          }.onSuccess {
+            onAdd(credential)
+            onDismiss()
+          }.onFailure {
+            secretStore.deleteKeySecret(credential.id, SSHSecretKind.PrivateKey)
+            secretStore.deleteKeySecret(credential.id, SSHSecretKind.Passphrase)
+            status = "Key could not be saved"
+          }
+        },
+      ) { Text("Add") }
+    },
+    dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
+  )
+}
+
+@Composable
+private fun PasswordPromptDialog(
+  request: PasswordPromptRequest,
+  secretStore: SSHSecretStore,
+  onDismiss: () -> Unit,
+  onConnect: (String) -> Unit,
+) {
+  var password by remember(request.profile.id, request.mode) { mutableStateOf("") }
+  var rememberPassword by remember(request.profile.id, request.mode) { mutableStateOf(true) }
+  var status by remember(request.profile.id, request.mode) { mutableStateOf<String?>(null) }
+
+  AlertDialog(
+    onDismissRequest = onDismiss,
+    containerColor = ShellowColors.PanelBackground,
+    titleContentColor = ShellowColors.TerminalText,
+    textContentColor = ShellowColors.TerminalText,
+    title = { Text(request.mode.passwordTitle) },
+    text = {
+      Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        Text(request.profile.endpoint, color = ShellowColors.TerminalMuted)
+        request.reason?.let { Text(it, color = ShellowColors.TerminalMuted) }
         OutlinedTextField(
           value = password,
           onValueChange = { password = it },
@@ -1766,171 +4275,25 @@ private fun PasswordDialog(
           Checkbox(checked = rememberPassword, onCheckedChange = { rememberPassword = it })
           Text("Save password in Android Keystore")
         }
-        OutlinedTextField(
-          value = startup,
-          onValueChange = { startup = it },
-          label = { Text("Startup command") },
-          singleLine = true,
-        )
-        keychainStatus?.let { Text(it, color = ShellowColors.TerminalMuted) }
+        status?.let { Text(it, color = ShellowColors.TerminalMuted) }
       }
     },
     confirmButton = {
       TextButton(
+        enabled = password.isNotBlank(),
         onClick = {
-          val resolvedPassword =
-            if (password.isBlank()) {
-              secretStore.loadSecret(profile, SSHSecretKind.Password)
-            } else {
-              password
-            }
-          if (resolvedPassword == null) {
-            keychainStatus = "Saved password could not be loaded"
-            hasSavedPassword = false
-            return@TextButton
-          }
-
-          if (rememberPassword && password.isNotBlank()) {
-            runCatching {
-              secretStore.saveSecret(password, profile, SSHSecretKind.Password)
-            }.onSuccess {
-              hasSavedPassword = true
-              keychainStatus = "Password saved"
-            }.onFailure {
-              keychainStatus = "Password save failed"
+          if (rememberPassword) {
+            val saved =
+              runCatching {
+                secretStore.saveSecret(password, request.profile, SSHSecretKind.Password)
+              }.isSuccess
+            if (!saved) {
+              status = "Password could not be saved"
+              return@TextButton
             }
           }
-
-          onConnect(resolvedPassword, startup)
+          onConnect(password)
         },
-        enabled = password.isNotBlank() || hasSavedPassword,
-      ) { Text("Connect") }
-    },
-    dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
-  )
-}
-
-@Composable
-private fun PrivateKeyDialog(
-  profile: HostProfile,
-  secretStore: SSHSecretStore,
-  onPreview: () -> Unit,
-  onDismiss: () -> Unit,
-  onConnect: (String, String, String) -> Unit,
-) {
-  var privateKeyPem by remember { mutableStateOf("") }
-  var passphrase by remember { mutableStateOf("") }
-  var startup by remember { mutableStateOf("") }
-  var rememberPrivateKey by remember { mutableStateOf(false) }
-  var rememberPassphrase by remember { mutableStateOf(false) }
-  var hasSavedPrivateKey by remember { mutableStateOf(false) }
-  var hasSavedPassphrase by remember { mutableStateOf(false) }
-  var keychainStatus by remember { mutableStateOf<String?>(null) }
-  val canConnect = privateKeyLooksUsable(privateKeyPem) || hasSavedPrivateKey
-
-  LaunchedEffect(profile.id) {
-    hasSavedPrivateKey = secretStore.hasSecret(profile, SSHSecretKind.PrivateKey)
-    hasSavedPassphrase = secretStore.hasSecret(profile, SSHSecretKind.Passphrase)
-    rememberPrivateKey = !hasSavedPrivateKey
-    rememberPassphrase = false
-  }
-
-  AlertDialog(
-    onDismissRequest = onDismiss,
-    title = { Text("Live SSH Key") },
-    text = {
-      Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-        Text(profile.endpoint, color = ShellowColors.TerminalMuted)
-        Text(profile.hostKeyTrustTitle, color = ShellowColors.TerminalMuted)
-        TextButton(onClick = onPreview) { Text("Preview Connection Metadata") }
-        if (hasSavedPrivateKey) {
-          Text("Saved private key available", color = ShellowColors.TerminalMuted)
-        }
-        OutlinedTextField(
-          value = privateKeyPem,
-          onValueChange = { privateKeyPem = it },
-          label = { Text("OpenSSH private key") },
-          minLines = 7,
-          textStyle = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
-          keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Ascii),
-        )
-        Row(verticalAlignment = Alignment.CenterVertically) {
-          Checkbox(checked = rememberPrivateKey, onCheckedChange = { rememberPrivateKey = it })
-          Text("Save private key in Android Keystore")
-        }
-        if (hasSavedPassphrase) {
-          Text("Saved passphrase available", color = ShellowColors.TerminalMuted)
-        }
-        OutlinedTextField(
-          value = passphrase,
-          onValueChange = { passphrase = it },
-          label = { Text("Passphrase") },
-          singleLine = true,
-          visualTransformation = PasswordVisualTransformation(),
-          keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
-        )
-        Row(verticalAlignment = Alignment.CenterVertically) {
-          Checkbox(checked = rememberPassphrase, onCheckedChange = { rememberPassphrase = it })
-          Text("Save passphrase in Android Keystore")
-        }
-        OutlinedTextField(
-          value = startup,
-          onValueChange = { startup = it },
-          label = { Text("Startup command") },
-          singleLine = true,
-        )
-        keychainStatus?.let { Text(it, color = ShellowColors.TerminalMuted) }
-      }
-    },
-    confirmButton = {
-      TextButton(
-        onClick = {
-          val resolvedPrivateKey =
-            if (privateKeyPem.isBlank()) {
-              secretStore.loadSecret(profile, SSHSecretKind.PrivateKey)
-            } else {
-              privateKeyPem
-            }
-          if (resolvedPrivateKey == null) {
-            keychainStatus = "Saved private key could not be loaded"
-            hasSavedPrivateKey = false
-            return@TextButton
-          }
-          if (!privateKeyLooksUsable(resolvedPrivateKey)) {
-            keychainStatus = "Private key is not an OpenSSH key"
-            return@TextButton
-          }
-
-          if (rememberPrivateKey && privateKeyLooksUsable(privateKeyPem)) {
-            runCatching {
-              secretStore.saveSecret(privateKeyPem, profile, SSHSecretKind.PrivateKey)
-            }.onSuccess {
-              hasSavedPrivateKey = true
-              keychainStatus = "Private key saved"
-            }.onFailure {
-              keychainStatus = "Private key save failed"
-            }
-          }
-
-          if (rememberPassphrase && passphrase.isNotBlank()) {
-            runCatching {
-              secretStore.saveSecret(passphrase, profile, SSHSecretKind.Passphrase)
-            }.onSuccess {
-              hasSavedPassphrase = true
-            }.onFailure {
-              keychainStatus = "Passphrase save failed"
-            }
-          }
-
-          val resolvedPassphrase =
-            if (passphrase.isBlank()) {
-              secretStore.loadSecret(profile, SSHSecretKind.Passphrase).orEmpty()
-            } else {
-              passphrase
-            }
-          onConnect(resolvedPrivateKey, resolvedPassphrase, startup)
-        },
-        enabled = canConnect,
       ) { Text("Connect") }
     },
     dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
@@ -1953,6 +4316,10 @@ private fun SettingsScreen(
       TextButton(onClick = onBack) { Text("Back") }
       Text("Settings", color = ShellowColors.TerminalText, style = MaterialTheme.typography.titleLarge)
     }
+    ThemeSelector(
+      value = displaySettings.colorScheme,
+      onValueChange = { onDisplaySettingsChange(displaySettings.copy(colorScheme = it)) },
+    )
     DisplaySlider(
       title = "Font Size",
       valueLabel = "${displaySettings.fontSizeSp.roundToInt()} sp",
@@ -1970,6 +4337,39 @@ private fun SettingsScreen(
     SettingsRow("VT", report.terminalBackend)
     SettingsRow("SSH", report.sshBackend)
     SettingsRow("GPU", report.rendererBackend)
+  }
+}
+
+@Composable
+private fun ThemeSelector(
+  value: ShellowColorScheme,
+  onValueChange: (ShellowColorScheme) -> Unit,
+) {
+  Column(
+    modifier =
+      Modifier
+        .fillMaxWidth()
+        .background(ShellowColors.PanelBackground, RoundedCornerShape(8.dp))
+        .padding(14.dp),
+    verticalArrangement = Arrangement.spacedBy(8.dp),
+  ) {
+    Text("Theme", color = ShellowColors.TerminalText)
+    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+      ShellowColorScheme.entries.forEach { scheme ->
+        FilterChip(
+          selected = value == scheme,
+          onClick = { onValueChange(scheme) },
+          label = { Text(scheme.title) },
+          colors =
+            FilterChipDefaults.filterChipColors(
+              containerColor = ShellowColors.PanelBackground,
+              labelColor = ShellowColors.TerminalMuted,
+              selectedContainerColor = ShellowColors.KeyBackground,
+              selectedLabelColor = ShellowColors.TerminalText,
+            ),
+        )
+      }
+    }
   }
 }
 
@@ -1993,7 +4393,17 @@ private fun DisplaySlider(
       Text(title, modifier = Modifier.weight(1f), color = ShellowColors.TerminalText)
       Text(valueLabel, color = ShellowColors.TerminalMuted)
     }
-    Slider(value = value, onValueChange = onValueChange, valueRange = valueRange)
+    Slider(
+      value = value,
+      onValueChange = onValueChange,
+      valueRange = valueRange,
+      colors =
+        SliderDefaults.colors(
+          thumbColor = ShellowColors.Accent,
+          activeTrackColor = ShellowColors.Accent,
+          inactiveTrackColor = ShellowColors.KeyBackground,
+        ),
+    )
   }
 }
 
@@ -2022,12 +4432,14 @@ private fun statusColor(state: ConnectionState) =
 private const val DisplaySettingsPrefs = "shellow.displaySettings"
 private const val DisplayFontSizeKey = "fontSizeSp.v1"
 private const val DisplayLineHeightKey = "lineHeightScale.v1"
+private const val DisplayColorSchemeKey = "colorScheme.v1"
 
 private fun loadDisplaySettings(context: Context): AppDisplaySettings {
   val preferences = context.getSharedPreferences(DisplaySettingsPrefs, Context.MODE_PRIVATE)
   return AppDisplaySettings(
     fontSizeSp = preferences.getFloat(DisplayFontSizeKey, 14f).coerceIn(11f, 22f),
     lineHeightScale = preferences.getFloat(DisplayLineHeightKey, 1f).coerceIn(0.9f, 1.35f),
+    colorScheme = ShellowColorScheme.fromWire(preferences.getString(DisplayColorSchemeKey, ShellowColorScheme.System.wire)),
   )
 }
 
@@ -2040,11 +4452,14 @@ private fun saveDisplaySettings(
     .edit()
     .putFloat(DisplayFontSizeKey, settings.fontSizeSp.coerceIn(11f, 22f))
     .putFloat(DisplayLineHeightKey, settings.lineHeightScale.coerceIn(0.9f, 1.35f))
+    .putString(DisplayColorSchemeKey, settings.colorScheme.wire)
     .apply()
 }
 
 private const val HostProfilesPrefs = "shellow.hostProfiles"
 private const val HostProfilesKey = "profiles.v1"
+private const val SSHKeysPrefs = "shellow.sshKeys"
+private const val SSHKeysKey = "keys.v1"
 
 private fun defaultHostProfiles(): List<HostProfile> =
   listOf(
@@ -2088,6 +4503,46 @@ private fun saveHostProfiles(
     .getSharedPreferences(HostProfilesPrefs, Context.MODE_PRIVATE)
     .edit()
     .putString(HostProfilesKey, json.toString())
+    .apply()
+}
+
+private fun loadSSHKeyCredentials(context: Context): List<SSHKeyCredential> {
+  val stored =
+    context
+      .getSharedPreferences(SSHKeysPrefs, Context.MODE_PRIVATE)
+      .getString(SSHKeysKey, null)
+      ?: return emptyList()
+
+  return runCatching {
+    val values = JSONArray(stored)
+    List(values.length()) { index ->
+      val value = values.getJSONObject(index)
+      SSHKeyCredential(
+        id = value.optString("id").takeIf { it.isNotBlank() } ?: UUID.randomUUID().toString(),
+        name = value.optString("name").takeIf { it.isNotBlank() } ?: "SSH Key",
+      )
+    }.filter { it.name.isNotBlank() }
+  }.getOrElse {
+    emptyList()
+  }
+}
+
+private fun saveSSHKeyCredentials(
+  context: Context,
+  credentials: List<SSHKeyCredential>,
+) {
+  val json = JSONArray()
+  credentials.forEach { credential ->
+    json.put(
+      JSONObject()
+        .put("id", credential.id)
+        .put("name", credential.name),
+    )
+  }
+  context
+    .getSharedPreferences(SSHKeysPrefs, Context.MODE_PRIVATE)
+    .edit()
+    .putString(SSHKeysKey, json.toString())
     .apply()
 }
 

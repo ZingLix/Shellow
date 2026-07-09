@@ -203,14 +203,20 @@ struct TerminalScreen: View {
     @State private var transcriptSaveResult: TranscriptSaveResult?
     @State private var handledClipboardSequence = 0
     @State private var keyboardAvoidance = TerminalKeyboardAvoidanceState.hidden
+    @State private var keyboardLayoutAvoidance = TerminalKeyboardAvoidanceState.hidden
+    @State private var keyboardLayoutCommitToken = 0
 
     var body: some View {
         let search = session.searchPresentation(query: searchQuery, focusedIndex: searchIndex)
 
         GeometryReader { geometry in
-            let keyboardInset = keyboardAvoidance.bottomInset(overlapping: geometry.frame(in: .global))
+            let viewFrame = geometry.frame(in: .global)
+            let keyboardInset = keyboardAvoidance.bottomInset(overlapping: viewFrame)
+            let layoutKeyboardInset = keyboardLayoutAvoidance.bottomInset(overlapping: viewFrame)
             let bottomSafeInset = geometry.safeAreaInsets.bottom
-            let bottomOverlayPadding = keyboardInset > 0 ? keyboardInset : bottomSafeInset
+            let visualBottomOverlayPadding = keyboardInset > 0 ? keyboardInset : bottomSafeInset
+            let layoutBottomOverlayPadding = layoutKeyboardInset > 0 ? layoutKeyboardInset : bottomSafeInset
+            let terminalLift = max(0, visualBottomOverlayPadding - layoutBottomOverlayPadding)
             let bottomChromeHeight = TerminalChromeMetrics.bottomReserve(
                 showKeyboardToolbar: settings.showKeyboardToolbar
             )
@@ -221,7 +227,7 @@ struct TerminalScreen: View {
                 safeAreaTop: geometry.safeAreaInsets.top,
                 showsSearch: isSearchVisible
             )
-            let contentBottomInset = bottomChromeHeight + bottomOverlayPadding + TerminalChromeMetrics.contentBottomGap
+            let contentBottomInset = bottomChromeHeight + layoutBottomOverlayPadding + TerminalChromeMetrics.contentBottomGap
             let cursorBottomY = session.cursorBottomY(
                 fontSize: settings.fontSize,
                 lineHeightScale: settings.lineHeightScale,
@@ -229,7 +235,7 @@ struct TerminalScreen: View {
                 topOffset: contentTopInset
             )
             let keyboardCursorOverlap = keyboardAvoidance.cursorAwareOffset(
-                overlapping: geometry.frame(in: .global),
+                overlapping: viewFrame,
                 cursorBottomY: cursorBottomY,
                 coveredBottomInset: keyboardInset,
                 bottomPadding: TerminalChromeMetrics.cursorPadding
@@ -262,6 +268,7 @@ struct TerminalScreen: View {
                 )
                 .padding(.top, contentTopInset)
                 .padding(.bottom, contentBottomInset)
+                .offset(y: -terminalLift)
 
                 VStack(spacing: 8) {
                     TerminalFloatingHeader(
@@ -309,7 +316,7 @@ struct TerminalScreen: View {
                         sendInput: sendTerminalInput
                     )
                 }
-                .padding(.bottom, bottomOverlayPadding)
+                .padding(.bottom, visualBottomOverlayPadding)
             }
             .frame(
                 width: geometry.size.width,
@@ -317,7 +324,8 @@ struct TerminalScreen: View {
                 alignment: .top
             )
             .clipped()
-            .animation(keyboardAvoidance.animation, value: bottomOverlayPadding)
+            .animation(keyboardAvoidance.animation, value: visualBottomOverlayPadding)
+            .animation(keyboardAvoidance.animation, value: terminalLift)
             .animation(keyboardAvoidance.animation, value: keyboardCursorOverlap)
         }
         .background(ShellowTheme.terminalBackground.ignoresSafeArea())
@@ -327,10 +335,10 @@ struct TerminalScreen: View {
             presentRemoteClipboardIfNeeded()
         }
         .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillChangeFrameNotification)) { notification in
-            keyboardAvoidance = TerminalKeyboardAvoidanceState(notification: notification)
+            updateKeyboardAvoidance(TerminalKeyboardAvoidanceState(notification: notification))
         }
         .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillHideNotification)) { notification in
-            keyboardAvoidance = TerminalKeyboardAvoidanceState(notification: notification, forceHidden: true)
+            updateKeyboardAvoidance(TerminalKeyboardAvoidanceState(notification: notification, forceHidden: true))
         }
         .onChange(of: searchQuery) {
             searchIndex = 0
@@ -364,6 +372,22 @@ struct TerminalScreen: View {
                 message: Text(result.message),
                 dismissButton: .default(Text("OK"))
             )
+        }
+    }
+
+    private func updateKeyboardAvoidance(_ next: TerminalKeyboardAvoidanceState) {
+        keyboardAvoidance = next
+        keyboardLayoutCommitToken += 1
+        let commitToken = keyboardLayoutCommitToken
+        let delay = max(0, next.animationDuration)
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
+            guard keyboardLayoutCommitToken == commitToken else { return }
+            var transaction = Transaction(animation: nil)
+            transaction.disablesAnimations = true
+            withTransaction(transaction) {
+                keyboardLayoutAvoidance = next
+            }
         }
     }
 
@@ -2565,20 +2589,26 @@ private extension TerminalGridColor {
 }
 
 enum ShellowTheme {
-    static let accent = Color(red: 0.11, green: 0.62, blue: 0.44)
-    static let success = Color(red: 0.27, green: 0.82, blue: 0.55)
-    static let warning = Color(red: 0.93, green: 0.68, blue: 0.22)
-    static let muted = Color(red: 0.54, green: 0.58, blue: 0.64)
-    static let prompt = Color(red: 0.46, green: 0.86, blue: 0.67)
-    static let terminalText = Color(red: 0.88, green: 0.91, blue: 0.86)
-    static let terminalMuted = Color(red: 0.58, green: 0.64, blue: 0.61)
-    static let terminalBackground = Color(red: 0.05, green: 0.06, blue: 0.06)
-    static let panelBackground = Color(red: 0.08, green: 0.09, blue: 0.09)
-    static let inputBackground = Color(red: 0.12, green: 0.13, blue: 0.13)
-    static let keyBackground = Color(red: 0.15, green: 0.16, blue: 0.16)
-    static let selectionBackground = Color(red: 0.18, green: 0.45, blue: 0.38).opacity(0.72)
-    static let searchBackground = Color(red: 0.52, green: 0.44, blue: 0.15).opacity(0.44)
-    static let searchCurrentBackground = Color(red: 0.79, green: 0.62, blue: 0.18).opacity(0.72)
+    static let accent = dynamic(light: UIColor(red: 0.08, green: 0.48, blue: 0.34, alpha: 1), dark: UIColor(red: 0.11, green: 0.62, blue: 0.44, alpha: 1))
+    static let success = dynamic(light: UIColor(red: 0.12, green: 0.56, blue: 0.35, alpha: 1), dark: UIColor(red: 0.27, green: 0.82, blue: 0.55, alpha: 1))
+    static let warning = dynamic(light: UIColor(red: 0.65, green: 0.40, blue: 0.03, alpha: 1), dark: UIColor(red: 0.93, green: 0.68, blue: 0.22, alpha: 1))
+    static let muted = dynamic(light: UIColor(red: 0.42, green: 0.47, blue: 0.44, alpha: 1), dark: UIColor(red: 0.54, green: 0.58, blue: 0.64, alpha: 1))
+    static let prompt = dynamic(light: UIColor(red: 0.08, green: 0.48, blue: 0.34, alpha: 1), dark: UIColor(red: 0.46, green: 0.86, blue: 0.67, alpha: 1))
+    static let terminalText = dynamic(light: UIColor(red: 0.09, green: 0.13, blue: 0.11, alpha: 1), dark: UIColor(red: 0.88, green: 0.91, blue: 0.86, alpha: 1))
+    static let terminalMuted = dynamic(light: UIColor(red: 0.40, green: 0.45, blue: 0.42, alpha: 1), dark: UIColor(red: 0.58, green: 0.64, blue: 0.61, alpha: 1))
+    static let terminalBackground = dynamic(light: UIColor(red: 0.97, green: 0.98, blue: 0.96, alpha: 1), dark: UIColor(red: 0.05, green: 0.06, blue: 0.06, alpha: 1))
+    static let panelBackground = dynamic(light: UIColor.white, dark: UIColor(red: 0.08, green: 0.09, blue: 0.09, alpha: 1))
+    static let inputBackground = dynamic(light: UIColor(red: 0.94, green: 0.96, blue: 0.93, alpha: 1), dark: UIColor(red: 0.12, green: 0.13, blue: 0.13, alpha: 1))
+    static let keyBackground = dynamic(light: UIColor(red: 0.88, green: 0.91, blue: 0.87, alpha: 1), dark: UIColor(red: 0.15, green: 0.16, blue: 0.16, alpha: 1))
+    static let selectionBackground = dynamic(light: UIColor(red: 0.60, green: 0.81, blue: 0.71, alpha: 1), dark: UIColor(red: 0.18, green: 0.45, blue: 0.38, alpha: 1)).opacity(0.72)
+    static let searchBackground = dynamic(light: UIColor(red: 0.97, green: 0.82, blue: 0.32, alpha: 1), dark: UIColor(red: 0.52, green: 0.44, blue: 0.15, alpha: 1)).opacity(0.44)
+    static let searchCurrentBackground = dynamic(light: UIColor(red: 0.93, green: 0.70, blue: 0.18, alpha: 1), dark: UIColor(red: 0.79, green: 0.62, blue: 0.18, alpha: 1)).opacity(0.72)
+
+    private static func dynamic(light: UIColor, dark: UIColor) -> Color {
+        Color(UIColor { traits in
+            traits.userInterfaceStyle == .dark ? dark : light
+        })
+    }
 }
 
 #Preview {

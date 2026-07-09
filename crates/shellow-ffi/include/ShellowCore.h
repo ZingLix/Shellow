@@ -68,6 +68,47 @@ char *shellow_engine_start_private_key_shell_json(
 );
 char *shellow_engine_poll_live_shell_json(ShellowEngine *engine);
 char *shellow_engine_disconnect_live_shell_json(ShellowEngine *engine);
+char *shellow_engine_codex_snapshot_json(const ShellowEngine *engine);
+uint64_t shellow_engine_codex_event_revision(const ShellowEngine *engine);
+char *shellow_engine_start_codex_password_json(
+    ShellowEngine *engine,
+    const char *name,
+    const char *host,
+    uint16_t port,
+    const char *username,
+    const char *trusted_host_key_sha256,
+    const char *password,
+    const char *cwd
+);
+char *shellow_engine_start_codex_private_key_json(
+    ShellowEngine *engine,
+    const char *name,
+    const char *host,
+    uint16_t port,
+    const char *username,
+    const char *trusted_host_key_sha256,
+    const char *private_key_pem,
+    const char *passphrase,
+    const char *cwd
+);
+char *shellow_engine_poll_codex_json(ShellowEngine *engine);
+char *shellow_engine_send_codex_message_json(ShellowEngine *engine, const char *message);
+char *shellow_engine_update_codex_settings_json(ShellowEngine *engine, const char *model, const char *approval_policy, const char *sandbox);
+char *shellow_engine_browse_codex_directory_json(ShellowEngine *engine, const char *path);
+char *shellow_engine_list_codex_threads_json(ShellowEngine *engine, const char *cwd, const char *search_term);
+char *shellow_engine_list_codex_threads_page_json(ShellowEngine *engine, const char *cwd, const char *search_term, const char *cursor, bool archived, bool append);
+char *shellow_engine_start_codex_thread_json(ShellowEngine *engine, const char *cwd);
+char *shellow_engine_resume_codex_thread_json(ShellowEngine *engine, const char *thread_id);
+char *shellow_engine_read_codex_thread_json(ShellowEngine *engine, const char *thread_id);
+char *shellow_engine_load_more_codex_thread_turns_json(ShellowEngine *engine, const char *thread_id, const char *cursor);
+char *shellow_engine_rename_codex_thread_json(ShellowEngine *engine, const char *thread_id, const char *name);
+char *shellow_engine_archive_codex_thread_json(ShellowEngine *engine, const char *thread_id);
+char *shellow_engine_unarchive_codex_thread_json(ShellowEngine *engine, const char *thread_id);
+char *shellow_engine_delete_codex_thread_json(ShellowEngine *engine, const char *thread_id);
+char *shellow_engine_fork_codex_thread_json(ShellowEngine *engine, const char *thread_id, const char *cwd);
+char *shellow_engine_interrupt_codex_turn_json(ShellowEngine *engine);
+char *shellow_engine_answer_codex_approval_json(ShellowEngine *engine, const char *request_id, const char *decision);
+char *shellow_engine_disconnect_codex_json(ShellowEngine *engine);
 
 void shellow_string_free(char *value);
 

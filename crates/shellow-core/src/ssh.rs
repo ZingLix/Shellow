@@ -108,9 +108,33 @@ pub struct LiveShellPoll {
 }
 
 #[cfg(feature = "native-integrations")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ExecStdioStatus {
+    Connecting,
+    Connected {
+        observed_host_key_sha256: Option<String>,
+    },
+    Closed,
+    Failed(String),
+}
+
+#[cfg(feature = "native-integrations")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExecStdioPoll {
+    pub output: Vec<u8>,
+    pub status: ExecStdioStatus,
+}
+
+#[cfg(feature = "native-integrations")]
 enum LiveShellInput {
     Bytes(Vec<u8>),
     Resize { cols: u32, rows: u32 },
+    Disconnect,
+}
+
+#[cfg(feature = "native-integrations")]
+enum ExecStdioInput {
+    Bytes(Vec<u8>),
     Disconnect,
 }
 
@@ -207,6 +231,93 @@ impl LiveShellHandle {
 impl Drop for LiveShellHandle {
     fn drop(&mut self) {
         let _ = self.input.send(LiveShellInput::Disconnect);
+    }
+}
+
+#[cfg(feature = "native-integrations")]
+#[derive(Debug)]
+pub struct ExecStdioHandle {
+    input: tokio::sync::mpsc::UnboundedSender<ExecStdioInput>,
+    output: std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
+    status: std::sync::Arc<std::sync::Mutex<ExecStdioStatus>>,
+    revision: std::sync::Arc<std::sync::atomic::AtomicU64>,
+}
+
+#[cfg(feature = "native-integrations")]
+impl ExecStdioHandle {
+    pub fn spawn(options: RusshConnectOptions, command: String) -> Result<Self, String> {
+        let (input, receiver) = tokio::sync::mpsc::unbounded_channel();
+        let output = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let status = std::sync::Arc::new(std::sync::Mutex::new(ExecStdioStatus::Connecting));
+        let revision = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(1));
+        let thread_output = std::sync::Arc::clone(&output);
+        let thread_status = std::sync::Arc::clone(&status);
+        let thread_revision = std::sync::Arc::clone(&revision);
+
+        std::thread::Builder::new()
+            .name("shellow-exec-stdio-russh".to_string())
+            .spawn(move || {
+                let runtime = match tokio::runtime::Builder::new_multi_thread()
+                    .enable_all()
+                    .thread_name("shellow-exec-stdio-runtime")
+                    .build()
+                {
+                    Ok(runtime) => runtime,
+                    Err(error) => {
+                        set_exec_status(
+                            &thread_status,
+                            &thread_revision,
+                            ExecStdioStatus::Failed(format!("tokio runtime failed: {error}")),
+                        );
+                        return;
+                    }
+                };
+
+                runtime.block_on(run_exec_stdio(
+                    options,
+                    command,
+                    receiver,
+                    thread_output,
+                    thread_status,
+                    thread_revision,
+                ));
+            })
+            .map_err(|error| format!("failed to spawn ssh exec stdio thread: {error}"))?;
+
+        Ok(Self {
+            input,
+            output,
+            status,
+            revision,
+        })
+    }
+
+    pub fn send_bytes(&self, bytes: Vec<u8>) -> Result<(), String> {
+        self.input
+            .send(ExecStdioInput::Bytes(bytes))
+            .map_err(|_| "ssh exec stdio channel is closed".to_string())
+    }
+
+    pub fn disconnect(&self) {
+        let _ = self.input.send(ExecStdioInput::Disconnect);
+    }
+
+    pub fn poll(&self) -> ExecStdioPoll {
+        ExecStdioPoll {
+            output: take_live_output(&self.output),
+            status: get_exec_status(&self.status),
+        }
+    }
+
+    pub fn event_revision(&self) -> u64 {
+        self.revision.load(std::sync::atomic::Ordering::Acquire)
+    }
+}
+
+#[cfg(feature = "native-integrations")]
+impl Drop for ExecStdioHandle {
+    fn drop(&mut self) {
+        let _ = self.input.send(ExecStdioInput::Disconnect);
     }
 }
 
@@ -346,21 +457,127 @@ async fn run_live_shell(
 }
 
 #[cfg(feature = "native-integrations")]
+async fn run_exec_stdio(
+    options: RusshConnectOptions,
+    command: String,
+    mut receiver: tokio::sync::mpsc::UnboundedReceiver<ExecStdioInput>,
+    output: std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
+    status: std::sync::Arc<std::sync::Mutex<ExecStdioStatus>>,
+    revision: std::sync::Arc<std::sync::atomic::AtomicU64>,
+) {
+    let mut actor = match RusshSessionActor::connect(options).await {
+        Ok(actor) => actor,
+        Err(error) => {
+            append_exec_output(&output, &revision, error.as_bytes());
+            append_exec_output(&output, &revision, b"\n");
+            set_exec_status(&status, &revision, ExecStdioStatus::Failed(error));
+            return;
+        }
+    };
+
+    let channel_result = async {
+        let channel = actor.session.channel_open_session().await?;
+        let _ = channel.set_env(false, "COLORTERM", DEFAULT_COLORTERM).await;
+        channel.exec(true, command.as_str()).await?;
+        Ok::<_, russh::Error>(channel)
+    }
+    .await;
+
+    let channel = match channel_result {
+        Ok(channel) => channel,
+        Err(error) => {
+            let message = format!("ssh exec request failed: {error}");
+            append_exec_output(&output, &revision, message.as_bytes());
+            append_exec_output(&output, &revision, b"\n");
+            set_exec_status(&status, &revision, ExecStdioStatus::Failed(message));
+            let _ = actor.disconnect().await;
+            return;
+        }
+    };
+
+    let (mut read_half, write_half) = channel.split();
+    set_exec_status(
+        &status,
+        &revision,
+        ExecStdioStatus::Connected {
+            observed_host_key_sha256: actor.observed_host_key_sha256.clone(),
+        },
+    );
+
+    loop {
+        while let Ok(message) = receiver.try_recv() {
+            match message {
+                ExecStdioInput::Bytes(bytes) => {
+                    if let Err(error) = write_half.data_bytes(bytes).await {
+                        let message = format!("ssh exec stdin write failed: {error}");
+                        append_exec_output(&output, &revision, message.as_bytes());
+                        append_exec_output(&output, &revision, b"\n");
+                        set_exec_status(&status, &revision, ExecStdioStatus::Failed(message));
+                        let _ = write_half.close().await;
+                        let _ = actor.disconnect().await;
+                        return;
+                    }
+                }
+                ExecStdioInput::Disconnect => {
+                    let _ = write_half.close().await;
+                    let _ = actor.disconnect().await;
+                    set_exec_status(&status, &revision, ExecStdioStatus::Closed);
+                    return;
+                }
+            }
+        }
+
+        match tokio::time::timeout(std::time::Duration::from_millis(40), read_half.wait()).await {
+            Ok(Some(russh::ChannelMsg::Data { data })) => {
+                append_exec_output(&output, &revision, &data)
+            }
+            Ok(Some(russh::ChannelMsg::ExtendedData { data, .. })) => {
+                append_exec_output(&output, &revision, &data)
+            }
+            Ok(Some(russh::ChannelMsg::ExitStatus { .. })) => {}
+            Ok(Some(russh::ChannelMsg::Close)) | Ok(None) => {
+                set_exec_status(&status, &revision, ExecStdioStatus::Closed);
+                let _ = actor.disconnect().await;
+                return;
+            }
+            Ok(Some(_)) | Err(_) => {}
+        }
+    }
+}
+
+#[cfg(feature = "native-integrations")]
 fn append_live_output(
     output: &std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
     revision: &std::sync::Arc<std::sync::atomic::AtomicU64>,
     bytes: &[u8],
 ) {
-    const MAX_BUFFERED_BYTES: usize = 128 * 1024;
+    append_buffered_output(output, revision, bytes, 128 * 1024);
+}
 
+#[cfg(feature = "native-integrations")]
+fn append_exec_output(
+    output: &std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
+    revision: &std::sync::Arc<std::sync::atomic::AtomicU64>,
+    bytes: &[u8],
+) {
+    append_buffered_output(output, revision, bytes, 8 * 1024 * 1024);
+}
+
+#[cfg(feature = "native-integrations")]
+fn append_buffered_output(
+    output: &std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
+    revision: &std::sync::Arc<std::sync::atomic::AtomicU64>,
+    bytes: &[u8],
+    max_buffered_bytes: usize,
+) {
     if bytes.is_empty() {
         return;
     }
 
     if let Ok(mut output) = output.lock() {
         output.extend_from_slice(bytes);
-        if output.len() > MAX_BUFFERED_BYTES {
-            let drain = output.len() - MAX_BUFFERED_BYTES;
+        if output.len() > max_buffered_bytes {
+            let drain = output.len() - max_buffered_bytes;
             output.drain(..drain);
         }
         revision.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
@@ -395,6 +612,30 @@ fn get_live_status(status: &std::sync::Arc<std::sync::Mutex<LiveShellStatus>>) -
         .lock()
         .map(|status| status.clone())
         .unwrap_or_else(|_| LiveShellStatus::Failed("live shell status lock failed".to_string()))
+}
+
+#[cfg(feature = "native-integrations")]
+fn set_exec_status(
+    status: &std::sync::Arc<std::sync::Mutex<ExecStdioStatus>>,
+    revision: &std::sync::Arc<std::sync::atomic::AtomicU64>,
+    next: ExecStdioStatus,
+) {
+    if let Ok(mut status) = status.lock() {
+        if *status != next {
+            *status = next;
+            revision.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        }
+    }
+}
+
+#[cfg(feature = "native-integrations")]
+fn get_exec_status(status: &std::sync::Arc<std::sync::Mutex<ExecStdioStatus>>) -> ExecStdioStatus {
+    status
+        .lock()
+        .map(|status| status.clone())
+        .unwrap_or_else(|_| {
+            ExecStdioStatus::Failed("ssh exec stdio status lock failed".to_string())
+        })
 }
 
 #[cfg(feature = "native-integrations")]

@@ -218,6 +218,608 @@ enum TerminalScreenKind: String, Equatable, Decodable {
     case alternate
 }
 
+struct CodexSnapshot: Equatable, Decodable {
+    var title: String
+    var endpoint: String
+    var cwd: String?
+    var status: CodexStatus
+    var observedHostKeySha256: String?
+    var threadId: String?
+    var turnActive: Bool
+    var messages: [CodexMessage]
+    var pendingApprovals: [CodexApproval]
+    var directory: CodexDirectoryState
+    var threads: CodexThreadListState
+    var projects: CodexProjectState
+    var threadDetail: CodexThreadDetailState
+    var activeTurn: CodexActiveTurn?
+    var operation: CodexOperationState
+    var settings: CodexSettingsState
+    var lastError: String?
+
+    private enum CodingKeys: String, CodingKey {
+        case title
+        case endpoint
+        case cwd
+        case status
+        case observedHostKeySha256
+        case threadId
+        case turnActive
+        case messages
+        case pendingApprovals
+        case directory
+        case threads
+        case projects
+        case threadDetail
+        case activeTurn
+        case operation
+        case settings
+        case lastError
+    }
+
+    init(
+        title: String,
+        endpoint: String,
+        cwd: String?,
+        status: CodexStatus,
+        observedHostKeySha256: String?,
+        threadId: String?,
+        turnActive: Bool,
+        messages: [CodexMessage],
+        pendingApprovals: [CodexApproval],
+        directory: CodexDirectoryState,
+        threads: CodexThreadListState,
+        projects: CodexProjectState = .empty,
+        threadDetail: CodexThreadDetailState = .empty,
+        activeTurn: CodexActiveTurn? = nil,
+        operation: CodexOperationState = .idle,
+        settings: CodexSettingsState = .empty,
+        lastError: String?
+    ) {
+        self.title = title
+        self.endpoint = endpoint
+        self.cwd = cwd
+        self.status = status
+        self.observedHostKeySha256 = observedHostKeySha256
+        self.threadId = threadId
+        self.turnActive = turnActive
+        self.messages = messages
+        self.pendingApprovals = pendingApprovals
+        self.directory = directory
+        self.threads = threads
+        self.projects = projects
+        self.threadDetail = threadDetail
+        self.activeTurn = activeTurn
+        self.operation = operation
+        self.settings = settings
+        self.lastError = lastError
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        title = try container.decodeIfPresent(String.self, forKey: .title) ?? "Codex"
+        endpoint = try container.decodeIfPresent(String.self, forKey: .endpoint) ?? "not connected"
+        cwd = try container.decodeIfPresent(String.self, forKey: .cwd)
+        status = try container.decodeIfPresent(CodexStatus.self, forKey: .status) ?? .disconnected
+        observedHostKeySha256 = try container.decodeIfPresent(String.self, forKey: .observedHostKeySha256)
+        threadId = try container.decodeIfPresent(String.self, forKey: .threadId)
+        turnActive = try container.decodeIfPresent(Bool.self, forKey: .turnActive) ?? false
+        messages = try container.decodeIfPresent([CodexMessage].self, forKey: .messages) ?? []
+        pendingApprovals = try container.decodeIfPresent([CodexApproval].self, forKey: .pendingApprovals) ?? []
+        directory = try container.decodeIfPresent(CodexDirectoryState.self, forKey: .directory) ?? .empty
+        threads = try container.decodeIfPresent(CodexThreadListState.self, forKey: .threads) ?? .empty
+        projects = try container.decodeIfPresent(CodexProjectState.self, forKey: .projects) ?? .empty
+        threadDetail = try container.decodeIfPresent(CodexThreadDetailState.self, forKey: .threadDetail) ?? .empty
+        activeTurn = try container.decodeIfPresent(CodexActiveTurn.self, forKey: .activeTurn)
+        operation = try container.decodeIfPresent(CodexOperationState.self, forKey: .operation) ?? .idle
+        settings = try container.decodeIfPresent(CodexSettingsState.self, forKey: .settings) ?? .empty
+        lastError = try container.decodeIfPresent(String.self, forKey: .lastError)
+    }
+
+    static func disconnected() -> CodexSnapshot {
+        CodexSnapshot(
+            title: "Codex",
+            endpoint: "not connected",
+            cwd: nil,
+            status: .disconnected,
+            observedHostKeySha256: nil,
+            threadId: nil,
+            turnActive: false,
+            messages: [
+                CodexMessage(id: "status-0", role: .status, text: "Connect to a host to start Codex.")
+            ],
+            pendingApprovals: [],
+            directory: .empty,
+            threads: .empty,
+            projects: .empty,
+            threadDetail: .empty,
+            activeTurn: nil,
+            operation: .idle,
+            settings: .empty,
+            lastError: nil
+        )
+    }
+
+    static func connecting(to profile: HostProfile, cwd: String) -> CodexSnapshot {
+        let trimmedCwd = cwd.trimmingCharacters(in: .whitespacesAndNewlines)
+        let resolvedCwd = trimmedCwd.isEmpty ? nil : trimmedCwd
+
+        return CodexSnapshot(
+            title: "Codex",
+            endpoint: profile.endpoint,
+            cwd: resolvedCwd,
+            status: .connecting,
+            observedHostKeySha256: nil,
+            threadId: nil,
+            turnActive: false,
+            messages: [
+                CodexMessage(id: "status-0", role: .status, text: "Starting Codex on \(profile.endpoint).")
+            ],
+            pendingApprovals: [],
+            directory: .empty,
+            threads: .empty,
+            projects: CodexProjectState(current: resolvedCwd, remoteHome: nil, recent: [], favorites: []),
+            threadDetail: .empty,
+            activeTurn: nil,
+            operation: .idle,
+            settings: .empty,
+            lastError: nil
+        )
+    }
+
+    static func bridgeFailure(_ message: String) -> CodexSnapshot {
+        CodexSnapshot(
+            title: "Codex",
+            endpoint: "bridge.error",
+            cwd: nil,
+            status: .failed,
+            observedHostKeySha256: nil,
+            threadId: nil,
+            turnActive: false,
+            messages: [
+                CodexMessage(id: "status-0", role: .status, text: "Codex native bridge failed"),
+                CodexMessage(id: "status-1", role: .status, text: message)
+            ],
+            pendingApprovals: [],
+            directory: .empty,
+            threads: .empty,
+            projects: .empty,
+            threadDetail: .empty,
+            activeTurn: nil,
+            operation: .failure(message),
+            settings: .empty,
+            lastError: message
+        )
+    }
+}
+
+struct CodexProjectState: Equatable, Decodable {
+    var current: String?
+    var remoteHome: String?
+    var recent: [String]
+    var favorites: [String]
+
+    static let empty = CodexProjectState(current: nil, remoteHome: nil, recent: [], favorites: [])
+}
+
+struct CodexDirectoryState: Equatable, Decodable {
+    var path: String?
+    var parent: String?
+    var entries: [CodexDirectoryEntry]
+    var isLoading: Bool
+    var error: String?
+
+    static let empty = CodexDirectoryState(
+        path: nil,
+        parent: nil,
+        entries: [],
+        isLoading: false,
+        error: nil
+    )
+}
+
+struct CodexDirectoryEntry: Identifiable, Equatable, Decodable {
+    var name: String
+    var path: String
+    var isDirectory: Bool
+    var isFile: Bool
+
+    var id: String { path }
+}
+
+struct CodexThreadListState: Equatable, Decodable {
+    var cwd: String?
+    var searchTerm: String?
+    var archived: Bool
+    var threads: [CodexThreadSummary]
+    var nextCursor: String?
+    var backwardsCursor: String?
+    var isLoading: Bool
+    var isLoadingMore: Bool
+    var error: String?
+
+    static let empty = CodexThreadListState(
+        cwd: nil,
+        searchTerm: nil,
+        archived: false,
+        threads: [],
+        nextCursor: nil,
+        backwardsCursor: nil,
+        isLoading: false,
+        isLoadingMore: false,
+        error: nil
+    )
+}
+
+struct CodexThreadSummary: Identifiable, Equatable, Decodable {
+    var id: String
+    var name: String?
+    var preview: String
+    var cwd: String
+    var status: String
+    var updatedAt: UInt64
+    var createdAt: UInt64
+    var source: String
+    var modelProvider: String
+    var forkedFromId: String?
+    var parentThreadId: String?
+}
+
+struct CodexThreadDetailState: Equatable, Decodable {
+    var thread: CodexThreadSummary?
+    var turnsNextCursor: String?
+    var turnsBackwardsCursor: String?
+    var isLoading: Bool
+    var isLoadingMore: Bool
+    var error: String?
+
+    static let empty = CodexThreadDetailState(
+        thread: nil,
+        turnsNextCursor: nil,
+        turnsBackwardsCursor: nil,
+        isLoading: false,
+        isLoadingMore: false,
+        error: nil
+    )
+}
+
+struct CodexActiveTurn: Equatable, Decodable {
+    var id: String
+    var status: String
+}
+
+struct CodexOperationState: Equatable, Decodable {
+    var isRunning: Bool
+    var label: String?
+    var lastSuccess: String?
+    var lastError: String?
+
+    static let idle = CodexOperationState(isRunning: false, label: nil, lastSuccess: nil, lastError: nil)
+
+    static func failure(_ message: String) -> CodexOperationState {
+        CodexOperationState(isRunning: false, label: nil, lastSuccess: nil, lastError: message)
+    }
+}
+
+struct CodexModelOption: Identifiable, Equatable, Decodable {
+    var id: String
+    var name: String
+}
+
+struct CodexSettingsState: Equatable, Decodable {
+    var model: String?
+    var approvalPolicy: String?
+    var sandbox: String?
+    var availableModels: [CodexModelOption]
+    var isLoadingModels: Bool
+    var modelsError: String?
+
+    static let empty = CodexSettingsState(
+        model: nil,
+        approvalPolicy: nil,
+        sandbox: nil,
+        availableModels: [],
+        isLoadingModels: false,
+        modelsError: nil
+    )
+
+    init(
+        model: String?,
+        approvalPolicy: String?,
+        sandbox: String?,
+        availableModels: [CodexModelOption],
+        isLoadingModels: Bool,
+        modelsError: String?
+    ) {
+        self.model = model
+        self.approvalPolicy = approvalPolicy
+        self.sandbox = sandbox
+        self.availableModels = availableModels
+        self.isLoadingModels = isLoadingModels
+        self.modelsError = modelsError
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case model
+        case approvalPolicy
+        case sandbox
+        case availableModels
+        case isLoadingModels
+        case modelsError
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        model = try container.decodeIfPresent(String.self, forKey: .model)
+        approvalPolicy = try container.decodeIfPresent(String.self, forKey: .approvalPolicy)
+        sandbox = try container.decodeIfPresent(String.self, forKey: .sandbox)
+        availableModels = try container.decodeIfPresent([CodexModelOption].self, forKey: .availableModels) ?? []
+        isLoadingModels = try container.decodeIfPresent(Bool.self, forKey: .isLoadingModels) ?? false
+        modelsError = try container.decodeIfPresent(String.self, forKey: .modelsError)
+    }
+}
+
+enum CodexStatus: String, Equatable, Decodable {
+    case disconnected
+    case connecting
+    case connected
+    case failed
+
+    var title: String {
+        switch self {
+        case .disconnected: "Offline"
+        case .connecting: "Connecting"
+        case .connected: "Connected"
+        case .failed: "Failed"
+        }
+    }
+}
+
+struct CodexMessage: Identifiable, Equatable, Decodable {
+    var id: String
+    var role: CodexMessageRole
+    var text: String
+    var kind: CodexMessageKind
+    var visibility: CodexMessageVisibility
+    var title: String?
+    var detail: String?
+    var transcript: String?
+    var format: CodexMessageFormat
+    var blocks: [CodexMarkdownBlock]
+    var isStreaming: Bool
+    var truncated: Bool
+
+    private enum CodingKeys: String, CodingKey {
+        case id
+        case role
+        case text
+        case kind
+        case visibility
+        case title
+        case detail
+        case transcript
+        case format
+        case blocks
+        case isStreaming
+        case truncated
+    }
+
+    init(
+        id: String,
+        role: CodexMessageRole,
+        text: String,
+        kind: CodexMessageKind = .status,
+        visibility: CodexMessageVisibility = .primary,
+        title: String? = nil,
+        detail: String? = nil,
+        transcript: String? = nil,
+        format: CodexMessageFormat = .plain,
+        blocks: [CodexMarkdownBlock] = [],
+        isStreaming: Bool = false,
+        truncated: Bool = false
+    ) {
+        self.id = id
+        self.role = role
+        self.text = text
+        self.kind = kind
+        self.visibility = visibility
+        self.title = title
+        self.detail = detail
+        self.transcript = transcript
+        self.format = format
+        self.blocks = blocks
+        self.isStreaming = isStreaming
+        self.truncated = truncated
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(String.self, forKey: .id)
+        role = try container.decode(CodexMessageRole.self, forKey: .role)
+        text = try container.decodeIfPresent(String.self, forKey: .text) ?? ""
+        kind = try container.decodeIfPresent(CodexMessageKind.self, forKey: .kind) ?? .status
+        visibility = try container.decodeIfPresent(CodexMessageVisibility.self, forKey: .visibility) ?? .primary
+        title = try container.decodeIfPresent(String.self, forKey: .title)
+        detail = try container.decodeIfPresent(String.self, forKey: .detail)
+        transcript = try container.decodeIfPresent(String.self, forKey: .transcript)
+        format = try container.decodeIfPresent(CodexMessageFormat.self, forKey: .format) ?? .plain
+        blocks = try container.decodeIfPresent([CodexMarkdownBlock].self, forKey: .blocks) ?? []
+        isStreaming = try container.decodeIfPresent(Bool.self, forKey: .isStreaming) ?? false
+        truncated = try container.decodeIfPresent(Bool.self, forKey: .truncated) ?? false
+    }
+}
+
+enum CodexMessageKind: String, Equatable, Decodable {
+    case userMessage = "user_message"
+    case finalAnswer = "final_answer"
+    case commentary
+    case reasoningSummary = "reasoning_summary"
+    case status
+    case toolCall = "tool_call"
+    case toolResult = "tool_result"
+    case command
+    case commandOutput = "command_output"
+    case fileChange = "file_change"
+    case plan
+}
+
+enum CodexMessageVisibility: String, Equatable, Decodable {
+    case primary
+    case compact
+    case transcriptOnly = "transcript_only"
+    case hidden
+}
+
+enum CodexMessageRole: String, Equatable, Decodable {
+    case user
+    case assistant
+    case status
+    case tool
+    case commandOutput = "command_output"
+}
+
+enum CodexMessageFormat: String, Equatable, Decodable {
+    case plain
+    case markdown
+    case code
+    case status
+}
+
+struct CodexMarkdownBlock: Identifiable, Equatable, Decodable {
+    var id: String
+    var kind: CodexMarkdownBlockKind
+    var text: String
+    var imageUrl: String?
+    var imageAlt: String?
+    var level: Int?
+    var language: String?
+    var ordered: Bool
+    var items: [CodexMarkdownListItem]
+    var tableHeaders: [CodexMarkdownTableCell]
+    var tableRows: [[CodexMarkdownTableCell]]
+    var runs: [CodexMarkdownInlineRun]
+    var incomplete: Bool
+
+    private enum CodingKeys: String, CodingKey {
+        case id
+        case kind
+        case text
+        case imageUrl
+        case imageAlt
+        case level
+        case language
+        case ordered
+        case items
+        case tableHeaders
+        case tableRows
+        case runs
+        case incomplete
+    }
+
+    init(
+        id: String,
+        kind: CodexMarkdownBlockKind,
+        text: String,
+        imageUrl: String? = nil,
+        imageAlt: String? = nil,
+        level: Int? = nil,
+        language: String? = nil,
+        ordered: Bool = false,
+        items: [CodexMarkdownListItem] = [],
+        tableHeaders: [CodexMarkdownTableCell] = [],
+        tableRows: [[CodexMarkdownTableCell]] = [],
+        runs: [CodexMarkdownInlineRun] = [],
+        incomplete: Bool = false
+    ) {
+        self.id = id
+        self.kind = kind
+        self.text = text
+        self.imageUrl = imageUrl
+        self.imageAlt = imageAlt
+        self.level = level
+        self.language = language
+        self.ordered = ordered
+        self.items = items
+        self.tableHeaders = tableHeaders
+        self.tableRows = tableRows
+        self.runs = runs
+        self.incomplete = incomplete
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(String.self, forKey: .id)
+        kind = try container.decode(CodexMarkdownBlockKind.self, forKey: .kind)
+        text = try container.decodeIfPresent(String.self, forKey: .text) ?? ""
+        imageUrl = try container.decodeIfPresent(String.self, forKey: .imageUrl)
+        imageAlt = try container.decodeIfPresent(String.self, forKey: .imageAlt)
+        level = try container.decodeIfPresent(Int.self, forKey: .level)
+        language = try container.decodeIfPresent(String.self, forKey: .language)
+        ordered = try container.decodeIfPresent(Bool.self, forKey: .ordered) ?? false
+        items = try container.decodeIfPresent([CodexMarkdownListItem].self, forKey: .items) ?? []
+        tableHeaders = try container.decodeIfPresent([CodexMarkdownTableCell].self, forKey: .tableHeaders) ?? []
+        tableRows = try container.decodeIfPresent([[CodexMarkdownTableCell]].self, forKey: .tableRows) ?? []
+        runs = try container.decodeIfPresent([CodexMarkdownInlineRun].self, forKey: .runs) ?? []
+        incomplete = try container.decodeIfPresent(Bool.self, forKey: .incomplete) ?? false
+    }
+}
+
+enum CodexMarkdownBlockKind: String, Equatable, Decodable {
+    case paragraph
+    case heading
+    case list
+    case blockQuote = "block_quote"
+    case codeBlock = "code_block"
+    case table
+    case horizontalRule = "horizontal_rule"
+    case image
+}
+
+struct CodexMarkdownListItem: Equatable, Decodable {
+    var text: String
+    var runs: [CodexMarkdownInlineRun]
+}
+
+struct CodexMarkdownTableCell: Equatable, Decodable {
+    var text: String
+    var runs: [CodexMarkdownInlineRun]
+}
+
+struct CodexMarkdownInlineRun: Equatable, Decodable {
+    var text: String
+    var style: CodexMarkdownInlineStyle
+    var url: String?
+}
+
+enum CodexMarkdownInlineStyle: String, Equatable, Decodable {
+    case text
+    case bold
+    case italic
+    case boldItalic = "bold_italic"
+    case code
+    case link
+}
+
+struct CodexApproval: Identifiable, Equatable, Decodable {
+    var requestId: String
+    var kind: CodexApprovalKind
+    var title: String
+    var detail: String
+    var command: String?
+    var cwd: String?
+    var reason: String?
+
+    var id: String { requestId }
+}
+
+enum CodexApprovalKind: String, Equatable, Decodable {
+    case command
+    case fileChange = "file_change"
+    case userInput = "user_input"
+    case permissions
+    case tool
+}
+
 struct IntegrationReport: Equatable, Decodable {
     var terminalBackend: String
     var terminalTargetBackend: String

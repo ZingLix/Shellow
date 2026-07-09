@@ -283,6 +283,11 @@ Java_xyz_zinglix_shellow_core_ShellowNative_nativeLiveShellEventRevision(JNIEnv 
     return static_cast<jlong>(shellow_engine_live_shell_event_revision(engineFromHandle(handle)));
 }
 
+extern "C" JNIEXPORT jlong JNICALL
+Java_xyz_zinglix_shellow_core_ShellowNative_nativeCodexEventRevision(JNIEnv *, jobject, jlong handle) {
+    return static_cast<jlong>(shellow_engine_codex_event_revision(engineFromHandle(handle)));
+}
+
 extern "C" JNIEXPORT jstring JNICALL
 Java_xyz_zinglix_shellow_core_ShellowNative_nativeSetRendererOverlayJson(
     JNIEnv *env,
@@ -507,4 +512,319 @@ Java_xyz_zinglix_shellow_core_ShellowNative_nativePollLiveShellJson(JNIEnv *env,
 extern "C" JNIEXPORT jstring JNICALL
 Java_xyz_zinglix_shellow_core_ShellowNative_nativeDisconnectLiveShellJson(JNIEnv *env, jobject, jlong handle) {
     return takeJson(env, shellow_engine_disconnect_live_shell_json(engineFromHandle(handle)));
+}
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_xyz_zinglix_shellow_core_ShellowNative_nativeCodexSnapshotJson(JNIEnv *env, jobject, jlong handle) {
+    return takeJson(env, shellow_engine_codex_snapshot_json(engineFromHandle(handle)));
+}
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_xyz_zinglix_shellow_core_ShellowNative_nativeStartCodexPasswordJson(
+    JNIEnv *env,
+    jobject,
+    jlong handle,
+    jstring name,
+    jstring host,
+    jint port,
+    jstring username,
+    jstring trustedHostKeySha256,
+    jstring password,
+    jstring cwd
+) {
+    std::string nameText = readString(env, name);
+    std::string hostText = readString(env, host);
+    std::string usernameText = readString(env, username);
+    std::string trustedHostKeySha256Text = readString(env, trustedHostKeySha256);
+    std::string passwordText = readString(env, password);
+    std::string cwdText = readString(env, cwd);
+    return takeJson(
+        env,
+        shellow_engine_start_codex_password_json(
+            engineFromHandle(handle),
+            nameText.c_str(),
+            hostText.c_str(),
+            static_cast<uint16_t>(port),
+            usernameText.c_str(),
+            trustedHostKeySha256Text.c_str(),
+            passwordText.c_str(),
+            cwdText.c_str()
+        )
+    );
+}
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_xyz_zinglix_shellow_core_ShellowNative_nativeStartCodexPrivateKeyJson(
+    JNIEnv *env,
+    jobject,
+    jlong handle,
+    jstring name,
+    jstring host,
+    jint port,
+    jstring username,
+    jstring trustedHostKeySha256,
+    jstring privateKeyPem,
+    jstring passphrase,
+    jstring cwd
+) {
+    std::string nameText = readString(env, name);
+    std::string hostText = readString(env, host);
+    std::string usernameText = readString(env, username);
+    std::string trustedHostKeySha256Text = readString(env, trustedHostKeySha256);
+    std::string privateKeyPemText = readString(env, privateKeyPem);
+    std::string passphraseText = readString(env, passphrase);
+    std::string cwdText = readString(env, cwd);
+    return takeJson(
+        env,
+        shellow_engine_start_codex_private_key_json(
+            engineFromHandle(handle),
+            nameText.c_str(),
+            hostText.c_str(),
+            static_cast<uint16_t>(port),
+            usernameText.c_str(),
+            trustedHostKeySha256Text.c_str(),
+            privateKeyPemText.c_str(),
+            passphraseText.c_str(),
+            cwdText.c_str()
+        )
+    );
+}
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_xyz_zinglix_shellow_core_ShellowNative_nativePollCodexJson(JNIEnv *env, jobject, jlong handle) {
+    return takeJson(env, shellow_engine_poll_codex_json(engineFromHandle(handle)));
+}
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_xyz_zinglix_shellow_core_ShellowNative_nativeSendCodexMessageJson(
+    JNIEnv *env,
+    jobject,
+    jlong handle,
+    jstring message
+) {
+    std::string messageText = readString(env, message);
+    return takeJson(env, shellow_engine_send_codex_message_json(engineFromHandle(handle), messageText.c_str()));
+}
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_xyz_zinglix_shellow_core_ShellowNative_nativeUpdateCodexSettingsJson(
+    JNIEnv *env,
+    jobject,
+    jlong handle,
+    jstring model,
+    jstring approvalPolicy,
+    jstring sandbox
+) {
+    std::string modelText = readString(env, model);
+    std::string approvalPolicyText = readString(env, approvalPolicy);
+    std::string sandboxText = readString(env, sandbox);
+    return takeJson(
+        env,
+        shellow_engine_update_codex_settings_json(
+            engineFromHandle(handle),
+            modelText.c_str(),
+            approvalPolicyText.c_str(),
+            sandboxText.c_str()
+        )
+    );
+}
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_xyz_zinglix_shellow_core_ShellowNative_nativeBrowseCodexDirectoryJson(
+    JNIEnv *env,
+    jobject,
+    jlong handle,
+    jstring path
+) {
+    std::string pathText = readString(env, path);
+    return takeJson(env, shellow_engine_browse_codex_directory_json(engineFromHandle(handle), pathText.c_str()));
+}
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_xyz_zinglix_shellow_core_ShellowNative_nativeListCodexThreadsJson(
+    JNIEnv *env,
+    jobject,
+    jlong handle,
+    jstring cwd,
+    jstring searchTerm
+) {
+    std::string cwdText = readString(env, cwd);
+    std::string searchTermText = readString(env, searchTerm);
+    return takeJson(
+        env,
+        shellow_engine_list_codex_threads_json(
+            engineFromHandle(handle),
+            cwdText.c_str(),
+            searchTermText.c_str()
+        )
+    );
+}
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_xyz_zinglix_shellow_core_ShellowNative_nativeListCodexThreadsPageJson(
+    JNIEnv *env,
+    jobject,
+    jlong handle,
+    jstring cwd,
+    jstring searchTerm,
+    jstring cursor,
+    jboolean archived,
+    jboolean append
+) {
+    std::string cwdText = readString(env, cwd);
+    std::string searchTermText = readString(env, searchTerm);
+    std::string cursorText = readString(env, cursor);
+    return takeJson(
+        env,
+        shellow_engine_list_codex_threads_page_json(
+            engineFromHandle(handle),
+            cwdText.c_str(),
+            searchTermText.c_str(),
+            cursorText.c_str(),
+            archived == JNI_TRUE,
+            append == JNI_TRUE
+        )
+    );
+}
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_xyz_zinglix_shellow_core_ShellowNative_nativeStartCodexThreadJson(
+    JNIEnv *env,
+    jobject,
+    jlong handle,
+    jstring cwd
+) {
+    std::string cwdText = readString(env, cwd);
+    return takeJson(env, shellow_engine_start_codex_thread_json(engineFromHandle(handle), cwdText.c_str()));
+}
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_xyz_zinglix_shellow_core_ShellowNative_nativeResumeCodexThreadJson(
+    JNIEnv *env,
+    jobject,
+    jlong handle,
+    jstring threadId
+) {
+    std::string threadIdText = readString(env, threadId);
+    return takeJson(env, shellow_engine_resume_codex_thread_json(engineFromHandle(handle), threadIdText.c_str()));
+}
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_xyz_zinglix_shellow_core_ShellowNative_nativeReadCodexThreadJson(
+    JNIEnv *env,
+    jobject,
+    jlong handle,
+    jstring threadId
+) {
+    std::string threadIdText = readString(env, threadId);
+    return takeJson(env, shellow_engine_read_codex_thread_json(engineFromHandle(handle), threadIdText.c_str()));
+}
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_xyz_zinglix_shellow_core_ShellowNative_nativeLoadMoreCodexThreadTurnsJson(
+    JNIEnv *env,
+    jobject,
+    jlong handle,
+    jstring threadId,
+    jstring cursor
+) {
+    std::string threadIdText = readString(env, threadId);
+    std::string cursorText = readString(env, cursor);
+    return takeJson(
+        env,
+        shellow_engine_load_more_codex_thread_turns_json(
+            engineFromHandle(handle),
+            threadIdText.c_str(),
+            cursorText.c_str()
+        )
+    );
+}
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_xyz_zinglix_shellow_core_ShellowNative_nativeRenameCodexThreadJson(
+    JNIEnv *env,
+    jobject,
+    jlong handle,
+    jstring threadId,
+    jstring name
+) {
+    std::string threadIdText = readString(env, threadId);
+    std::string nameText = readString(env, name);
+    return takeJson(env, shellow_engine_rename_codex_thread_json(engineFromHandle(handle), threadIdText.c_str(), nameText.c_str()));
+}
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_xyz_zinglix_shellow_core_ShellowNative_nativeArchiveCodexThreadJson(
+    JNIEnv *env,
+    jobject,
+    jlong handle,
+    jstring threadId
+) {
+    std::string threadIdText = readString(env, threadId);
+    return takeJson(env, shellow_engine_archive_codex_thread_json(engineFromHandle(handle), threadIdText.c_str()));
+}
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_xyz_zinglix_shellow_core_ShellowNative_nativeUnarchiveCodexThreadJson(
+    JNIEnv *env,
+    jobject,
+    jlong handle,
+    jstring threadId
+) {
+    std::string threadIdText = readString(env, threadId);
+    return takeJson(env, shellow_engine_unarchive_codex_thread_json(engineFromHandle(handle), threadIdText.c_str()));
+}
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_xyz_zinglix_shellow_core_ShellowNative_nativeDeleteCodexThreadJson(
+    JNIEnv *env,
+    jobject,
+    jlong handle,
+    jstring threadId
+) {
+    std::string threadIdText = readString(env, threadId);
+    return takeJson(env, shellow_engine_delete_codex_thread_json(engineFromHandle(handle), threadIdText.c_str()));
+}
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_xyz_zinglix_shellow_core_ShellowNative_nativeForkCodexThreadJson(
+    JNIEnv *env,
+    jobject,
+    jlong handle,
+    jstring threadId,
+    jstring cwd
+) {
+    std::string threadIdText = readString(env, threadId);
+    std::string cwdText = readString(env, cwd);
+    return takeJson(env, shellow_engine_fork_codex_thread_json(engineFromHandle(handle), threadIdText.c_str(), cwdText.c_str()));
+}
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_xyz_zinglix_shellow_core_ShellowNative_nativeInterruptCodexTurnJson(JNIEnv *env, jobject, jlong handle) {
+    return takeJson(env, shellow_engine_interrupt_codex_turn_json(engineFromHandle(handle)));
+}
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_xyz_zinglix_shellow_core_ShellowNative_nativeAnswerCodexApprovalJson(
+    JNIEnv *env,
+    jobject,
+    jlong handle,
+    jstring requestId,
+    jstring decision
+) {
+    std::string requestIdText = readString(env, requestId);
+    std::string decisionText = readString(env, decision);
+    return takeJson(
+        env,
+        shellow_engine_answer_codex_approval_json(
+            engineFromHandle(handle),
+            requestIdText.c_str(),
+            decisionText.c_str()
+        )
+    );
+}
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_xyz_zinglix_shellow_core_ShellowNative_nativeDisconnectCodexJson(JNIEnv *env, jobject, jlong handle) {
+    return takeJson(env, shellow_engine_disconnect_codex_json(engineFromHandle(handle)));
 }

@@ -12,6 +12,8 @@ private final class TerminalMetalHostView: MTKView {
 }
 
 struct TerminalMetalGridSurface: UIViewRepresentable {
+    @Environment(\.colorScheme) private var colorScheme
+
     static var isAvailable: Bool {
         MTLCreateSystemDefaultDevice() != nil
     }
@@ -36,7 +38,7 @@ struct TerminalMetalGridSurface: UIViewRepresentable {
         view.isPaused = true
         view.enableSetNeedsDisplay = true
         view.autoResizeDrawable = true
-        view.clearColor = MTLClearColor(red: 0.05, green: 0.06, blue: 0.06, alpha: 1)
+        view.clearColor = metalClearColor(for: colorScheme)
         view.delegate = context.coordinator
         view.onLayout = { [weak coordinator = context.coordinator] view in
             coordinator?.layoutChanged(view: view)
@@ -47,6 +49,7 @@ struct TerminalMetalGridSurface: UIViewRepresentable {
     }
 
     func updateUIView(_ view: MTKView, context: Context) {
+        view.clearColor = metalClearColor(for: colorScheme)
         context.coordinator.update(
             TerminalMetalGridState(
                 viewportFirstRow: viewportFirstRow,
@@ -64,6 +67,17 @@ struct TerminalMetalGridSurface: UIViewRepresentable {
         context.coordinator.updateOverlayJSON(rendererOverlayJSON)
         if !context.coordinator.renderWithRustSurfaceIfPossible(view: view) {
             view.setNeedsDisplay()
+        }
+    }
+
+    private func metalClearColor(for colorScheme: ColorScheme) -> MTLClearColor {
+        switch colorScheme {
+        case .dark:
+            MTLClearColor(red: 0.05, green: 0.06, blue: 0.06, alpha: 1)
+        case .light:
+            MTLClearColor(red: 0.97, green: 0.98, blue: 0.96, alpha: 1)
+        @unknown default:
+            MTLClearColor(red: 0.05, green: 0.06, blue: 0.06, alpha: 1)
         }
     }
 

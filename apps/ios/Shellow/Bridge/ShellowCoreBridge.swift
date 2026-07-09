@@ -84,6 +84,12 @@ final class ShellowCoreSession: @unchecked Sendable {
         }
     }
 
+    func codexEventRevision() -> UInt64 {
+        withLockedEngine {
+            shellow_engine_codex_event_revision(engine)
+        }
+    }
+
     func setRendererOverlayJSON(_ overlayJSON: String) -> String {
         withLockedEngine {
             overlayJSON.withCString { pointer in
@@ -295,6 +301,342 @@ final class ShellowCoreSession: @unchecked Sendable {
         }
     }
 
+    func codexSnapshot() -> CodexSnapshot {
+        withLockedEngine {
+            decodeCodex(shellow_engine_codex_snapshot_json(engine), label: "snapshot")
+        }
+    }
+
+    func startCodexPassword(to profile: HostProfile, password: String, cwd: String) async -> CodexSnapshot {
+        await withCheckedContinuation { continuation in
+            DispatchQueue.global(qos: .userInitiated).async {
+                let result = self.withLockedEngine {
+                    let trustedHostKeySHA256 = profile.trustedHostKeySHA256 ?? ""
+                    return profile.name.withCString { name in
+                        profile.host.withCString { host in
+                            profile.username.withCString { username in
+                                trustedHostKeySHA256.withCString { trustedHostKeySHA256 in
+                                    password.withCString { password in
+                                        cwd.withCString { cwd in
+                                            self.decodeCodex(
+                                                shellow_engine_start_codex_password_json(
+                                                    self.engine,
+                                                    name,
+                                                    host,
+                                                    UInt16(clamping: profile.port),
+                                                    username,
+                                                    trustedHostKeySHA256,
+                                                    password,
+                                                    cwd
+                                                ),
+                                                label: "start_password"
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                continuation.resume(returning: result)
+            }
+        }
+    }
+
+    func startCodexPrivateKey(
+        to profile: HostProfile,
+        privateKeyPEM: String,
+        passphrase: String?,
+        cwd: String
+    ) async -> CodexSnapshot {
+        await withCheckedContinuation { continuation in
+            DispatchQueue.global(qos: .userInitiated).async {
+                let result = self.withLockedEngine {
+                    let trustedHostKeySHA256 = profile.trustedHostKeySHA256 ?? ""
+                    let passphrase = passphrase ?? ""
+                    return profile.name.withCString { name in
+                        profile.host.withCString { host in
+                            profile.username.withCString { username in
+                                trustedHostKeySHA256.withCString { trustedHostKeySHA256 in
+                                    privateKeyPEM.withCString { privateKeyPEM in
+                                        passphrase.withCString { passphrase in
+                                            cwd.withCString { cwd in
+                                                self.decodeCodex(
+                                                    shellow_engine_start_codex_private_key_json(
+                                                        self.engine,
+                                                        name,
+                                                        host,
+                                                        UInt16(clamping: profile.port),
+                                                        username,
+                                                        trustedHostKeySHA256,
+                                                        privateKeyPEM,
+                                                        passphrase,
+                                                        cwd
+                                                    ),
+                                                    label: "start_private_key"
+                                                )
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                continuation.resume(returning: result)
+            }
+        }
+    }
+
+    func pollCodex() -> CodexSnapshot {
+        withLockedEngine {
+            decodeCodex(shellow_engine_poll_codex_json(engine), label: "poll")
+        }
+    }
+
+    func sendCodexMessage(_ message: String) -> CodexSnapshot {
+        withLockedEngine {
+            message.withCString { pointer in
+                decodeCodex(shellow_engine_send_codex_message_json(engine, pointer), label: "send_message")
+            }
+        }
+    }
+
+    func updateCodexSettings(model: String, approvalPolicy: String, sandbox: String) -> CodexSnapshot {
+        withLockedEngine {
+            model.withCString { model in
+                approvalPolicy.withCString { approvalPolicy in
+                    sandbox.withCString { sandbox in
+                        decodeCodex(
+                            shellow_engine_update_codex_settings_json(
+                                engine,
+                                model,
+                                approvalPolicy,
+                                sandbox
+                            ),
+                            label: "update_settings"
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    func browseCodexDirectory(path: String) async -> CodexSnapshot {
+        await withCheckedContinuation { continuation in
+            DispatchQueue.global(qos: .userInitiated).async {
+                let result = self.withLockedEngine {
+                    path.withCString { path in
+                        self.decodeCodex(
+                            shellow_engine_browse_codex_directory_json(self.engine, path),
+                            label: "browse_directory"
+                        )
+                    }
+                }
+                continuation.resume(returning: result)
+            }
+        }
+    }
+
+    func listCodexThreads(cwd: String, searchTerm: String) async -> CodexSnapshot {
+        await listCodexThreadsPage(cwd: cwd, searchTerm: searchTerm, cursor: "", archived: false, append: false)
+    }
+
+    func listCodexThreadsPage(
+        cwd: String,
+        searchTerm: String,
+        cursor: String,
+        archived: Bool,
+        append: Bool
+    ) async -> CodexSnapshot {
+        await withCheckedContinuation { continuation in
+            DispatchQueue.global(qos: .userInitiated).async {
+                let result = self.withLockedEngine {
+                    cwd.withCString { cwd in
+                        searchTerm.withCString { searchTerm in
+                            cursor.withCString { cursor in
+                                self.decodeCodex(
+                                    shellow_engine_list_codex_threads_page_json(
+                                        self.engine,
+                                        cwd,
+                                        searchTerm,
+                                        cursor,
+                                        archived,
+                                        append
+                                    ),
+                                    label: "list_threads_page"
+                                )
+                            }
+                        }
+                    }
+                }
+                continuation.resume(returning: result)
+            }
+        }
+    }
+
+    func startCodexThread(cwd: String) async -> CodexSnapshot {
+        await withCheckedContinuation { continuation in
+            DispatchQueue.global(qos: .userInitiated).async {
+                let result = self.withLockedEngine {
+                    cwd.withCString { cwd in
+                        self.decodeCodex(
+                            shellow_engine_start_codex_thread_json(self.engine, cwd),
+                            label: "start_thread"
+                        )
+                    }
+                }
+                continuation.resume(returning: result)
+            }
+        }
+    }
+
+    func resumeCodexThread(threadId: String) async -> CodexSnapshot {
+        await withCheckedContinuation { continuation in
+            DispatchQueue.global(qos: .userInitiated).async {
+                let started = monotonicNanos()
+                print("[Shellow Codex] bridge resume start threadId=\(threadId)")
+                let result = self.withLockedEngine {
+                    threadId.withCString { threadId in
+                        self.decodeCodex(
+                            shellow_engine_resume_codex_thread_json(self.engine, threadId),
+                            label: "resume_thread"
+                        )
+                    }
+                }
+                print("[Shellow Codex] bridge resume done elapsed_ms=\(elapsedMs(since: started)) snapshotThreadId=\(result.threadId ?? "nil") messages=\(result.messages.count) opError=\(result.operation.lastError ?? "")")
+                continuation.resume(returning: result)
+            }
+        }
+    }
+
+    func readCodexThread(threadId: String) async -> CodexSnapshot {
+        await withCheckedContinuation { continuation in
+            DispatchQueue.global(qos: .userInitiated).async {
+                let result = self.withLockedEngine {
+                    threadId.withCString { threadId in
+                        self.decodeCodex(
+                            shellow_engine_read_codex_thread_json(self.engine, threadId),
+                            label: "read_thread"
+                        )
+                    }
+                }
+                continuation.resume(returning: result)
+            }
+        }
+    }
+
+    func loadMoreCodexThreadTurns(threadId: String, cursor: String) async -> CodexSnapshot {
+        await withCheckedContinuation { continuation in
+            DispatchQueue.global(qos: .userInitiated).async {
+                let result = self.withLockedEngine {
+                    threadId.withCString { threadId in
+                        cursor.withCString { cursor in
+                            self.decodeCodex(
+                                shellow_engine_load_more_codex_thread_turns_json(
+                                    self.engine,
+                                    threadId,
+                                    cursor
+                                ),
+                                label: "load_more_turns"
+                            )
+                        }
+                    }
+                }
+                continuation.resume(returning: result)
+            }
+        }
+    }
+
+    func renameCodexThread(threadId: String, name: String) async -> CodexSnapshot {
+        await withCheckedContinuation { continuation in
+            DispatchQueue.global(qos: .userInitiated).async {
+                let result = self.withLockedEngine {
+                    threadId.withCString { threadId in
+                        name.withCString { name in
+                            self.decodeCodex(
+                                shellow_engine_rename_codex_thread_json(self.engine, threadId, name),
+                                label: "rename_thread"
+                            )
+                        }
+                    }
+                }
+                continuation.resume(returning: result)
+            }
+        }
+    }
+
+    func archiveCodexThread(threadId: String) async -> CodexSnapshot {
+        await runCodexThreadAction(threadId: threadId, shellow_engine_archive_codex_thread_json)
+    }
+
+    func unarchiveCodexThread(threadId: String) async -> CodexSnapshot {
+        await runCodexThreadAction(threadId: threadId, shellow_engine_unarchive_codex_thread_json)
+    }
+
+    func deleteCodexThread(threadId: String) async -> CodexSnapshot {
+        await runCodexThreadAction(threadId: threadId, shellow_engine_delete_codex_thread_json)
+    }
+
+    func forkCodexThread(threadId: String, cwd: String) async -> CodexSnapshot {
+        await withCheckedContinuation { continuation in
+            DispatchQueue.global(qos: .userInitiated).async {
+                let result = self.withLockedEngine {
+                    threadId.withCString { threadId in
+                        cwd.withCString { cwd in
+                            self.decodeCodex(
+                                shellow_engine_fork_codex_thread_json(self.engine, threadId, cwd),
+                                label: "fork_thread"
+                            )
+                        }
+                    }
+                }
+                continuation.resume(returning: result)
+            }
+        }
+    }
+
+    func interruptCodexTurn() -> CodexSnapshot {
+        withLockedEngine {
+            decodeCodex(shellow_engine_interrupt_codex_turn_json(engine), label: "interrupt_turn")
+        }
+    }
+
+    func answerCodexApproval(requestId: String, decision: String) -> CodexSnapshot {
+        withLockedEngine {
+            requestId.withCString { requestId in
+                decision.withCString { decision in
+                    decodeCodex(
+                        shellow_engine_answer_codex_approval_json(engine, requestId, decision),
+                        label: "answer_approval"
+                    )
+                }
+            }
+        }
+    }
+
+    func disconnectCodex() -> CodexSnapshot {
+        withLockedEngine {
+            decodeCodex(shellow_engine_disconnect_codex_json(engine), label: "disconnect")
+        }
+    }
+
+    private func runCodexThreadAction(
+        threadId: String,
+        _ action: @escaping (UnsafeMutableRawPointer?, UnsafePointer<CChar>?) -> UnsafeMutablePointer<CChar>?
+    ) async -> CodexSnapshot {
+        await withCheckedContinuation { continuation in
+            DispatchQueue.global(qos: .userInitiated).async {
+                let result = self.withLockedEngine {
+                    threadId.withCString { threadId in
+                        self.decodeCodex(action(self.engine, threadId))
+                    }
+                }
+                continuation.resume(returning: result)
+            }
+        }
+    }
+
     private func withLockedEngine<T>(_ body: () -> T) -> T {
         lock.lock()
         defer { lock.unlock() }
@@ -309,7 +651,7 @@ final class ShellowCoreSession: @unchecked Sendable {
         defer { shellow_string_free(pointer) }
 
         let json = String(cString: pointer)
-        guard !json.contains("\"error\"") else {
+        guard !hasRootError(json) else {
             return .bridgeFailure(json)
         }
 
@@ -317,6 +659,38 @@ final class ShellowCoreSession: @unchecked Sendable {
             return try decoder.decode(TerminalSession.self, from: Data(json.utf8))
         } catch {
             return .bridgeFailure("Failed to decode Rust snapshot: \(error)")
+        }
+    }
+
+    private func decodeCodex(_ pointer: UnsafeMutablePointer<CChar>?, label: String = "codex") -> CodexSnapshot {
+        let started = monotonicNanos()
+        guard let pointer else {
+            return .bridgeFailure("Rust returned a null Codex response")
+        }
+
+        defer { shellow_string_free(pointer) }
+
+        let stringStarted = monotonicNanos()
+        let json = String(cString: pointer)
+        let stringMs = elapsedMs(since: stringStarted)
+        guard !hasRootError(json) else {
+            print("[Shellow Codex] bridge decode root_error label=\(label) bytes=\(json.utf8.count) total_ms=\(elapsedMs(since: started))")
+            return .bridgeFailure(json)
+        }
+
+        do {
+            let dataStarted = monotonicNanos()
+            let data = Data(json.utf8)
+            let dataMs = elapsedMs(since: dataStarted)
+            let decodeStarted = monotonicNanos()
+            let snapshot = try decoder.decode(CodexSnapshot.self, from: data)
+            let messageTextBytes = snapshot.messages.reduce(0) { $0 + $1.text.utf8.count }
+            let maxMessageTextBytes = snapshot.messages.map { $0.text.utf8.count }.max() ?? 0
+            print("[Shellow Codex] bridge decode label=\(label) bytes=\(data.count) string_ms=\(stringMs) data_ms=\(dataMs) decode_ms=\(elapsedMs(since: decodeStarted)) total_ms=\(elapsedMs(since: started)) threadId=\(snapshot.threadId ?? "nil") detailThreadId=\(snapshot.threadDetail.thread?.id ?? "nil") messages=\(snapshot.messages.count) messageTextBytes=\(messageTextBytes) maxMessageTextBytes=\(maxMessageTextBytes) opError=\(snapshot.operation.lastError ?? "")")
+            return snapshot
+        } catch {
+            print("[Shellow Codex] bridge decode failed label=\(label) bytes=\(json.utf8.count) total_ms=\(elapsedMs(since: started)) error=\(error)")
+            return .bridgeFailure("Failed to decode Rust Codex snapshot: \(error)")
         }
     }
 
@@ -328,6 +702,20 @@ final class ShellowCoreSession: @unchecked Sendable {
         defer { shellow_string_free(pointer) }
         return String(cString: pointer)
     }
+
+    private func hasRootError(_ json: String) -> Bool {
+        json.trimmingCharacters(in: .whitespacesAndNewlines).hasPrefix("{\"error\":")
+    }
+}
+
+private func monotonicNanos() -> UInt64 {
+    DispatchTime.now().uptimeNanoseconds
+}
+
+private func elapsedMs(since start: UInt64) -> String {
+    let now = DispatchTime.now().uptimeNanoseconds
+    let elapsed = now >= start ? now - start : 0
+    return String(format: "%.1f", Double(elapsed) / 1_000_000.0)
 }
 
 private struct RendererFrameReport: Decodable {

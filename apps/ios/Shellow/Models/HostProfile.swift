@@ -23,6 +23,12 @@ struct HostProfile: Identifiable, Hashable, Codable {
     }
 }
 
+struct SSHKeyCredential: Identifiable, Hashable, Codable {
+    var id = UUID()
+    var name: String
+    var createdAt = Date()
+}
+
 enum AuthenticationKind: String, CaseIterable, Identifiable, Codable {
     case password
     case privateKey
@@ -78,6 +84,29 @@ enum HostProfileStore {
 
     static func save(_ profiles: [HostProfile]) {
         guard let data = try? JSONEncoder().encode(profiles) else {
+            return
+        }
+        UserDefaults.standard.set(data, forKey: key)
+    }
+}
+
+enum SSHKeyCredentialStore {
+    private static let key = "shellow.sshKeyCredentials.v1"
+
+    static func load() -> [SSHKeyCredential] {
+        guard let data = UserDefaults.standard.data(forKey: key) else {
+            return []
+        }
+
+        do {
+            return try JSONDecoder().decode([SSHKeyCredential].self, from: data)
+        } catch {
+            return []
+        }
+    }
+
+    static func save(_ credentials: [SSHKeyCredential]) {
+        guard let data = try? JSONEncoder().encode(credentials) else {
             return
         }
         UserDefaults.standard.set(data, forKey: key)

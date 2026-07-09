@@ -7,6 +7,7 @@ compile_error!(
     "shellow-core requires the native-integrations feature; fallback builds are unsupported."
 );
 
+pub mod codex;
 pub mod ghostty_adapter;
 pub mod integrations;
 pub mod renderer;
@@ -260,6 +261,7 @@ pub struct ShellowEngine {
     live_shell: Option<ssh::LiveShellHandle>,
     #[cfg(feature = "native-integrations")]
     live_terminal: Option<ghostty_adapter::LiveTerminalState>,
+    codex_session: Option<codex::CodexSession>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -452,6 +454,7 @@ impl ShellowEngine {
             live_shell: None,
             #[cfg(feature = "native-integrations")]
             live_terminal: None,
+            codex_session: None,
         }
     }
 
@@ -874,6 +877,277 @@ impl ShellowEngine {
         self.clear_demo_tui();
         self.clear_demo_grid();
         self.snapshot()
+    }
+
+    pub fn codex_snapshot(&self) -> codex::CodexSnapshot {
+        self.codex_session
+            .as_ref()
+            .map(codex::CodexSession::snapshot)
+            .unwrap_or_else(codex::CodexSnapshot::disconnected)
+    }
+
+    pub fn codex_event_revision(&self) -> u64 {
+        self.codex_session
+            .as_ref()
+            .map(codex::CodexSession::event_revision)
+            .unwrap_or(0)
+    }
+
+    pub fn start_codex_password(
+        &mut self,
+        profile: HostProfile,
+        password: String,
+        cwd: Option<String>,
+    ) -> codex::CodexSnapshot {
+        #[cfg(not(feature = "native-integrations"))]
+        let _ = (&profile, &password, &cwd);
+
+        #[cfg(feature = "native-integrations")]
+        {
+            self.codex_session = None;
+            return match codex::CodexSession::start_password(profile, password, cwd) {
+                Ok(mut session) => {
+                    let snapshot = session.poll();
+                    self.codex_session = Some(session);
+                    snapshot
+                }
+                Err(error) => codex::CodexSnapshot::failure(error),
+            };
+        }
+
+        #[cfg(not(feature = "native-integrations"))]
+        {
+            codex::CodexSnapshot::failure(
+                "russh native integration is not compiled into this build",
+            )
+        }
+    }
+
+    pub fn start_codex_private_key(
+        &mut self,
+        profile: HostProfile,
+        private_key_pem: String,
+        passphrase: Option<String>,
+        cwd: Option<String>,
+    ) -> codex::CodexSnapshot {
+        #[cfg(not(feature = "native-integrations"))]
+        let _ = (&profile, &private_key_pem, &passphrase, &cwd);
+
+        #[cfg(feature = "native-integrations")]
+        {
+            self.codex_session = None;
+            return match codex::CodexSession::start_private_key(
+                profile,
+                private_key_pem,
+                passphrase,
+                cwd,
+            ) {
+                Ok(mut session) => {
+                    let snapshot = session.poll();
+                    self.codex_session = Some(session);
+                    snapshot
+                }
+                Err(error) => codex::CodexSnapshot::failure(error),
+            };
+        }
+
+        #[cfg(not(feature = "native-integrations"))]
+        {
+            codex::CodexSnapshot::failure(
+                "russh native integration is not compiled into this build",
+            )
+        }
+    }
+
+    pub fn poll_codex(&mut self) -> codex::CodexSnapshot {
+        match self.codex_session.as_mut() {
+            Some(session) => session.poll(),
+            None => codex::CodexSnapshot::disconnected(),
+        }
+    }
+
+    pub fn send_codex_message(&mut self, text: &str) -> codex::CodexSnapshot {
+        match self.codex_session.as_mut() {
+            Some(session) => session
+                .send_user_message(text)
+                .unwrap_or_else(codex::CodexSnapshot::failure),
+            None => codex::CodexSnapshot::failure("Codex is not connected"),
+        }
+    }
+
+    pub fn update_codex_settings(
+        &mut self,
+        model: Option<&str>,
+        approval_policy: Option<&str>,
+        sandbox: Option<&str>,
+    ) -> codex::CodexSnapshot {
+        match self.codex_session.as_mut() {
+            Some(session) => session
+                .update_settings(model, approval_policy, sandbox)
+                .unwrap_or_else(codex::CodexSnapshot::failure),
+            None => codex::CodexSnapshot::failure("Codex is not connected"),
+        }
+    }
+
+    pub fn browse_codex_directory(&mut self, path: &str) -> codex::CodexSnapshot {
+        match self.codex_session.as_mut() {
+            Some(session) => session
+                .browse_directory(path)
+                .unwrap_or_else(codex::CodexSnapshot::failure),
+            None => codex::CodexSnapshot::failure("Codex is not connected"),
+        }
+    }
+
+    pub fn list_codex_threads(
+        &mut self,
+        cwd: Option<&str>,
+        search_term: Option<&str>,
+    ) -> codex::CodexSnapshot {
+        match self.codex_session.as_mut() {
+            Some(session) => session
+                .list_threads(cwd, search_term)
+                .unwrap_or_else(codex::CodexSnapshot::failure),
+            None => codex::CodexSnapshot::failure("Codex is not connected"),
+        }
+    }
+
+    pub fn list_codex_threads_page(
+        &mut self,
+        cwd: Option<&str>,
+        search_term: Option<&str>,
+        cursor: Option<&str>,
+        archived: bool,
+        append: bool,
+    ) -> codex::CodexSnapshot {
+        match self.codex_session.as_mut() {
+            Some(session) => session
+                .list_threads_page(cwd, search_term, cursor, archived, append)
+                .unwrap_or_else(codex::CodexSnapshot::failure),
+            None => codex::CodexSnapshot::failure("Codex is not connected"),
+        }
+    }
+
+    pub fn start_codex_thread(&mut self, cwd: Option<&str>) -> codex::CodexSnapshot {
+        match self.codex_session.as_mut() {
+            Some(session) => session
+                .start_thread(cwd)
+                .unwrap_or_else(codex::CodexSnapshot::failure),
+            None => codex::CodexSnapshot::failure("Codex is not connected"),
+        }
+    }
+
+    pub fn resume_codex_thread(&mut self, thread_id: &str) -> codex::CodexSnapshot {
+        match self.codex_session.as_mut() {
+            Some(session) => session
+                .resume_thread(thread_id)
+                .unwrap_or_else(codex::CodexSnapshot::failure),
+            None => codex::CodexSnapshot::failure("Codex is not connected"),
+        }
+    }
+
+    pub fn read_codex_thread(&mut self, thread_id: &str) -> codex::CodexSnapshot {
+        match self.codex_session.as_mut() {
+            Some(session) => session
+                .read_thread(thread_id)
+                .unwrap_or_else(codex::CodexSnapshot::failure),
+            None => codex::CodexSnapshot::failure("Codex is not connected"),
+        }
+    }
+
+    pub fn load_more_codex_thread_turns(
+        &mut self,
+        thread_id: &str,
+        cursor: Option<&str>,
+    ) -> codex::CodexSnapshot {
+        match self.codex_session.as_mut() {
+            Some(session) => session
+                .load_more_thread_turns(thread_id, cursor)
+                .unwrap_or_else(codex::CodexSnapshot::failure),
+            None => codex::CodexSnapshot::failure("Codex is not connected"),
+        }
+    }
+
+    pub fn rename_codex_thread(&mut self, thread_id: &str, name: &str) -> codex::CodexSnapshot {
+        match self.codex_session.as_mut() {
+            Some(session) => session
+                .rename_thread(thread_id, name)
+                .unwrap_or_else(codex::CodexSnapshot::failure),
+            None => codex::CodexSnapshot::failure("Codex is not connected"),
+        }
+    }
+
+    pub fn archive_codex_thread(&mut self, thread_id: &str) -> codex::CodexSnapshot {
+        match self.codex_session.as_mut() {
+            Some(session) => session
+                .archive_thread(thread_id)
+                .unwrap_or_else(codex::CodexSnapshot::failure),
+            None => codex::CodexSnapshot::failure("Codex is not connected"),
+        }
+    }
+
+    pub fn unarchive_codex_thread(&mut self, thread_id: &str) -> codex::CodexSnapshot {
+        match self.codex_session.as_mut() {
+            Some(session) => session
+                .unarchive_thread(thread_id)
+                .unwrap_or_else(codex::CodexSnapshot::failure),
+            None => codex::CodexSnapshot::failure("Codex is not connected"),
+        }
+    }
+
+    pub fn delete_codex_thread(&mut self, thread_id: &str) -> codex::CodexSnapshot {
+        match self.codex_session.as_mut() {
+            Some(session) => session
+                .delete_thread(thread_id)
+                .unwrap_or_else(codex::CodexSnapshot::failure),
+            None => codex::CodexSnapshot::failure("Codex is not connected"),
+        }
+    }
+
+    pub fn fork_codex_thread(
+        &mut self,
+        thread_id: &str,
+        cwd: Option<&str>,
+    ) -> codex::CodexSnapshot {
+        match self.codex_session.as_mut() {
+            Some(session) => session
+                .fork_thread(thread_id, cwd)
+                .unwrap_or_else(codex::CodexSnapshot::failure),
+            None => codex::CodexSnapshot::failure("Codex is not connected"),
+        }
+    }
+
+    pub fn interrupt_codex_turn(&mut self) -> codex::CodexSnapshot {
+        match self.codex_session.as_mut() {
+            Some(session) => session
+                .interrupt_turn()
+                .unwrap_or_else(codex::CodexSnapshot::failure),
+            None => codex::CodexSnapshot::failure("Codex is not connected"),
+        }
+    }
+
+    pub fn answer_codex_approval(
+        &mut self,
+        request_id: &str,
+        decision: &str,
+    ) -> codex::CodexSnapshot {
+        match self.codex_session.as_mut() {
+            Some(session) => session
+                .answer_approval(request_id, decision)
+                .unwrap_or_else(codex::CodexSnapshot::failure),
+            None => codex::CodexSnapshot::failure("Codex is not connected"),
+        }
+    }
+
+    pub fn disconnect_codex(&mut self) -> codex::CodexSnapshot {
+        match self.codex_session.as_mut() {
+            Some(session) => {
+                session.disconnect();
+                let snapshot = session.snapshot();
+                self.codex_session = None;
+                snapshot
+            }
+            None => codex::CodexSnapshot::disconnected(),
+        }
     }
 
     pub fn send_command(&mut self, input: &str) -> TerminalSnapshot {

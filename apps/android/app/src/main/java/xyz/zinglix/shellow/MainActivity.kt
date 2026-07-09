@@ -6,7 +6,6 @@ import androidx.activity.ComponentActivity
 import androidx.activity.SystemBarStyle
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
-import xyz.zinglix.shellow.theme.ShellowTheme
 import xyz.zinglix.shellow.ui.ShellowApp
 
 class MainActivity : ComponentActivity() {
@@ -14,13 +13,11 @@ class MainActivity : ComponentActivity() {
     super.onCreate(savedInstanceState)
 
     enableEdgeToEdge(
-      statusBarStyle = SystemBarStyle.dark(Color.TRANSPARENT),
-      navigationBarStyle = SystemBarStyle.dark(Color.TRANSPARENT),
+      statusBarStyle = SystemBarStyle.auto(Color.TRANSPARENT, Color.TRANSPARENT),
+      navigationBarStyle = SystemBarStyle.auto(Color.TRANSPARENT, Color.TRANSPARENT),
     )
     setContent {
-      ShellowTheme {
-        ShellowApp()
-      }
+      ShellowApp()
     }
   }
 }
