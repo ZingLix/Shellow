@@ -921,21 +921,52 @@ struct CodexScreen: View {
             signature = signature &* 31 &+ (message.detail?.count ?? 0)
             signature = signature &* 31 &+ (message.transcript?.count ?? 0)
             signature = signature &* 31 &+ (message.isStreaming ? 1 : 0)
-            signature = signature &* 31 &+ message.blocks.reduce(0) { $0 + markdownBlockContentLength($1) }
+            var blockContentLength = 0
+            for block in message.blocks {
+                blockContentLength += markdownBlockContentLength(block)
+            }
+            signature = signature &* 31 &+ blockContentLength
         }
         return signature
     }
 
     private func markdownBlockContentLength(_ block: CodexMarkdownBlock) -> Int {
-        block.id.count +
-            block.text.count +
-            (block.imageAlt?.count ?? 0) +
-            block.runs.reduce(0) { $0 + $1.text.count } +
-            block.items.reduce(0) { $0 + $1.text.count + $1.runs.reduce(0) { $0 + $1.text.count } } +
-            block.tableHeaders.reduce(0) { $0 + $1.text.count + $1.runs.reduce(0) { $0 + $1.text.count } } +
-            block.tableRows.reduce(0) { rowTotal, row in
-                rowTotal + row.reduce(0) { $0 + $1.text.count + $1.runs.reduce(0) { $0 + $1.text.count } }
+        var length = 0
+        length += block.id.count
+        length += block.text.count
+        length += block.imageAlt?.count ?? 0
+        length += markdownRunContentLength(block.runs)
+
+        for item in block.items {
+            length += item.text.count
+            length += markdownRunContentLength(item.runs)
+        }
+
+        for header in block.tableHeaders {
+            length += markdownTableCellContentLength(header)
+        }
+
+        for row in block.tableRows {
+            for cell in row {
+                length += markdownTableCellContentLength(cell)
             }
+        }
+
+        return length
+    }
+
+    private func markdownTableCellContentLength(_ cell: CodexMarkdownTableCell) -> Int {
+        var length = cell.text.count
+        length += markdownRunContentLength(cell.runs)
+        return length
+    }
+
+    private func markdownRunContentLength(_ runs: [CodexMarkdownInlineRun]) -> Int {
+        var length = 0
+        for run in runs {
+            length += run.text.count
+        }
+        return length
     }
 
     private func scrollToChatBottom(_ proxy: ScrollViewProxy, animated: Bool) {
