@@ -12,9 +12,12 @@ struct HostsScreen: View {
     @State private var draftHost = ""
     @State private var draftPort = "22"
     @State private var draftUser = ""
+    @State private var draftAuthentication: AuthenticationKind = .password
     @State private var isAddingProfile = false
     @State private var isManagingKeys = false
     @State private var selectedProfile: HostProfile?
+
+    private let secretStore = SSHSecretStore.shared
 
     var body: some View {
         List {
@@ -76,6 +79,10 @@ struct HostsScreen: View {
         .sheet(item: $selectedProfile) { profile in
             HostConnectionSheet(
                 profile: profile,
+                hasSavedPassword: secretStore.hasSecret(for: profile, kind: .password),
+                hasSavedPrivateKey: sshKeys.contains {
+                    secretStore.hasSecret(forKeyID: $0.id, kind: .privateKey)
+                },
                 connectTerminal: {
                     selectedProfile = nil
                     connectTerminal(profile)
@@ -85,7 +92,8 @@ struct HostsScreen: View {
                     connectCodex(profile)
                 }
             )
-            .presentationDetents([.medium])
+            .presentationDetents([.fraction(0.72), .large])
+            .presentationDragIndicator(.visible)
         }
         .sheet(isPresented: $isAddingProfile) {
             NewHostProfileSheet(
@@ -93,6 +101,7 @@ struct HostsScreen: View {
                 draftHost: $draftHost,
                 draftPort: $draftPort,
                 draftUser: $draftUser,
+                draftAuthentication: $draftAuthentication,
                 addProfile: addProfile
             )
             .presentationDetents([.large])
@@ -127,7 +136,7 @@ struct HostsScreen: View {
                 host: draftHost,
                 port: port,
                 username: draftUser,
-                authentication: .privateKey,
+                authentication: draftAuthentication,
                 trustedHostKeySHA256: nil,
                 lastConnected: nil
             )
@@ -137,6 +146,7 @@ struct HostsScreen: View {
         draftHost = ""
         draftPort = "22"
         draftUser = ""
+        draftAuthentication = .password
     }
 
     private var validDraftPort: Int? {
@@ -150,6 +160,8 @@ struct HostsScreen: View {
 
 private struct HostConnectionSheet: View {
     let profile: HostProfile
+    let hasSavedPassword: Bool
+    let hasSavedPrivateKey: Bool
     let connectTerminal: () -> Void
     let connectCodex: () -> Void
 
@@ -157,40 +169,39 @@ private struct HostConnectionSheet: View {
 
     var body: some View {
         NavigationStack {
-            Form {
-                Section("Connection") {
-                    HostConnectionSummary(
+            ScrollView {
+                VStack(alignment: .leading, spacing: 20) {
+                    HostConnectionCard(
                         profile: profile,
-                        reason: nil
+                        credentialStatus: credentialStatus
                     )
-                }
 
-                Section("Connect") {
-                    Button {
-                        dismiss()
-                        connectTerminal()
-                    } label: {
-                        ConnectionModeRow(
+                    VStack(alignment: .leading, spacing: 10) {
+                        Text("Choose a workspace")
+                            .font(.headline)
+
+                        ConnectionModeButton(
                             title: "Terminal",
-                            subtitle: "Open an interactive shell",
-                            systemImage: "terminal"
+                            subtitle: "Interactive shell with keyboard tools",
+                            detail: "Commands, processes, and remote files",
+                            systemImage: "terminal",
+                            action: connect(using: connectTerminal)
                         )
-                    }
-                    .buttonStyle(.plain)
 
-                    Button {
-                        dismiss()
-                        connectCodex()
-                    } label: {
-                        ConnectionModeRow(
+                        ConnectionModeButton(
                             title: "Codex",
-                            subtitle: "Start a remote coding session",
-                            systemImage: "sparkles"
+                            subtitle: "Remote coding sessions and conversations",
+                            detail: "Projects, threads, and approvals",
+                            systemImage: "sparkles",
+                            action: connect(using: connectCodex)
                         )
                     }
-                    .buttonStyle(.plain)
                 }
+                .padding(.horizontal, 20)
+                .padding(.top, 12)
+                .padding(.bottom, 24)
             }
+            .background(Color(.systemGroupedBackground))
             .navigationTitle(profile.name)
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
@@ -202,37 +213,177 @@ private struct HostConnectionSheet: View {
             }
         }
     }
+
+    private var credentialStatus: HostCredentialStatus {
+        if hasSavedPassword {
+            return HostCredentialStatus(
+                title: "Password saved",
+                detail: "Connects automatically with Keychain",
+                systemImage: "key.fill",
+                tint: ShellowTheme.success
+            )
+        }
+
+        if profile.authentication == .privateKey, hasSavedPrivateKey {
+            return HostCredentialStatus(
+                title: "SSH key ready",
+                detail: "Tries your saved key automatically",
+                systemImage: "key.horizontal.fill",
+                tint: ShellowTheme.success
+            )
+        }
+
+        let title = profile.authentication == .password ? "Password required" : "SSH key required"
+        return HostCredentialStatus(
+            title: title,
+            detail: "You’ll authenticate after choosing a workspace",
+            systemImage: "key",
+            tint: .secondary
+        )
+    }
+
+    private func connect(using action: @escaping () -> Void) -> () -> Void {
+        {
+            dismiss()
+            action()
+        }
+    }
 }
 
-private struct ConnectionModeRow: View {
+private struct HostCredentialStatus {
     let title: String
-    let subtitle: String
+    let detail: String
     let systemImage: String
+    let tint: Color
+}
+
+private struct HostConnectionCard: View {
+    let profile: HostProfile
+    let credentialStatus: HostCredentialStatus
 
     var body: some View {
-        HStack(spacing: 12) {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(spacing: 12) {
+                Image(systemName: "server.rack")
+                    .font(.system(size: 18, weight: .semibold))
+                    .foregroundStyle(ShellowTheme.accent)
+                    .frame(width: 40, height: 40)
+                    .background(ShellowTheme.accent.opacity(0.12), in: RoundedRectangle(cornerRadius: 10))
+
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(profile.endpoint)
+                        .font(.subheadline.weight(.semibold).monospaced())
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.78)
+                    Text("SSH connection")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+
+            Divider()
+
+            ConnectionStatusRow(
+                title: credentialStatus.title,
+                detail: credentialStatus.detail,
+                systemImage: credentialStatus.systemImage,
+                tint: credentialStatus.tint
+            )
+
+            ConnectionStatusRow(
+                title: hostKeyTitle,
+                detail: hostKeyDetail,
+                systemImage: profile.trustedHostKeySHA256 == nil ? "shield" : "checkmark.shield.fill",
+                tint: profile.trustedHostKeySHA256 == nil ? ShellowTheme.warning : ShellowTheme.success
+            )
+        }
+        .padding(16)
+        .background(Color(.secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 16))
+        .accessibilityElement(children: .combine)
+    }
+
+    private var hostKeyTitle: String {
+        profile.trustedHostKeySHA256 == nil ? "Host not verified yet" : "Host key verified"
+    }
+
+    private var hostKeyDetail: String {
+        profile.trustedHostKeySHA256 == nil
+            ? "The key will be recorded on first connection"
+            : "Pinned to this saved host"
+    }
+}
+
+private struct ConnectionStatusRow: View {
+    let title: String
+    let detail: String
+    let systemImage: String
+    let tint: Color
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 10) {
             Image(systemName: systemImage)
-                .font(.system(size: 17, weight: .semibold))
-                .frame(width: 28, height: 28)
-                .foregroundStyle(.secondary)
+                .font(.system(size: 14, weight: .semibold))
+                .foregroundStyle(tint)
+                .frame(width: 20, height: 20)
 
             VStack(alignment: .leading, spacing: 2) {
                 Text(title)
-                    .font(.body.weight(.semibold))
-                    .foregroundStyle(.primary)
-                Text(subtitle)
+                    .font(.subheadline.weight(.semibold))
+                Text(detail)
                     .font(.caption)
                     .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
-
-            Spacer()
-
-            Image(systemName: "chevron.right")
-                .font(.caption.weight(.semibold))
-                .foregroundStyle(.tertiary)
         }
-        .padding(.vertical, 4)
-        .contentShape(Rectangle())
+    }
+}
+
+private struct ConnectionModeButton: View {
+    let title: String
+    let subtitle: String
+    let detail: String
+    let systemImage: String
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 14) {
+                Image(systemName: systemImage)
+                    .font(.system(size: 18, weight: .semibold))
+                    .foregroundStyle(ShellowTheme.accent)
+                    .frame(width: 42, height: 42)
+                    .background(ShellowTheme.accent.opacity(0.12), in: RoundedRectangle(cornerRadius: 11))
+
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(title)
+                        .font(.body.weight(.semibold))
+                        .foregroundStyle(.primary)
+                    Text(subtitle)
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Text(detail)
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
+                }
+
+                Spacer(minLength: 8)
+
+                Image(systemName: "arrow.right")
+                    .font(.system(size: 13, weight: .bold))
+                    .foregroundStyle(ShellowTheme.accent)
+                    .frame(width: 30, height: 30)
+                    .background(ShellowTheme.accent.opacity(0.10), in: Circle())
+            }
+            .padding(14)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(Color(.secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 16))
+            .contentShape(RoundedRectangle(cornerRadius: 16))
+        }
+        .buttonStyle(.plain)
+        .accessibilityElement(children: .combine)
+        .accessibilityAddTraits(.isButton)
+        .accessibilityHint("Connect to \(title)")
     }
 }
 
@@ -241,6 +392,7 @@ private struct NewHostProfileSheet: View {
     @Binding var draftHost: String
     @Binding var draftPort: String
     @Binding var draftUser: String
+    @Binding var draftAuthentication: AuthenticationKind
     let addProfile: () -> Void
 
     @Environment(\.dismiss) private var dismiss
@@ -262,6 +414,14 @@ private struct NewHostProfileSheet: View {
                         Text(profileRequirement)
                             .font(.footnote)
                             .foregroundStyle(.secondary)
+                    }
+                }
+
+                Section("Authentication") {
+                    Picker("Method", selection: $draftAuthentication) {
+                        ForEach(AuthenticationKind.allCases) { kind in
+                            Text(kind.title).tag(kind)
+                        }
                     }
                 }
             }
@@ -332,6 +492,11 @@ struct PasswordPromptSheet: View {
                 Section("Password") {
                     SecureField("Password", text: $password)
                         .textContentType(.password)
+                        .submitLabel(.go)
+                        .onSubmit {
+                            guard !password.isEmpty else { return }
+                            connectWithPassword()
+                        }
                     Toggle("Save in Keychain", isOn: $rememberPassword)
                     if let keychainStatus {
                         Text(keychainStatus)
@@ -503,9 +668,19 @@ private struct AddSSHKeySheet: View {
             Form {
                 Section("Key") {
                     TextField("Name", text: $name)
-                    Text("OpenSSH Private Key")
-                        .font(.subheadline)
-                        .foregroundStyle(.secondary)
+                    HStack {
+                        Text("OpenSSH Private Key")
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                        Spacer()
+                        Button {
+                            if let clipboardText = UIPasteboard.general.string {
+                                privateKey = clipboardText
+                            }
+                        } label: {
+                            Label("Paste", systemImage: "doc.on.clipboard")
+                        }
+                    }
                     TextEditor(text: $privateKey)
                         .font(.system(.footnote, design: .monospaced))
                         .frame(minHeight: 180)
@@ -630,6 +805,7 @@ struct CodexScreen: View {
     @State private var deleteTarget: CodexThreadSummary?
     @State private var openingThreadId: String?
     @State private var isStartingDraftThread = false
+    @State private var isChatAutoFollowEnabled = true
 
     var body: some View {
         VStack(spacing: 0) {
@@ -674,6 +850,8 @@ struct CodexScreen: View {
             }
         }
         .onChange(of: snapshot.threadId) {
+            draft = ""
+            isChatAutoFollowEnabled = true
             if snapshot.threadId != nil {
                 isShowingThread = true
             } else {
@@ -828,14 +1006,16 @@ struct CodexScreen: View {
                     Label("Settings", systemImage: "slider.horizontal.3")
                 }
 
-                if let onReconnect {
+                if snapshot.status == .disconnected, let onReconnect {
                     Button(action: onReconnect) {
                         Label("Reconnect", systemImage: "arrow.clockwise")
                     }
                 }
 
-                Button(role: .destructive, action: onDisconnect) {
-                    Label("Disconnect", systemImage: "power")
+                if snapshot.status != .disconnected {
+                    Button(role: .destructive, action: onDisconnect) {
+                        Label("Disconnect", systemImage: "power")
+                    }
                 }
             } label: {
                 CodexOverflowMenuLabel()
@@ -875,37 +1055,65 @@ struct CodexScreen: View {
 
     private var chatView: some View {
         ScrollViewReader { proxy in
-            ScrollView {
-                LazyVStack(alignment: .leading, spacing: 10) {
-                    ForEach(snapshot.pendingApprovals) { approval in
-                        CodexApprovalRow(
-                            approval: approval,
-                            decide: { decision in
-                                onApprovalDecision(approval.requestId, decision)
-                            }
-                        )
-                        .id("approval-\(approval.requestId)")
-                    }
+            ZStack(alignment: .bottomTrailing) {
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 10) {
+                        ForEach(snapshot.pendingApprovals) { approval in
+                            CodexApprovalRow(
+                                approval: approval,
+                                decide: { decision in
+                                    onApprovalDecision(approval.requestId, decision)
+                                }
+                            )
+                            .id("approval-\(approval.requestId)")
+                        }
 
-                    ForEach(snapshot.messages.filter(\.isVisibleInChat)) { message in
-                        CodexMessageRow(message: message)
-                            .id(message.id)
-                    }
+                        ForEach(snapshot.messages.filter(\.isVisibleInChat)) { message in
+                            CodexMessageRow(message: message)
+                                .id(message.id)
+                        }
 
-                    Color.clear
-                        .frame(height: 1)
-                        .id(Self.chatBottomID)
+                        Color.clear
+                            .frame(height: 1)
+                            .id(Self.chatBottomID)
+                    }
+                    .padding(14)
                 }
-                .padding(14)
+                .scrollDismissesKeyboard(.interactively)
+                .simultaneousGesture(
+                    DragGesture(minimumDistance: 8)
+                        .onChanged { _ in
+                            isChatAutoFollowEnabled = false
+                        }
+                )
+
+                if !isChatAutoFollowEnabled {
+                    Button {
+                        isChatAutoFollowEnabled = true
+                        scrollToChatBottom(proxy, animated: true)
+                    } label: {
+                        Label("Latest", systemImage: "arrow.down")
+                            .font(.subheadline.weight(.semibold))
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 8)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .buttonBorderShape(.capsule)
+                    .padding(12)
+                    .accessibilityLabel("Jump to Latest")
+                }
             }
             .onAppear {
+                isChatAutoFollowEnabled = true
                 scrollToChatBottom(proxy, animated: false)
             }
             .task(id: snapshot.threadId) {
+                isChatAutoFollowEnabled = true
                 await Task.yield()
                 scrollToChatBottom(proxy, animated: false)
             }
             .onChange(of: chatScrollSignature) {
+                guard isChatAutoFollowEnabled else { return }
                 scrollToChatBottom(proxy, animated: true)
             }
         }
@@ -1075,7 +1283,7 @@ struct CodexScreen: View {
 
     private var projectConversationsSection: some View {
         VStack(alignment: .leading, spacing: 10) {
-            CodexSectionHeader(title: "Conversations")
+            CodexSectionHeader(title: showArchivedThreads ? "Archived Conversations" : "Conversations")
 
             if snapshot.threads.isLoading {
                 CodexInlineStatusRow(text: "Loading history", isLoading: true)
@@ -1123,9 +1331,9 @@ struct CodexScreen: View {
                !snapshot.threads.isLoading,
                snapshot.threads.error == nil {
                 CodexEmptyState(
-                    title: homeSearchTerm.isEmpty ? "No Conversations" : "No Matches",
-                    detail: homeSearchTerm.isEmpty ? "Start a chat in this project when you're ready." : "Try a different search.",
-                    systemImage: homeSearchTerm.isEmpty ? "bubble.left.and.text.bubble.right" : "magnifyingglass"
+                    title: homeSearchTerm.isEmpty ? (showArchivedThreads ? "No Archived Conversations" : "No Conversations") : "No Matches",
+                    detail: homeSearchTerm.isEmpty ? (showArchivedThreads ? "Archived conversations will appear here." : "Start a chat in this project when you're ready.") : "Try a different search.",
+                    systemImage: homeSearchTerm.isEmpty ? (showArchivedThreads ? "archivebox" : "bubble.left.and.text.bubble.right") : "magnifyingglass"
                 )
             }
         }
@@ -1163,7 +1371,7 @@ struct CodexScreen: View {
     private var recentConversationsSection: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 8) {
-                CodexSectionHeader(title: "Recent Conversations", detail: historyScopeDetail)
+                CodexSectionHeader(title: showArchivedThreads ? "Archived Conversations" : "Recent Conversations", detail: historyScopeDetail)
 
                 Spacer()
 
@@ -1215,9 +1423,9 @@ struct CodexScreen: View {
                !snapshot.threads.isLoading,
                snapshot.threads.error == nil {
                 CodexEmptyState(
-                    title: homeSearchTerm.isEmpty ? "No Recent Conversations" : "No Matches",
-                    detail: homeSearchTerm.isEmpty ? "Start a chat from a workspace to see it here." : "Try a different search.",
-                    systemImage: homeSearchTerm.isEmpty ? "clock" : "magnifyingglass"
+                    title: homeSearchTerm.isEmpty ? (showArchivedThreads ? "No Archived Conversations" : "No Recent Conversations") : "No Matches",
+                    detail: homeSearchTerm.isEmpty ? (showArchivedThreads ? "Archived conversations will appear here." : "Start a chat from a workspace to see it here.") : "Try a different search.",
+                    systemImage: homeSearchTerm.isEmpty ? (showArchivedThreads ? "archivebox" : "clock") : "magnifyingglass"
                 )
             }
         }
@@ -1436,6 +1644,7 @@ struct CodexScreen: View {
         let message = draft.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !message.isEmpty else { return }
         draft = ""
+        isChatAutoFollowEnabled = true
         onSendMessage(message)
     }
 
@@ -1453,6 +1662,7 @@ struct CodexScreen: View {
             homeRoute = .overview
             Task { await refreshHistory() }
         case .draft:
+            draft = ""
             if draftReturnRoute == .project, !selectedProjectPath.isEmpty {
                 historyScope = .currentProject
                 homeRoute = .project
@@ -1467,6 +1677,8 @@ struct CodexScreen: View {
 
     private func returnToThreadOrigin() {
         isShowingThread = false
+        draft = ""
+        isChatAutoFollowEnabled = true
 
         switch threadReturnRoute {
         case .project:
@@ -1497,6 +1709,7 @@ struct CodexScreen: View {
         threadReturnScope = historyScope
         isStartingDraftThread = true
         draft = ""
+        isChatAutoFollowEnabled = true
         await onStartThreadAndSend(path, message)
         isShowingThread = true
         isStartingDraftThread = false
@@ -1534,6 +1747,8 @@ struct CodexScreen: View {
 
     private func beginDraftChat() {
         draftReturnRoute = homeRoute
+        draft = ""
+        isChatAutoFollowEnabled = true
         homeRoute = .draft
     }
 
@@ -1542,6 +1757,8 @@ struct CodexScreen: View {
         threadReturnRoute = homeRoute
         threadReturnScope = historyScope
         openingThreadId = thread.id
+        draft = ""
+        isChatAutoFollowEnabled = true
         await onResumeThread(thread.id)
         isShowingThread = true
         print("[Shellow Codex] ui open returned threadId=\(thread.id) currentThreadId=\(snapshot.threadId ?? "nil")")

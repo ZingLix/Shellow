@@ -68,6 +68,7 @@ import androidx.compose.material3.TextField
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
@@ -178,6 +179,11 @@ private enum class AppScreen {
   Terminal,
   Codex,
   Settings,
+}
+
+private enum class TerminalDestructiveAction {
+  Clear,
+  Reset,
 }
 
 private enum class HostConnectMode(val passwordTitle: String) {
@@ -684,13 +690,23 @@ fun ShellowApp() {
         return@launch
       }
 
+      if (profile.authentication == AuthenticationKind.Password) {
+        passwordPrompt =
+          PasswordPromptRequest(
+            profile = profile,
+            mode = mode,
+            reason = "Enter the password for this host. You can save it for faster connections next time.",
+          )
+        return@launch
+      }
+
       val keys = withContext(Dispatchers.IO) { storedPrivateKeyAuths() }
       if (keys.isEmpty()) {
         passwordPrompt =
           PasswordPromptRequest(
             profile = profile,
             mode = mode,
-            reason = "No saved SSH keys are available.",
+            reason = "No saved SSH key is available. Enter a password to connect instead.",
           )
         return@launch
       }
@@ -957,6 +973,7 @@ private fun CodexScreen(
   var openingThreadId by remember { mutableStateOf<String?>(null) }
   var isStartingDraftThread by remember { mutableStateOf(false) }
   var codexActionsExpanded by remember { mutableStateOf(false) }
+  var chatAutoFollow by remember { mutableStateOf(true) }
   val listState = rememberLazyListState()
   val scope = rememberCoroutineScope()
   val selectedProjectPath = selectedPath.trim()
@@ -1002,14 +1019,28 @@ private fun CodexScreen(
       codexChatScrollSignature(snapshot.messages, snapshot.pendingApprovals.size, snapshot.turnActive)
     }
 
-  LaunchedEffect(snapshot.threadId, chatScrollSignature) {
-    if (snapshot.threadId != null) {
-      val visibleMessages = snapshot.messages.count { it.isVisibleInChat }
-      val itemCount =
-        snapshot.pendingApprovals.size +
-          visibleMessages
+  val chatItemCount =
+    snapshot.pendingApprovals.size +
+      snapshot.messages.count { it.isVisibleInChat } +
+      1
+  val isAtChatBottom by remember(listState, chatItemCount) {
+    derivedStateOf {
+      listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index?.let { it >= chatItemCount - 1 } ?: true
+    }
+  }
+
+  LaunchedEffect(snapshot.threadId, chatScrollSignature, chatAutoFollow) {
+    if (snapshot.threadId != null && chatAutoFollow) {
       delay(80)
-      listState.scrollToItem(itemCount)
+      listState.scrollToItem(chatItemCount - 1)
+    }
+  }
+
+  LaunchedEffect(listState.isScrollInProgress, isAtChatBottom) {
+    if (isAtChatBottom) {
+      chatAutoFollow = true
+    } else if (listState.isScrollInProgress) {
+      chatAutoFollow = false
     }
   }
 
@@ -1030,6 +1061,8 @@ private fun CodexScreen(
   }
 
   LaunchedEffect(snapshot.status, snapshot.threadId) {
+    draft = ""
+    chatAutoFollow = true
     if (snapshot.status != CodexStatus.Connected) {
       didLoadProjectState = false
     } else if (snapshot.threadId == null && !didLoadProjectState) {
@@ -1049,6 +1082,8 @@ private fun CodexScreen(
 
   val returnToThreadOrigin: () -> Unit = {
     isShowingThread = false
+    draft = ""
+    chatAutoFollow = true
     when (threadReturnRoute) {
       CodexHomeRoute.Project -> {
         if (selectedProjectPath.isNotEmpty()) {
@@ -1085,6 +1120,7 @@ private fun CodexScreen(
           scope.launch { onListThreads("", historySearch, "", showArchivedThreads, false) }
         }
         CodexHomeRoute.Draft -> {
+          draft = ""
           if (draftReturnRoute == CodexHomeRoute.Project && selectedProjectPath.isNotEmpty()) {
             homeRoute = CodexHomeRoute.Project
             historyScope = CodexHistoryScope.CurrentProject
@@ -1263,7 +1299,7 @@ private fun CodexScreen(
                 showCodexSettings()
               },
             )
-            onReconnect?.let {
+            if (snapshot.status == CodexStatus.Disconnected) onReconnect?.let {
               DropdownMenuItem(
                 text = { Text("Reconnect") },
                 onClick = {
@@ -1272,13 +1308,15 @@ private fun CodexScreen(
                 },
               )
             }
-            DropdownMenuItem(
-              text = { Text("Disconnect") },
-              onClick = {
-                codexActionsExpanded = false
-                onDisconnect()
-              },
-            )
+            if (snapshot.status != CodexStatus.Disconnected) {
+              DropdownMenuItem(
+                text = { Text("Disconnect") },
+                onClick = {
+                  codexActionsExpanded = false
+                  onDisconnect()
+                },
+              )
+            }
           }
         }
       }
@@ -1310,6 +1348,8 @@ private fun CodexScreen(
         threadReturnRoute = homeRoute
         threadReturnScope = historyScope
         openingThreadId = threadId
+        draft = ""
+        chatAutoFollow = true
         scope.launch {
           onResumeThread(threadId)
           isShowingThread = true
@@ -1320,6 +1360,8 @@ private fun CodexScreen(
       }
       val beginDraftChat = {
         draftReturnRoute = homeRoute
+        draft = ""
+        chatAutoFollow = true
         homeRoute = CodexHomeRoute.Draft
       }
       val sendInitialDraft = {
@@ -1329,6 +1371,7 @@ private fun CodexScreen(
           threadReturnRoute = draftReturnRoute
           threadReturnScope = historyScope
           draft = ""
+          chatAutoFollow = true
           isStartingDraftThread = true
           scope.launch {
             try {
@@ -1451,24 +1494,42 @@ private fun CodexScreen(
           )
       }
     } else {
-      LazyColumn(
-        modifier = Modifier.weight(1f).fillMaxWidth().padding(horizontal = 12.dp),
-        state = listState,
-        verticalArrangement = Arrangement.spacedBy(10.dp),
-      ) {
-        items(snapshot.pendingApprovals, key = { "approval-${it.requestId}" }) { approval ->
-          CodexApprovalCard(
-            approval = approval,
-            onDecision = { decision -> onApprovalDecision(approval.requestId, decision) },
-          )
+      Box(modifier = Modifier.weight(1f).fillMaxWidth()) {
+        LazyColumn(
+          modifier = Modifier.fillMaxSize().padding(horizontal = 12.dp),
+          state = listState,
+          verticalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+          items(snapshot.pendingApprovals, key = { "approval-${it.requestId}" }) { approval ->
+            CodexApprovalCard(
+              approval = approval,
+              onDecision = { decision -> onApprovalDecision(approval.requestId, decision) },
+            )
+          }
+
+          items(snapshot.messages.filter { it.isVisibleInChat }, key = { it.id }) { message ->
+            CodexMessageBubble(message)
+          }
+
+          item("thread-bottom") {
+            Spacer(modifier = Modifier.height(1.dp))
+          }
         }
 
-        items(snapshot.messages.filter { it.isVisibleInChat }, key = { it.id }) { message ->
-          CodexMessageBubble(message)
-        }
-
-        item("thread-bottom") {
-          Spacer(modifier = Modifier.height(1.dp))
+        if (!chatAutoFollow && !isAtChatBottom) {
+          TextButton(
+            onClick = {
+              chatAutoFollow = true
+              scope.launch { listState.animateScrollToItem(chatItemCount - 1) }
+            },
+            modifier =
+              Modifier
+                .align(Alignment.BottomEnd)
+                .padding(12.dp)
+                .background(ShellowColors.Accent, RoundedCornerShape(18.dp)),
+          ) {
+            Text("Latest", color = ComposeColor.White, fontWeight = FontWeight.SemiBold)
+          }
         }
       }
 
@@ -1501,6 +1562,7 @@ private fun CodexScreen(
                 val message = draft.trim()
                 if (message.isNotEmpty()) {
                   draft = ""
+                  chatAutoFollow = true
                   scope.launch { onSendMessage(message) }
                 }
               },
@@ -1708,6 +1770,10 @@ private fun CodexProjectThreadsPanel(
         )
       }
 
+      item("project-conversations-header") {
+        CodexSectionHeader(title = if (showArchivedThreads) "Archived Conversations" else "Conversations")
+      }
+
       if (snapshot.threads.isLoading) {
         item("project-loading") {
           CodexInlineStatusRow(text = "Loading history", isLoading = true)
@@ -1746,8 +1812,18 @@ private fun CodexProjectThreadsPanel(
       if (visibleThreads.isEmpty() && !snapshot.threads.isLoading && snapshot.threads.error == null) {
         item("project-empty") {
           CodexEmptyState(
-            title = if (homeSearchTerm.isBlank()) "No Conversations" else "No Matches",
-            detail = if (homeSearchTerm.isBlank()) "Start a chat in this project when you're ready." else "Try a different search.",
+            title =
+              if (homeSearchTerm.isBlank()) {
+                if (showArchivedThreads) "No Archived Conversations" else "No Conversations"
+              } else {
+                "No Matches"
+              },
+            detail =
+              if (homeSearchTerm.isBlank()) {
+                if (showArchivedThreads) "Archived conversations will appear here." else "Start a chat in this project when you're ready."
+              } else {
+                "Try a different search."
+              },
           )
         }
       }
@@ -1891,7 +1967,7 @@ private fun CodexRecentConversationsSection(
       verticalAlignment = Alignment.CenterVertically,
     ) {
       CodexSectionHeader(
-        title = "Recent Conversations",
+        title = if (showArchivedThreads) "Archived Conversations" else "Recent Conversations",
         detail = if (historyScope == CodexHistoryScope.CurrentProject) "Current project" else null,
         modifier = Modifier.weight(1f),
       )
@@ -1968,8 +2044,18 @@ private fun CodexRecentConversationsSection(
     }
     if (visibleThreads.isEmpty() && !snapshot.threads.isLoading && snapshot.threads.error == null) {
       CodexEmptyState(
-        title = if (homeSearchTerm.isBlank()) "No Recent Conversations" else "No Matches",
-        detail = if (homeSearchTerm.isBlank()) "Start a chat from a workspace to see it here." else "Try a different search.",
+        title =
+          if (homeSearchTerm.isBlank()) {
+            if (showArchivedThreads) "No Archived Conversations" else "No Recent Conversations"
+          } else {
+            "No Matches"
+          },
+        detail =
+          if (homeSearchTerm.isBlank()) {
+            if (showArchivedThreads) "Archived conversations will appear here." else "Start a chat from a workspace to see it here."
+          } else {
+            "Try a different search."
+          },
       )
     }
   }
@@ -3385,6 +3471,7 @@ private fun TerminalScreen(
   var handledClipboardSequence by remember { mutableStateOf(0L) }
   var searchVisible by remember { mutableStateOf(false) }
   var toolsExpanded by remember { mutableStateOf(false) }
+  var pendingDestructiveAction by remember { mutableStateOf<TerminalDestructiveAction?>(null) }
   var searchQuery by remember { mutableStateOf("") }
   var searchIndex by remember { mutableStateOf(0) }
   var viewportWidthPx by remember { mutableStateOf(0) }
@@ -3828,16 +3915,17 @@ private fun TerminalScreen(
             text = { Text("Clear Terminal") },
             onClick = {
               toolsExpanded = false
-              onClearTerminal()
+              pendingDestructiveAction = TerminalDestructiveAction.Clear
             },
           )
           DropdownMenuItem(
             text = { Text("Reset Terminal") },
             onClick = {
               toolsExpanded = false
-              onResetTerminal()
+              pendingDestructiveAction = TerminalDestructiveAction.Reset
             },
           )
+          PanelDivider()
           DropdownMenuItem(
             text = { Text("Save Transcript") },
             onClick = {
@@ -3986,6 +4074,36 @@ private fun TerminalScreen(
       },
       dismissButton = {
         TextButton(onClick = { pendingPaste = null }) { Text("Cancel") }
+      },
+    )
+  }
+
+  pendingDestructiveAction?.let { action ->
+    val isClear = action == TerminalDestructiveAction.Clear
+    AlertDialog(
+      onDismissRequest = { pendingDestructiveAction = null },
+      containerColor = ShellowColors.PanelBackground,
+      titleContentColor = ShellowColors.TerminalText,
+      textContentColor = ShellowColors.TerminalText,
+      title = { Text(if (isClear) "Clear terminal?" else "Reset terminal?") },
+      text = {
+        Text(
+          if (isClear) "The visible terminal history will be removed."
+          else "The terminal display and input state will be reset.",
+        )
+      },
+      confirmButton = {
+        TextButton(
+          onClick = {
+            pendingDestructiveAction = null
+            if (isClear) onClearTerminal() else onResetTerminal()
+          },
+        ) {
+          Text(if (isClear) "Clear" else "Reset", color = MaterialTheme.colorScheme.error)
+        }
+      },
+      dismissButton = {
+        TextButton(onClick = { pendingDestructiveAction = null }) { Text("Cancel") }
       },
     )
   }
@@ -4698,8 +4816,20 @@ private fun HostsScreen(
   }
 
   selectedProfile?.let { profile ->
+    val hasSavedPassword =
+      remember(profile.id) {
+        !secretStore.loadSecret(profile, SSHSecretKind.Password).isNullOrBlank()
+      }
+    val hasSavedPrivateKey =
+      remember(profile.id, sshKeys) {
+        sshKeys.any { credential ->
+          !secretStore.loadKeySecret(credential.id, SSHSecretKind.PrivateKey).isNullOrBlank()
+        }
+      }
     HostConnectionDialog(
       profile = profile,
+      hasSavedPassword = hasSavedPassword,
+      hasSavedPrivateKey = hasSavedPrivateKey,
       onDismiss = { selectedProfile = null },
       onConnectTerminal = {
         selectedProfile = null
@@ -4769,6 +4899,8 @@ private fun HostProfileRow(
 @Composable
 private fun HostConnectionDialog(
   profile: HostProfile,
+  hasSavedPassword: Boolean,
+  hasSavedPrivateKey: Boolean,
   onDismiss: () -> Unit,
   onConnectTerminal: () -> Unit,
   onConnectCodex: () -> Unit,
@@ -4780,26 +4912,58 @@ private fun HostConnectionDialog(
     textContentColor = ShellowColors.TerminalText,
     title = { Text(profile.name) },
     text = {
-      Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-        HostConnectionSummary(profile = profile)
+      Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
         Column(
           modifier =
             Modifier
               .fillMaxWidth()
-              .background(ShellowColors.KeyBackground.copy(alpha = 0.38f), RoundedCornerShape(8.dp)),
+              .background(ShellowColors.KeyBackground.copy(alpha = 0.38f), RoundedCornerShape(12.dp))
+              .padding(14.dp),
+          verticalArrangement = Arrangement.spacedBy(10.dp),
         ) {
-          ConnectionModeOption(
-            title = "Terminal",
-            subtitle = "Open an interactive shell",
-            onClick = onConnectTerminal,
+          Text(
+            profile.endpoint,
+            color = ShellowColors.TerminalText,
+            style = MaterialTheme.typography.bodyMedium.copy(fontFamily = FontFamily.Monospace),
+            fontWeight = FontWeight.SemiBold,
           )
           PanelDivider()
-          ConnectionModeOption(
-            title = "Codex",
-            subtitle = "Start a remote coding session",
-            onClick = onConnectCodex,
+          ConnectionStatusRow(
+            title =
+              when {
+                hasSavedPassword -> "Password saved"
+                profile.authentication == AuthenticationKind.PrivateKey && hasSavedPrivateKey -> "SSH key ready"
+                profile.authentication == AuthenticationKind.Password -> "Password required"
+                else -> "SSH key required"
+              },
+            detail =
+              when {
+                hasSavedPassword -> "Connects automatically from secure storage"
+                profile.authentication == AuthenticationKind.PrivateKey && hasSavedPrivateKey -> "Tries your saved key automatically"
+                else -> "You'll authenticate after choosing a workspace"
+              },
+            healthy = hasSavedPassword || (profile.authentication == AuthenticationKind.PrivateKey && hasSavedPrivateKey),
+          )
+          ConnectionStatusRow(
+            title = if (profile.trustedHostKeySha256 == null) "Host not verified yet" else "Host key verified",
+            detail = if (profile.trustedHostKeySha256 == null) "The key will be recorded on first connection" else "Pinned to this saved host",
+            healthy = profile.trustedHostKeySha256 != null,
           )
         }
+
+        Text("Choose a workspace", color = ShellowColors.TerminalText, fontWeight = FontWeight.SemiBold)
+        ConnectionModeOption(
+          title = "Terminal",
+          subtitle = "Interactive shell with keyboard tools",
+          detail = "Commands, processes, and remote files",
+          onClick = onConnectTerminal,
+        )
+        ConnectionModeOption(
+          title = "Codex",
+          subtitle = "Remote coding sessions and conversations",
+          detail = "Projects, threads, and approvals",
+          onClick = onConnectCodex,
+        )
       }
     },
     confirmButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
@@ -4807,22 +4971,46 @@ private fun HostConnectionDialog(
 }
 
 @Composable
+private fun ConnectionStatusRow(
+  title: String,
+  detail: String,
+  healthy: Boolean,
+) {
+  Row(horizontalArrangement = Arrangement.spacedBy(10.dp), verticalAlignment = Alignment.Top) {
+    Box(
+      modifier =
+        Modifier
+          .padding(top = 5.dp)
+          .size(8.dp)
+          .background(if (healthy) ShellowColors.Success else ShellowColors.Warning, RoundedCornerShape(4.dp)),
+    )
+    Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+      Text(title, color = ShellowColors.TerminalText, style = MaterialTheme.typography.bodySmall, fontWeight = FontWeight.SemiBold)
+      Text(detail, color = ShellowColors.TerminalMuted, style = MaterialTheme.typography.labelSmall)
+    }
+  }
+}
+
+@Composable
 private fun ConnectionModeOption(
   title: String,
   subtitle: String,
+  detail: String,
   onClick: () -> Unit,
 ) {
   Row(
     modifier =
       Modifier
         .fillMaxWidth()
+        .background(ShellowColors.KeyBackground.copy(alpha = 0.38f), RoundedCornerShape(12.dp))
         .clickable(onClick = onClick)
-        .padding(horizontal = 14.dp, vertical = 12.dp),
+        .padding(horizontal = 14.dp, vertical = 13.dp),
     verticalAlignment = Alignment.CenterVertically,
   ) {
     Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
       Text(title, color = ShellowColors.TerminalText, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold)
       Text(subtitle, color = ShellowColors.TerminalMuted, style = MaterialTheme.typography.labelSmall)
+      Text(detail, color = ShellowColors.TerminalMuted.copy(alpha = 0.72f), style = MaterialTheme.typography.labelSmall)
     }
     Text("Open", color = ShellowColors.Accent, style = MaterialTheme.typography.labelMedium)
   }
@@ -4837,6 +5025,7 @@ private fun AddHostDialog(
   var host by remember { mutableStateOf("") }
   var port by remember { mutableStateOf("22") }
   var username by remember { mutableStateOf("") }
+  var authentication by remember { mutableStateOf(AuthenticationKind.Password) }
   val parsedPort = port.toIntOrNull()
   val addHostRequirement =
     when {
@@ -4892,6 +5081,19 @@ private fun AddHostDialog(
           label = { Text("User") },
           singleLine = true,
         )
+        Text("Authentication", color = ShellowColors.TerminalMuted, style = MaterialTheme.typography.labelMedium)
+        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+          AuthenticationChoice(
+            title = "Password",
+            selected = authentication == AuthenticationKind.Password,
+            modifier = Modifier.weight(1f),
+          ) { authentication = AuthenticationKind.Password }
+          AuthenticationChoice(
+            title = "Private Key",
+            selected = authentication == AuthenticationKind.PrivateKey,
+            modifier = Modifier.weight(1f),
+          ) { authentication = AuthenticationKind.PrivateKey }
+        }
         addHostRequirement?.let {
           Text(it, color = ShellowColors.TerminalMuted, style = MaterialTheme.typography.labelSmall)
         }
@@ -4907,7 +5109,7 @@ private fun AddHostDialog(
               host = host.trim(),
               port = parsedPort ?: 22,
               username = username.trim(),
-              authentication = AuthenticationKind.PrivateKey,
+              authentication = authentication,
               trustedHostKeySha256 = null,
             ),
           )
@@ -4916,6 +5118,25 @@ private fun AddHostDialog(
     },
     dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
   )
+}
+
+@Composable
+private fun AuthenticationChoice(
+  title: String,
+  selected: Boolean,
+  modifier: Modifier = Modifier,
+  onClick: () -> Unit,
+) {
+  TextButton(
+    onClick = onClick,
+    modifier =
+      modifier.background(
+        if (selected) ShellowColors.Accent.copy(alpha = 0.14f) else ShellowColors.KeyBackground.copy(alpha = 0.38f),
+        RoundedCornerShape(8.dp),
+      ),
+  ) {
+    Text(title, color = if (selected) ShellowColors.Accent else ShellowColors.TerminalMuted)
+  }
 }
 
 @Composable
@@ -4931,6 +5152,7 @@ private fun SSHKeyManagementDialog(
   var privateKeyPem by remember { mutableStateOf("") }
   var passphrase by remember { mutableStateOf("") }
   var status by remember { mutableStateOf<String?>(null) }
+  val clipboard = LocalClipboardManager.current
 
   val beginAddingKey = {
     name = ""
@@ -4976,11 +5198,18 @@ private fun SSHKeyManagementDialog(
             label = { Text("Name") },
             singleLine = true,
           )
+          Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            Text("OpenSSH private key", modifier = Modifier.weight(1f), color = ShellowColors.TerminalMuted, style = MaterialTheme.typography.labelMedium)
+            TextButton(
+              onClick = {
+                clipboard.getText()?.text?.let { privateKeyPem = it }
+              },
+            ) { Text("Paste") }
+          }
           OutlinedTextField(
             value = privateKeyPem,
             onValueChange = { privateKeyPem = it },
             modifier = Modifier.fillMaxWidth(),
-            label = { Text("OpenSSH private key") },
             minLines = 7,
             textStyle = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Ascii),

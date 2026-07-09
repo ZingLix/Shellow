@@ -40,6 +40,34 @@ private struct TranscriptSaveResult: Identifiable {
     let message: String
 }
 
+private enum TerminalDestructiveAction: String, Identifiable {
+    case clear
+    case reset
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .clear: "Clear terminal?"
+        case .reset: "Reset terminal?"
+        }
+    }
+
+    var message: String {
+        switch self {
+        case .clear: "The visible terminal history will be removed."
+        case .reset: "The terminal display and input state will be reset."
+        }
+    }
+
+    var buttonTitle: String {
+        switch self {
+        case .clear: "Clear"
+        case .reset: "Reset"
+        }
+    }
+}
+
 private enum TerminalSearchHit: Hashable {
     case grid(row: Int, start: Int, end: Int)
     case history(Int)
@@ -201,6 +229,7 @@ struct TerminalScreen: View {
     @State private var pendingPaste: PendingPaste?
     @State private var pendingRemoteClipboard: PendingRemoteClipboard?
     @State private var transcriptSaveResult: TranscriptSaveResult?
+    @State private var pendingDestructiveAction: TerminalDestructiveAction?
     @State private var handledClipboardSequence = 0
     @State private var keyboardAvoidance = TerminalKeyboardAvoidanceState.hidden
     @State private var keyboardLayoutAvoidance = TerminalKeyboardAvoidanceState.hidden
@@ -305,8 +334,8 @@ struct TerminalScreen: View {
                         isAltArmed: $isAltArmed,
                         applicationCursorKeys: session.isApplicationCursorKeysActive,
                         onEnter: sendEnter,
-                        onClearTerminal: onClearTerminal,
-                        onResetTerminal: onResetTerminal,
+                        onClearTerminal: { pendingDestructiveAction = .clear },
+                        onResetTerminal: { pendingDestructiveAction = .reset },
                         onSaveTranscript: saveTranscript,
                         onCopyTerminal: copyVisibleTerminal,
                         onCopySelection: copySelection,
@@ -372,6 +401,30 @@ struct TerminalScreen: View {
                 message: Text(result.message),
                 dismissButton: .default(Text("OK"))
             )
+        }
+        .confirmationDialog(
+            pendingDestructiveAction?.title ?? "Terminal Action",
+            isPresented: Binding(
+                get: { pendingDestructiveAction != nil },
+                set: { if !$0 { pendingDestructiveAction = nil } }
+            ),
+            titleVisibility: .visible,
+            presenting: pendingDestructiveAction
+        ) { action in
+            Button(action.buttonTitle, role: .destructive) {
+                pendingDestructiveAction = nil
+                switch action {
+                case .clear:
+                    onClearTerminal()
+                case .reset:
+                    onResetTerminal()
+                }
+            }
+            Button("Cancel", role: .cancel) {
+                pendingDestructiveAction = nil
+            }
+        } message: { action in
+            Text(action.message)
         }
     }
 
@@ -1721,6 +1774,7 @@ private struct TerminalInputBar: View {
     let onEnter: () -> Void
     let onClearTerminal: () -> Void
     let onResetTerminal: () -> Void
+
     let onSaveTranscript: () -> Void
     let onCopyTerminal: () -> Void
     let onCopySelection: () -> Void
@@ -1732,12 +1786,18 @@ private struct TerminalInputBar: View {
     var body: some View {
         HStack(spacing: 10) {
             Menu {
-                Button(action: onClearTerminal) {
+                Button(role: .destructive) {
+                    onClearTerminal()
+                } label: {
                     Label("Clear Terminal", systemImage: "trash")
                 }
-                Button(action: onResetTerminal) {
+                Button(role: .destructive) {
+                    onResetTerminal()
+                } label: {
                     Label("Reset Terminal", systemImage: "arrow.counterclockwise")
                 }
+
+                Divider()
                 Button(action: onSaveTranscript) {
                     Label("Save Transcript", systemImage: "square.and.arrow.down")
                 }
