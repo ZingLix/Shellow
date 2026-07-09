@@ -181,7 +181,7 @@ jobs:
 
   ios-app-store-connect:
     name: iOS to App Store Connect
-    runs-on: macos-15
+    runs-on: macos-26
     environment: mobile-release
     if: ${{ github.event_name == 'push' || contains(fromJSON('["all","ios"]'), github.event.inputs.platform) }}
     env:
@@ -192,6 +192,16 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Set up Xcode
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: "26.6"
+
+      - name: Show Xcode environment
+        run: |
+          xcodebuild -version
+          xcrun --sdk iphoneos --show-sdk-version
 
       - name: Validate iOS release secrets
         shell: bash
