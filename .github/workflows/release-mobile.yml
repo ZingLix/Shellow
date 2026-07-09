@@ -131,8 +131,21 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          yes | sdkmanager --licenses >/dev/null || true
-          sdkmanager "ndk;27.1.12297006" "cmake;3.22.1"
+          sdkmanager_bin="$(command -v sdkmanager || true)"
+          if [ -z "$sdkmanager_bin" ]; then
+            for sdk_root in "${ANDROID_HOME:-}" "${ANDROID_SDK_ROOT:-}"; do
+              if [ -x "$sdk_root/cmdline-tools/latest/bin/sdkmanager" ]; then
+                sdkmanager_bin="$sdk_root/cmdline-tools/latest/bin/sdkmanager"
+                break
+              fi
+            done
+          fi
+          if [ -z "$sdkmanager_bin" ]; then
+            echo "::error::sdkmanager was not found in PATH, ANDROID_HOME, or ANDROID_SDK_ROOT"
+            exit 127
+          fi
+          yes | "$sdkmanager_bin" --licenses >/dev/null || true
+          "$sdkmanager_bin" "ndk;27.1.12297006" "cmake;3.22.1"
 
       - name: Decode Android upload key
         shell: bash
