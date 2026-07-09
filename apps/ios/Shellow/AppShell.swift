@@ -303,12 +303,21 @@ struct AppShell: View {
             return
         }
 
+        if profile.authentication == .password {
+            passwordPrompt = PasswordPromptRequest(
+                profile: profile,
+                mode: mode,
+                reason: "Enter the password for this host. You can save it in Keychain for faster connections next time."
+            )
+            return
+        }
+
         let keys = storedPrivateKeyAuths()
         guard !keys.isEmpty else {
             passwordPrompt = PasswordPromptRequest(
                 profile: profile,
                 mode: mode,
-                reason: "No saved SSH keys are available."
+                reason: "No saved SSH key is available. Enter a password to connect instead."
             )
             return
         }
