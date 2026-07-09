@@ -5,6 +5,20 @@ plugins {
 apply(plugin = "org.jetbrains.kotlin.android")
 apply(plugin = "org.jetbrains.kotlin.plugin.compose")
 
+fun nonBlankEnv(name: String): String? = System.getenv(name)?.takeIf { it.isNotBlank() }
+
+val ciVersionCode = nonBlankEnv("ANDROID_VERSION_CODE")?.toIntOrNull() ?: 1
+val ciVersionName = nonBlankEnv("ANDROID_VERSION_NAME") ?: "0.1.0"
+val releaseKeystoreFile = nonBlankEnv("ANDROID_KEYSTORE_FILE")?.let { file(it) }
+val releaseKeystorePassword = nonBlankEnv("ANDROID_KEYSTORE_PASSWORD")
+val releaseKeyAlias = nonBlankEnv("ANDROID_KEY_ALIAS")
+val releaseKeyPassword = nonBlankEnv("ANDROID_KEY_PASSWORD") ?: releaseKeystorePassword
+val hasReleaseSigning =
+    releaseKeystoreFile != null &&
+        releaseKeystorePassword != null &&
+        releaseKeyAlias != null &&
+        releaseKeyPassword != null
+
 android {
     namespace = "xyz.zinglix.shellow"
     compileSdk = 36
@@ -14,8 +28,8 @@ android {
         applicationId = "xyz.zinglix.shellow"
         minSdk = 26
         targetSdk = 36
-        versionCode = 1
-        versionName = "0.1.0"
+        versionCode = ciVersionCode
+        versionName = ciVersionName
 
         externalNativeBuild {
             cmake {
@@ -28,9 +42,21 @@ android {
         }
     }
 
+    signingConfigs {
+        if (hasReleaseSigning) {
+            create("release") {
+                storeFile = releaseKeystoreFile
+                storePassword = releaseKeystorePassword
+                keyAlias = releaseKeyAlias
+                keyPassword = releaseKeyPassword
+            }
+        }
+    }
+
     buildTypes {
         release {
             isMinifyEnabled = false
+            signingConfig = signingConfigs.findByName("release")
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
         }
     }

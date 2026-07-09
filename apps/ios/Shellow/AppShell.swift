@@ -102,7 +102,7 @@ struct AppShell: View {
                         passwordPrompt = nil
                     }
                 )
-                .presentationDetents([.medium])
+                .presentationDetents([.large])
             }
         }
         .tint(ShellowTheme.accent)

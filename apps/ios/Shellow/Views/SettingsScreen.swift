@@ -2,6 +2,7 @@ import SwiftUI
 
 struct SettingsScreen: View {
     @Binding var settings: ShellowSettings
+    @Environment(\.dismiss) private var dismiss
 
     var body: some View {
         NavigationStack {
@@ -13,25 +14,21 @@ struct SettingsScreen: View {
                         }
                     }
 
-                    VStack(alignment: .leading, spacing: 10) {
-                        HStack {
-                            Text("Font Size")
-                            Spacer()
-                            Text(settings.fontSize, format: .number.precision(.fractionLength(0)))
-                                .foregroundStyle(.secondary)
-                        }
-                        Slider(value: $settings.fontSize, in: ShellowSettings.fontSizeRange, step: 1)
-                    }
+                    SettingsSliderRow(
+                        title: "Font Size",
+                        valueText: settings.fontSize.formatted(.number.precision(.fractionLength(0))),
+                        value: $settings.fontSize,
+                        range: ShellowSettings.fontSizeRange,
+                        step: 1
+                    )
 
-                    VStack(alignment: .leading, spacing: 10) {
-                        HStack {
-                            Text("Line Height")
-                            Spacer()
-                            Text("\(Int(settings.lineHeightScale * 100))%")
-                                .foregroundStyle(.secondary)
-                        }
-                        Slider(value: $settings.lineHeightScale, in: ShellowSettings.lineHeightScaleRange, step: 0.05)
-                    }
+                    SettingsSliderRow(
+                        title: "Line Height",
+                        valueText: "\(Int(settings.lineHeightScale * 100))%",
+                        value: $settings.lineHeightScale,
+                        range: ShellowSettings.lineHeightScaleRange,
+                        step: 0.05
+                    )
                 }
 
                 Section("Input") {
@@ -40,19 +37,48 @@ struct SettingsScreen: View {
                 }
 
                 Section("Transport") {
-                    VStack(alignment: .leading, spacing: 10) {
-                        HStack {
-                            Text("Keep Alive")
-                            Spacer()
-                            Text("\(Int(settings.keepAliveSeconds))s")
-                                .foregroundStyle(.secondary)
-                        }
-                        Slider(value: $settings.keepAliveSeconds, in: ShellowSettings.keepAliveRange, step: 5)
-                    }
+                    SettingsSliderRow(
+                        title: "Keep Alive",
+                        valueText: "\(Int(settings.keepAliveSeconds))s",
+                        value: $settings.keepAliveSeconds,
+                        range: ShellowSettings.keepAliveRange,
+                        step: 5
+                    )
                 }
             }
             .navigationTitle("Settings")
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Done") {
+                        dismiss()
+                    }
+                }
+            }
         }
+    }
+}
+
+private struct SettingsSliderRow: View {
+    let title: String
+    let valueText: String
+    @Binding var value: Double
+    let range: ClosedRange<Double>
+    let step: Double
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            LabeledContent(title) {
+                Text(valueText)
+                    .font(.subheadline.monospacedDigit())
+                    .foregroundStyle(.secondary)
+            }
+
+            Slider(value: $value, in: range, step: step)
+                .tint(ShellowTheme.accent)
+                .accessibilityLabel(title)
+                .accessibilityValue(valueText)
+        }
+        .padding(.vertical, 2)
     }
 }
 

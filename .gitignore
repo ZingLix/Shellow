@@ -58,3 +58,4 @@ xcuserdata/
 *.log
 *.trace
 *.xcresult/
+/product-audit/

@@ -1,0 +1,377 @@
+name: Release Mobile
+
+on:
+  workflow_dispatch:
+    inputs:
+      platform:
+        description: Platform to release
+        type: choice
+        default: all
+        options:
+          - all
+          - android
+          - ios
+      android_track:
+        description: Google Play track; alpha is the default closed testing track
+        type: choice
+        default: alpha
+        options:
+          - alpha
+          - internal
+          - beta
+          - production
+          - internalsharing
+      release_status:
+        description: Google Play release status
+        type: choice
+        default: completed
+        options:
+          - completed
+          - draft
+          - inProgress
+          - halted
+      version_name:
+        description: Optional store version name, for example 0.1.1
+        required: false
+        type: string
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mobile-release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  ZIG_VERSION: 0.15.2
+
+jobs:
+  android-google-play:
+    name: Android to Google Play
+    runs-on: ubuntu-latest
+    environment: mobile-release
+    if: ${{ github.event_name == 'push' || contains(fromJSON('["all","android"]'), github.event.inputs.platform) }}
+    env:
+      ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+      ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+      ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+      ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+      GOOGLE_PLAY_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_PLAY_SERVICE_ACCOUNT_JSON }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Validate Android release secrets
+        shell: bash
+        run: |
+          set -euo pipefail
+          missing=0
+          for name in \
+            ANDROID_KEYSTORE_BASE64 \
+            ANDROID_KEYSTORE_PASSWORD \
+            ANDROID_KEY_ALIAS \
+            ANDROID_KEY_PASSWORD \
+            GOOGLE_PLAY_SERVICE_ACCOUNT_JSON
+          do
+            if [ -z "${!name:-}" ]; then
+              echo "::error::$name secret is required for Android release"
+              missing=1
+            fi
+          done
+          exit "$missing"
+
+      - name: Resolve release version
+        shell: bash
+        env:
+          INPUT_VERSION_NAME: ${{ github.event.inputs.version_name }}
+        run: |
+          set -euo pipefail
+          version_name="$INPUT_VERSION_NAME"
+          if [ -z "$version_name" ] && [ "$GITHUB_REF_TYPE" = "tag" ]; then
+            version_name="${GITHUB_REF_NAME#v}"
+          fi
+          echo "ANDROID_VERSION_CODE=$GITHUB_RUN_NUMBER" >> "$GITHUB_ENV"
+          if [ -n "$version_name" ]; then
+            echo "ANDROID_VERSION_NAME=$version_name" >> "$GITHUB_ENV"
+          fi
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: gradle
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android,x86_64-linux-android
+
+      - name: Set up Zig
+        uses: mlugg/setup-zig@v2.2.1
+        with:
+          version: ${{ env.ZIG_VERSION }}
+
+      - name: Cache Rust and Zig build output
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/git
+            ~/.cargo/registry
+            target
+            work/zig-global-cache
+          key: ${{ runner.os }}-android-rust-zig-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-android-rust-zig-
+
+      - name: Install Android SDK components
+        shell: bash
+        run: |
+          set -euo pipefail
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager "ndk;27.1.12297006" "cmake;3.22.1"
+
+      - name: Decode Android upload key
+        shell: bash
+        run: |
+          set -euo pipefail
+          keystore_path="$RUNNER_TEMP/shellow-upload.jks"
+          printf '%s' "$ANDROID_KEYSTORE_BASE64" | base64 --decode > "$keystore_path"
+          echo "ANDROID_KEYSTORE_FILE=$keystore_path" >> "$GITHUB_ENV"
+
+      - name: Build Android Rust libraries
+        run: ./scripts/build-android-rust.sh
+
+      - name: Build release app bundle
+        working-directory: apps/android
+        run: ./gradlew :app:bundleRelease --no-daemon
+
+      - name: Upload Android app bundle artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: shellow-android-aab
+          path: apps/android/app/build/outputs/bundle/release/app-release.aab
+          if-no-files-found: error
+
+      - name: Upload to Google Play
+        uses: r0adkll/upload-google-play@v1.1.5
+        with:
+          serviceAccountJsonPlainText: ${{ secrets.GOOGLE_PLAY_SERVICE_ACCOUNT_JSON }}
+          packageName: xyz.zinglix.shellow
+          releaseFiles: apps/android/app/build/outputs/bundle/release/app-release.aab
+          tracks: ${{ github.event.inputs.android_track || 'alpha' }}
+          status: ${{ github.event.inputs.release_status || 'completed' }}
+          releaseName: ${{ github.ref_type == 'tag' && github.ref_name || format('run-{0}', github.run_number) }}
+
+  ios-app-store-connect:
+    name: iOS to App Store Connect
+    runs-on: macos-15
+    environment: mobile-release
+    if: ${{ github.event_name == 'push' || contains(fromJSON('["all","ios"]'), github.event.inputs.platform) }}
+    env:
+      IOS_DISTRIBUTION_CERTIFICATE_BASE64: ${{ secrets.IOS_DISTRIBUTION_CERTIFICATE_BASE64 }}
+      IOS_DISTRIBUTION_CERTIFICATE_PASSWORD: ${{ secrets.IOS_DISTRIBUTION_CERTIFICATE_PASSWORD }}
+      IOS_PROVISIONING_PROFILE_BASE64: ${{ secrets.IOS_PROVISIONING_PROFILE_BASE64 }}
+      IOS_TEAM_ID: ${{ secrets.IOS_TEAM_ID }}
+      APP_STORE_CONNECT_API_KEY_ID: ${{ secrets.APP_STORE_CONNECT_API_KEY_ID }}
+      APP_STORE_CONNECT_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
+      APP_STORE_CONNECT_API_KEY_P8_BASE64: ${{ secrets.APP_STORE_CONNECT_API_KEY_P8_BASE64 }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Validate iOS release secrets
+        shell: bash
+        run: |
+          set -euo pipefail
+          missing=0
+          for name in \
+            IOS_DISTRIBUTION_CERTIFICATE_BASE64 \
+            IOS_DISTRIBUTION_CERTIFICATE_PASSWORD \
+            IOS_PROVISIONING_PROFILE_BASE64 \
+            IOS_TEAM_ID \
+            APP_STORE_CONNECT_API_KEY_ID \
+            APP_STORE_CONNECT_ISSUER_ID \
+            APP_STORE_CONNECT_API_KEY_P8_BASE64
+          do
+            if [ -z "${!name:-}" ]; then
+              echo "::error::$name secret is required for iOS release"
+              missing=1
+            fi
+          done
+          exit "$missing"
+
+      - name: Resolve release version
+        shell: bash
+        env:
+          INPUT_VERSION_NAME: ${{ github.event.inputs.version_name }}
+        run: |
+          set -euo pipefail
+          version_name="$INPUT_VERSION_NAME"
+          if [ -z "$version_name" ] && [ "$GITHUB_REF_TYPE" = "tag" ]; then
+            version_name="${GITHUB_REF_NAME#v}"
+          fi
+          echo "IOS_BUILD_NUMBER=$GITHUB_RUN_NUMBER" >> "$GITHUB_ENV"
+          echo "IOS_MARKETING_VERSION=${version_name:-0.1.0}" >> "$GITHUB_ENV"
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-ios,aarch64-apple-ios-sim
+
+      - name: Set up Zig
+        uses: mlugg/setup-zig@v2.2.1
+        with:
+          version: ${{ env.ZIG_VERSION }}
+
+      - name: Cache Rust and Zig build output
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/git
+            ~/.cargo/registry
+            target
+            work/zig-global-cache
+          key: ${{ runner.os }}-ios-rust-zig-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-ios-rust-zig-
+
+      - name: Build iOS Rust framework
+        run: ./scripts/build-ios-rust.sh
+
+      - name: Install Apple signing assets
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          base64_decode() {
+            if base64 --help 2>&1 | grep -q -- '--decode'; then
+              base64 --decode
+            else
+              base64 -D
+            fi
+          }
+
+          cert_path="$RUNNER_TEMP/distribution.p12"
+          profile_path="$RUNNER_TEMP/profile.mobileprovision"
+          keychain_path="$RUNNER_TEMP/app-signing.keychain-db"
+          keychain_password="$(uuidgen)"
+
+          printf '%s' "$IOS_DISTRIBUTION_CERTIFICATE_BASE64" | base64_decode > "$cert_path"
+          printf '%s' "$IOS_PROVISIONING_PROFILE_BASE64" | base64_decode > "$profile_path"
+
+          security create-keychain -p "$keychain_password" "$keychain_path"
+          security set-keychain-settings -lut 21600 "$keychain_path"
+          security unlock-keychain -p "$keychain_password" "$keychain_path"
+          security import "$cert_path" -P "$IOS_DISTRIBUTION_CERTIFICATE_PASSWORD" -A -t cert -f pkcs12 -k "$keychain_path"
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$keychain_password" "$keychain_path"
+          security list-keychains -d user -s "$keychain_path"
+
+          profile_plist="$RUNNER_TEMP/profile.plist"
+          security cms -D -i "$profile_path" > "$profile_plist"
+          profile_uuid=$(/usr/libexec/PlistBuddy -c "Print UUID" "$profile_plist")
+
+          mkdir -p "$HOME/Library/MobileDevice/Provisioning Profiles"
+          cp "$profile_path" "$HOME/Library/MobileDevice/Provisioning Profiles/$profile_uuid.mobileprovision"
+
+          echo "IOS_KEYCHAIN_PATH=$keychain_path" >> "$GITHUB_ENV"
+          echo "IOS_PROFILE_UUID=$profile_uuid" >> "$GITHUB_ENV"
+
+      - name: Prepare App Store Connect API key
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          base64_decode() {
+            if base64 --help 2>&1 | grep -q -- '--decode'; then
+              base64 --decode
+            else
+              base64 -D
+            fi
+          }
+
+          asc_key_path="$RUNNER_TEMP/AuthKey_${APP_STORE_CONNECT_API_KEY_ID}.p8"
+          printf '%s' "$APP_STORE_CONNECT_API_KEY_P8_BASE64" | base64_decode > "$asc_key_path"
+          chmod 600 "$asc_key_path"
+          echo "APP_STORE_CONNECT_API_KEY_PATH=$asc_key_path" >> "$GITHUB_ENV"
+
+      - name: Archive iOS app
+        shell: bash
+        run: |
+          set -euo pipefail
+          xcodebuild archive \
+            -project apps/ios/Shellow.xcodeproj \
+            -scheme Shellow \
+            -configuration Release \
+            -destination "generic/platform=iOS" \
+            -archivePath "$RUNNER_TEMP/Shellow.xcarchive" \
+            DEVELOPMENT_TEAM="$IOS_TEAM_ID" \
+            CODE_SIGN_STYLE=Manual \
+            CODE_SIGN_IDENTITY="Apple Distribution" \
+            PROVISIONING_PROFILE_SPECIFIER="$IOS_PROFILE_UUID" \
+            CURRENT_PROJECT_VERSION="$IOS_BUILD_NUMBER" \
+            MARKETING_VERSION="$IOS_MARKETING_VERSION"
+
+      - name: Upload archive to App Store Connect
+        shell: bash
+        run: |
+          set -euo pipefail
+          export_options="$RUNNER_TEMP/ExportOptions.plist"
+          cat > "$export_options" <<PLIST
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>destination</key>
+            <string>upload</string>
+            <key>manageAppVersionAndBuildNumber</key>
+            <false/>
+            <key>method</key>
+            <string>app-store-connect</string>
+            <key>provisioningProfiles</key>
+            <dict>
+              <key>xyz.zinglix.shellow</key>
+              <string>$IOS_PROFILE_UUID</string>
+            </dict>
+            <key>signingCertificate</key>
+            <string>Apple Distribution</string>
+            <key>signingStyle</key>
+            <string>manual</string>
+            <key>stripSwiftSymbols</key>
+            <true/>
+            <key>teamID</key>
+            <string>$IOS_TEAM_ID</string>
+            <key>uploadSymbols</key>
+            <true/>
+          </dict>
+          </plist>
+          PLIST
+
+          xcodebuild -exportArchive \
+            -archivePath "$RUNNER_TEMP/Shellow.xcarchive" \
+            -exportPath "$RUNNER_TEMP/ShellowExport" \
+            -exportOptionsPlist "$export_options" \
+            -allowProvisioningUpdates \
+            -authenticationKeyPath "$APP_STORE_CONNECT_API_KEY_PATH" \
+            -authenticationKeyID "$APP_STORE_CONNECT_API_KEY_ID" \
+            -authenticationKeyIssuerID "$APP_STORE_CONNECT_ISSUER_ID"
+
+      - name: Upload iOS archive artifact
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: shellow-ios-xcarchive
+          path: ${{ runner.temp }}/Shellow.xcarchive
+          if-no-files-found: ignore
+
+      - name: Remove temporary Apple signing keychain
+        if: ${{ always() }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -n "${IOS_KEYCHAIN_PATH:-}" ]; then
+            security delete-keychain "$IOS_KEYCHAIN_PATH" || true
+          fi

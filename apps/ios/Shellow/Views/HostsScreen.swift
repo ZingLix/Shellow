@@ -14,49 +14,78 @@ struct HostsScreen: View {
     @State private var draftUser = ""
     @State private var isAddingProfile = false
     @State private var isManagingKeys = false
+    @State private var selectedProfile: HostProfile?
 
     var body: some View {
         List {
             Section("Hosts") {
-                ForEach(profiles) { profile in
-                    HostProfileRow(
-                        profile: profile,
-                        connectTerminal: {
-                            connectTerminal(profile)
-                        },
-                        connectCodex: {
-                            connectCodex(profile)
+                if profiles.isEmpty {
+                    ContentUnavailableView {
+                        Label("No Hosts", systemImage: "server.rack")
+                    } description: {
+                        Text("Add a host to start a Terminal or Codex session.")
+                    } actions: {
+                        Button("Add Host") {
+                            isAddingProfile = true
                         }
-                    )
+                    }
+                } else {
+                    ForEach(profiles) { profile in
+                        HostProfileRow(
+                            profile: profile,
+                            open: {
+                                selectedProfile = profile
+                            }
+                        )
+                    }
                 }
             }
         }
         .navigationTitle("Shellow")
+        .accessibilityHidden(isPresentingSheet)
+        .allowsHitTesting(!isPresentingSheet)
         .toolbar {
-            ToolbarItem(placement: .topBarLeading) {
-                Button(action: onOpenSettings) {
-                    Image(systemName: "gearshape")
-                }
-                .accessibilityLabel("Settings")
-            }
-
             ToolbarItem(placement: .topBarTrailing) {
-                HStack {
-                    Button {
-                        isManagingKeys = true
-                    } label: {
-                        Image(systemName: "key")
-                    }
-                    .accessibilityLabel("Manage Keys")
-
+                HStack(spacing: 12) {
                     Button {
                         isAddingProfile = true
                     } label: {
                         Image(systemName: "plus")
                     }
                     .accessibilityLabel("Add Host")
+
+                    Menu {
+                        Button(action: onOpenSettings) {
+                            Label("Settings", systemImage: "gearshape")
+                        }
+
+                        Button {
+                            isManagingKeys = true
+                        } label: {
+                            Label("SSH Keys", systemImage: "key")
+                        }
+                    } label: {
+                        Image(systemName: "ellipsis.circle")
+                    }
+                    .accessibilityLabel("Manage")
                 }
+                .accessibilityHidden(isPresentingSheet)
+                .allowsHitTesting(!isPresentingSheet)
             }
+        }
+        .sheet(item: $selectedProfile) { profile in
+            HostConnectionSheet(
+                profile: profile,
+                connectTerminal: {
+                    selectedProfile = nil
+                    connectTerminal(profile)
+                },
+                connectCodex: {
+                    selectedProfile = nil
+                    connectCodex(profile)
+                }
+            )
+            .presentationDetents([.medium])
         }
         .sheet(isPresented: $isAddingProfile) {
             NewHostProfileSheet(
@@ -66,7 +95,7 @@ struct HostsScreen: View {
                 draftUser: $draftUser,
                 addProfile: addProfile
             )
-            .presentationDetents([.medium])
+            .presentationDetents([.large])
         }
         .sheet(isPresented: $isManagingKeys) {
             SSHKeyManagementSheet(
@@ -76,12 +105,19 @@ struct HostsScreen: View {
         }
     }
 
+    private var isPresentingSheet: Bool {
+        selectedProfile != nil || isAddingProfile || isManagingKeys
+    }
+
     private var canAddProfile: Bool {
-        !draftName.isEmpty && !draftHost.isEmpty && !draftUser.isEmpty && Int(draftPort) != nil
+        !draftName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && !draftHost.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && !draftUser.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && validDraftPort != nil
     }
 
     private func addProfile() {
-        guard canAddProfile, let port = Int(draftPort) else {
+        guard canAddProfile, let port = validDraftPort else {
             return
         }
 
@@ -103,6 +139,101 @@ struct HostsScreen: View {
         draftUser = ""
     }
 
+    private var validDraftPort: Int? {
+        guard let port = Int(draftPort), (1...65535).contains(port) else {
+            return nil
+        }
+        return port
+    }
+
+}
+
+private struct HostConnectionSheet: View {
+    let profile: HostProfile
+    let connectTerminal: () -> Void
+    let connectCodex: () -> Void
+
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section("Connection") {
+                    HostConnectionSummary(
+                        profile: profile,
+                        reason: nil
+                    )
+                }
+
+                Section("Connect") {
+                    Button {
+                        dismiss()
+                        connectTerminal()
+                    } label: {
+                        ConnectionModeRow(
+                            title: "Terminal",
+                            subtitle: "Open an interactive shell",
+                            systemImage: "terminal"
+                        )
+                    }
+                    .buttonStyle(.plain)
+
+                    Button {
+                        dismiss()
+                        connectCodex()
+                    } label: {
+                        ConnectionModeRow(
+                            title: "Codex",
+                            subtitle: "Start a remote coding session",
+                            systemImage: "sparkles"
+                        )
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+            .navigationTitle(profile.name)
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") {
+                        dismiss()
+                    }
+                }
+            }
+        }
+    }
+}
+
+private struct ConnectionModeRow: View {
+    let title: String
+    let subtitle: String
+    let systemImage: String
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Image(systemName: systemImage)
+                .font(.system(size: 17, weight: .semibold))
+                .frame(width: 28, height: 28)
+                .foregroundStyle(.secondary)
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title)
+                    .font(.body.weight(.semibold))
+                    .foregroundStyle(.primary)
+                Text(subtitle)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            Spacer()
+
+            Image(systemName: "chevron.right")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.tertiary)
+        }
+        .padding(.vertical, 4)
+        .contentShape(Rectangle())
+    }
 }
 
 private struct NewHostProfileSheet: View {
@@ -127,6 +258,11 @@ private struct NewHostProfileSheet: View {
                     TextField("User", text: $draftUser)
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()
+                    if let profileRequirement {
+                        Text(profileRequirement)
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                    }
                 }
             }
             .navigationTitle("New Host")
@@ -150,7 +286,23 @@ private struct NewHostProfileSheet: View {
     }
 
     private var canAddProfile: Bool {
-        !draftName.isEmpty && !draftHost.isEmpty && !draftUser.isEmpty && Int(draftPort) != nil
+        profileRequirement == nil
+    }
+
+    private var profileRequirement: String? {
+        if draftName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return "Enter a name for this host."
+        }
+        if draftHost.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return "Enter a hostname or IP address."
+        }
+        if draftUser.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return "Enter the SSH username."
+        }
+        guard let port = Int(draftPort), (1...65535).contains(port) else {
+            return "Port must be a number from 1 to 65535."
+        }
+        return nil
     }
 }
 
@@ -170,22 +322,23 @@ struct PasswordPromptSheet: View {
     var body: some View {
         NavigationStack {
             Form {
-                Section("Host") {
-                    LabeledContent("Endpoint", value: profile.endpoint)
-                    LabeledContent("Host Key", value: profile.hostKeyTrustTitle)
-                    if let reason {
-                        Text(reason)
-                            .font(.footnote)
-                            .foregroundStyle(.secondary)
-                    }
+                Section("Connection") {
+                    HostConnectionSummary(
+                        profile: profile,
+                        reason: reason
+                    )
                 }
 
                 Section("Password") {
                     SecureField("Password", text: $password)
                         .textContentType(.password)
-                    Toggle("Save password in Keychain", isOn: $rememberPassword)
+                    Toggle("Save in Keychain", isOn: $rememberPassword)
                     if let keychainStatus {
                         Text(keychainStatus)
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                    } else if password.isEmpty {
+                        Text("Enter a password to connect.")
                             .font(.footnote)
                             .foregroundStyle(.secondary)
                     }
@@ -225,6 +378,28 @@ struct PasswordPromptSheet: View {
     }
 }
 
+private struct HostConnectionSummary: View {
+    let profile: HostProfile
+    let reason: String?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(profile.endpoint)
+                .font(.body.weight(.semibold))
+            Text(profile.hostKeyTrustTitle)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            if let reason {
+                Text(reason)
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .padding(.top, 2)
+            }
+        }
+        .padding(.vertical, 2)
+    }
+}
+
 private struct SSHKeyManagementSheet: View {
     @Binding var credentials: [SSHKeyCredential]
 
@@ -238,8 +413,15 @@ private struct SSHKeyManagementSheet: View {
             List {
                 Section("Keys") {
                     if credentials.isEmpty {
-                        Text("No private keys saved")
-                            .foregroundStyle(.secondary)
+                        ContentUnavailableView {
+                            Label("No SSH Keys", systemImage: "key")
+                        } description: {
+                            Text("Add a private key for key-based authentication.")
+                        } actions: {
+                            Button("Add Key") {
+                                isAddingKey = true
+                            }
+                        }
                     } else {
                         ForEach(credentials) { credential in
                             HStack(spacing: 12) {
@@ -321,11 +503,22 @@ private struct AddSSHKeySheet: View {
             Form {
                 Section("Key") {
                     TextField("Name", text: $name)
+                    Text("OpenSSH Private Key")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
                     TextEditor(text: $privateKey)
                         .font(.system(.footnote, design: .monospaced))
                         .frame(minHeight: 180)
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()
+                    Text("Paste an OpenSSH private key.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                    if let keyRequirement {
+                        Text(keyRequirement)
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                    }
                 }
 
                 Section("Passphrase") {
@@ -358,8 +551,17 @@ private struct AddSSHKeySheet: View {
     }
 
     private var canAdd: Bool {
-        !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
-            privateKeyLooksUsable(privateKey)
+        keyRequirement == nil
+    }
+
+    private var keyRequirement: String? {
+        if name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return "Enter a name for this key."
+        }
+        if !privateKeyLooksUsable(privateKey) {
+            return "Paste a valid OpenSSH private key."
+        }
+        return nil
     }
 
     private func addKey() {
@@ -494,6 +696,7 @@ struct CodexScreen: View {
                 modelsError: snapshot.settings.modelsError,
                 approvalPolicy: $settingsApprovalPolicy,
                 sandbox: $settingsSandbox,
+                canApply: settingsCanApply,
                 apply: {
                     onUpdateSettings(
                         settingsModel.trimmingCharacters(in: .whitespacesAndNewlines),
@@ -535,38 +738,37 @@ struct CodexScreen: View {
     @ViewBuilder
     private var operationBanner: some View {
         if let message = snapshot.operation.lastError {
-            Label(message, systemImage: "exclamationmark.triangle")
-                .font(.caption)
-                .foregroundStyle(.orange)
-                .lineLimit(2)
+            CodexInlineStatusRow(text: message, tone: .warning)
                 .padding(.horizontal, 14)
-                .padding(.vertical, 8)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .background(Color.orange.opacity(0.10))
-        } else if let message = snapshot.operation.lastSuccess {
-            Label(message, systemImage: "checkmark.circle")
-                .font(.caption)
-                .foregroundStyle(.green)
-                .lineLimit(1)
+        } else if let message = visibleOperationSuccess {
+            CodexInlineStatusRow(text: message, tone: .success)
                 .padding(.horizontal, 14)
-                .padding(.vertical, 8)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .background(Color.green.opacity(0.08))
         }
+    }
+
+    private var visibleOperationSuccess: String? {
+        guard let message = snapshot.operation.lastSuccess,
+              !isShowingThread || snapshot.threadId == nil else {
+            return nil
+        }
+        return isRoutineOperationSuccess(message) ? nil : message
+    }
+
+    private func isRoutineOperationSuccess(_ message: String) -> Bool {
+        message.trimmingCharacters(in: .whitespacesAndNewlines) == "Codex thread resumed."
     }
 
     private var codexHeader: some View {
         HStack(spacing: 10) {
-            Button {
+            CodexBackButton(accessibilityLabel: "Back") {
                 goBack()
-            } label: {
-                Image(systemName: "chevron.left")
             }
-            .accessibilityLabel("Back")
 
             VStack(alignment: .leading, spacing: 2) {
-                Text(snapshot.title)
+                Text(headerTitle)
                     .font(.headline)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
                 Text(headerSubtitle)
                     .font(.caption)
                     .foregroundStyle(.secondary)
@@ -581,33 +783,100 @@ struct CodexScreen: View {
                     .accessibilityLabel(snapshot.operation.label ?? "Codex operation running")
             }
 
-            if let onReconnect {
-                Button(action: onReconnect) {
-                    Image(systemName: "arrow.clockwise")
-                }
-                .accessibilityLabel("Reconnect Codex")
-            }
+            Menu {
+                if let threadId = snapshot.threadId {
+                    if let cursor = snapshot.threadDetail.turnsNextCursor,
+                       !cursor.isEmpty {
+                        Button {
+                            Task { await onLoadMoreThreadTurns(threadId, cursor) }
+                        } label: {
+                            Label("Load More History", systemImage: "clock.arrow.circlepath")
+                        }
+                        .disabled(snapshot.threadDetail.isLoadingMore)
+                    }
 
-            Button(action: onDisconnect) {
-                Image(systemName: "power")
+                    Button {
+                        Task { await onForkThread(threadId, selectedProjectPath) }
+                    } label: {
+                        Label("Fork Thread", systemImage: "arrow.triangle.branch")
+                    }
+
+                    Divider()
+                }
+
+                if !isShowingThread, homeRoute == .project {
+                    Button {
+                        showArchivedThreads.toggle()
+                        Task { await refreshHistory() }
+                    } label: {
+                        Label(showArchivedThreads ? "Hide Archived" : "Show Archived", systemImage: "archivebox")
+                    }
+
+                    Button {
+                        Task { await refreshHistory() }
+                    } label: {
+                        Label("Refresh", systemImage: "arrow.clockwise")
+                    }
+                    .disabled(!canUseProjectActions)
+
+                    Divider()
+                }
+
+                Button {
+                    presentCodexSettings()
+                } label: {
+                    Label("Settings", systemImage: "slider.horizontal.3")
+                }
+
+                if let onReconnect {
+                    Button(action: onReconnect) {
+                        Label("Reconnect", systemImage: "arrow.clockwise")
+                    }
+                }
+
+                Button(role: .destructive, action: onDisconnect) {
+                    Label("Disconnect", systemImage: "power")
+                }
+            } label: {
+                CodexOverflowMenuLabel()
             }
-            .accessibilityLabel("Disconnect Codex")
+            .accessibilityLabel("Codex Actions")
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 10)
     }
 
     private var headerSubtitle: String {
-        let cwd = snapshot.cwd.map { "  \($0)" } ?? ""
-        return "\(snapshot.status.title)  \(snapshot.endpoint)\(cwd)"
+        let location: String
+        if !isShowingThread, homeRoute == .project, !selectedProjectPath.isEmpty {
+            location = codexCompactPath(selectedProjectPath)
+        } else if !isShowingThread, homeRoute == .draft, !selectedProjectPath.isEmpty {
+            location = codexCompactPath(selectedProjectPath)
+        } else {
+            location = snapshot.cwd.map(lastPathComponent) ?? snapshot.endpoint
+        }
+        return "\(snapshot.status.title) · \(location)"
+    }
+
+    private var headerTitle: String {
+        if isShowingThread, snapshot.threadId != nil {
+            return snapshot.threadDetail.thread?.displayTitle ?? snapshot.title
+        }
+
+        switch homeRoute {
+        case .overview:
+            return snapshot.title
+        case .project:
+            return selectedProjectPath.isEmpty ? snapshot.title : lastPathComponent(selectedProjectPath)
+        case .draft:
+            return "New Conversation"
+        }
     }
 
     private var chatView: some View {
         ScrollViewReader { proxy in
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 10) {
-                    chatToolbar
-
                     ForEach(snapshot.pendingApprovals) { approval in
                         CodexApprovalRow(
                             approval: approval,
@@ -623,24 +892,6 @@ struct CodexScreen: View {
                             .id(message.id)
                     }
 
-                    if snapshot.turnActive {
-                        HStack(spacing: 8) {
-                            ProgressView()
-                                .controlSize(.small)
-                            Text("Codex is working")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                            Spacer()
-                            Button(role: .destructive, action: onInterruptTurn) {
-                                Label("Interrupt", systemImage: "stop.fill")
-                            }
-                            .buttonStyle(.bordered)
-                            .labelStyle(.iconOnly)
-                            .accessibilityLabel("Interrupt Codex Turn")
-                        }
-                        .padding(.vertical, 6)
-                    }
-
                     Color.clear
                         .frame(height: 1)
                         .id(Self.chatBottomID)
@@ -654,16 +905,37 @@ struct CodexScreen: View {
                 await Task.yield()
                 scrollToChatBottom(proxy, animated: false)
             }
-            .onChange(of: snapshot.messages.count) {
-                scrollToChatBottom(proxy, animated: true)
-            }
-            .onChange(of: snapshot.pendingApprovals.count) {
-                scrollToChatBottom(proxy, animated: true)
-            }
-            .onChange(of: snapshot.turnActive) {
+            .onChange(of: chatScrollSignature) {
                 scrollToChatBottom(proxy, animated: true)
             }
         }
+    }
+
+    private var chatScrollSignature: Int {
+        var signature = snapshot.pendingApprovals.count
+        signature = signature &* 31 &+ (snapshot.turnActive ? 1 : 0)
+        for message in snapshot.messages where message.isVisibleInChat {
+            signature = signature &* 31 &+ message.id.count
+            signature = signature &* 31 &+ message.text.count
+            signature = signature &* 31 &+ (message.title?.count ?? 0)
+            signature = signature &* 31 &+ (message.detail?.count ?? 0)
+            signature = signature &* 31 &+ (message.transcript?.count ?? 0)
+            signature = signature &* 31 &+ (message.isStreaming ? 1 : 0)
+            signature = signature &* 31 &+ message.blocks.reduce(0) { $0 + markdownBlockContentLength($1) }
+        }
+        return signature
+    }
+
+    private func markdownBlockContentLength(_ block: CodexMarkdownBlock) -> Int {
+        block.id.count +
+            block.text.count +
+            (block.imageAlt?.count ?? 0) +
+            block.runs.reduce(0) { $0 + $1.text.count } +
+            block.items.reduce(0) { $0 + $1.text.count + $1.runs.reduce(0) { $0 + $1.text.count } } +
+            block.tableHeaders.reduce(0) { $0 + $1.text.count + $1.runs.reduce(0) { $0 + $1.text.count } } +
+            block.tableRows.reduce(0) { rowTotal, row in
+                rowTotal + row.reduce(0) { $0 + $1.text.count + $1.runs.reduce(0) { $0 + $1.text.count } }
+            }
     }
 
     private func scrollToChatBottom(_ proxy: ScrollViewProxy, animated: Bool) {
@@ -677,47 +949,6 @@ struct CodexScreen: View {
                 action()
             }
         }
-    }
-
-    private var chatToolbar: some View {
-        HStack(spacing: 8) {
-            VStack(alignment: .leading, spacing: 2) {
-                Text(snapshot.threadDetail.thread?.displayTitle ?? "Active Thread")
-                    .font(.subheadline.weight(.semibold))
-                    .lineLimit(1)
-                Text(snapshot.cwd ?? snapshot.threadDetail.thread?.cwd ?? "No project")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-            }
-
-            Spacer()
-
-            if let threadId = snapshot.threadId,
-               let cursor = snapshot.threadDetail.turnsNextCursor,
-               !cursor.isEmpty {
-                Button {
-                    Task { await onLoadMoreThreadTurns(threadId, cursor) }
-                } label: {
-                    Image(systemName: "clock.arrow.circlepath")
-                }
-                .buttonStyle(.bordered)
-                .disabled(snapshot.threadDetail.isLoadingMore)
-                .accessibilityLabel("Load More Thread History")
-            }
-
-            if let threadId = snapshot.threadId {
-                Button {
-                    Task { await onForkThread(threadId, selectedProjectPath) }
-                } label: {
-                    Image(systemName: "arrow.triangle.branch")
-                }
-                .buttonStyle(.bordered)
-                .accessibilityLabel("Fork Thread")
-            }
-        }
-        .padding(10)
-        .background(Color(.secondarySystemBackground), in: RoundedRectangle(cornerRadius: 8))
     }
 
     @ViewBuilder
@@ -736,14 +967,12 @@ struct CodexScreen: View {
         VStack(spacing: 0) {
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 18) {
+                    codexHomeSearchBar
                     projectsSection
                     recentConversationsSection
                 }
                 .padding(14)
             }
-
-            Divider()
-            codexHomeSearchBar
         }
     }
 
@@ -751,14 +980,11 @@ struct CodexScreen: View {
         VStack(spacing: 0) {
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 14) {
-                    projectPageHeader
+                    projectSearchBar
                     projectConversationsSection
                 }
                 .padding(14)
             }
-
-            Divider()
-            projectSearchBar
         }
     }
 
@@ -766,7 +992,6 @@ struct CodexScreen: View {
         VStack(spacing: 0) {
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 14) {
-                    draftChatHeader
                     draftWorkspaceSection
                 }
                 .padding(14)
@@ -777,57 +1002,28 @@ struct CodexScreen: View {
         }
     }
 
-    private var projectPageHeader: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Button {
-                homeRoute = .overview
-                historyScope = .allProjects
-                Task { await refreshHistory() }
-            } label: {
-                Label("Projects", systemImage: "chevron.left")
-            }
-            .buttonStyle(.bordered)
-
-            CodexSectionHeader(
-                title: lastPathComponent(selectedProjectPath),
-                detail: selectedProjectPath
-            )
-        }
-    }
-
-    private var draftChatHeader: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Button {
-                homeRoute = draftReturnRoute
-            } label: {
-                Label(draftReturnRoute == .project ? lastPathComponent(selectedProjectPath) : "Projects", systemImage: "chevron.left")
-            }
-            .buttonStyle(.bordered)
-
-            CodexSectionHeader(
-                title: "New Conversation",
-                detail: selectedProjectPath.isEmpty ? "Choose a workspace before sending" : selectedProjectPath
-            )
-        }
-    }
-
     private var draftWorkspaceSection: some View {
         VStack(alignment: .leading, spacing: 10) {
-            HStack(spacing: 8) {
-                TextField("Workspace path", text: $selectedPath)
-                    .textFieldStyle(.roundedBorder)
-                    .textInputAutocapitalization(.never)
-                    .autocorrectionDisabled()
-
-                Button {
+            HStack(alignment: .center, spacing: 10) {
+                CodexInlineTextField(
+                    systemImage: "folder",
+                    placeholder: "Workspace path",
+                    text: $selectedPath,
+                    submitLabel: .go
+                ) {
+                    guard canUseProjectActions else { return }
                     homeRoute = .project
                     Task { await selectTypedProject() }
-                } label: {
-                    Image(systemName: "folder")
                 }
-                .buttonStyle(.bordered)
-                .disabled(!canUseProjectActions)
-                .accessibilityLabel("Show Workspace Conversations")
+
+                CodexActionIconButton(
+                    systemImage: "arrow.right",
+                    accessibilityLabel: "Show Workspace Conversations",
+                    isEnabled: canUseProjectActions
+                ) {
+                    homeRoute = .project
+                    Task { await selectTypedProject() }
+                }
             }
 
             if !knownProjectPaths.isEmpty {
@@ -848,42 +1044,14 @@ struct CodexScreen: View {
 
     private var projectConversationsSection: some View {
         VStack(alignment: .leading, spacing: 10) {
-            HStack(spacing: 8) {
-                CodexSectionHeader(title: "Conversations", detail: "Current project")
-
-                Spacer()
-
-                Button {
-                    showArchivedThreads.toggle()
-                    Task { await refreshHistory() }
-                } label: {
-                    Image(systemName: showArchivedThreads ? "archivebox.fill" : "archivebox")
-                }
-                .buttonStyle(.bordered)
-                .accessibilityLabel("Toggle Archived Threads")
-
-                Button {
-                    Task { await refreshHistory() }
-                } label: {
-                    Image(systemName: "arrow.clockwise")
-                }
-                .buttonStyle(.bordered)
-                .disabled(!canUseProjectActions)
-                .accessibilityLabel("Refresh Conversations")
-            }
+            CodexSectionHeader(title: "Conversations")
 
             if snapshot.threads.isLoading {
-                ProgressView()
-                    .controlSize(.small)
-                    .padding(.vertical, 8)
+                CodexInlineStatusRow(text: "Loading history", isLoading: true)
             }
 
             if let error = snapshot.threads.error {
-                Label(error, systemImage: "exclamationmark.triangle")
-                    .font(.callout)
-                    .foregroundStyle(.orange)
-                    .padding(10)
-                    .background(Color.orange.opacity(0.12), in: RoundedRectangle(cornerRadius: 8))
+                CodexInlineStatusRow(text: error, tone: .warning)
             }
 
             ForEach(visibleThreads) { thread in
@@ -891,6 +1059,7 @@ struct CodexScreen: View {
                     thread: thread,
                     archived: showArchivedThreads,
                     isOpening: openingThreadId == thread.id,
+                    showsProjectContext: false,
                     resume: {
                         Task { await openThread(thread) }
                     },
@@ -914,52 +1083,26 @@ struct CodexScreen: View {
             }
 
             if let nextCursor = snapshot.threads.nextCursor, !nextCursor.isEmpty, homeSearchTerm.isEmpty {
-                Button {
+                CodexLoadMoreButton(isLoading: snapshot.threads.isLoadingMore) {
                     Task { await loadMoreHistory(cursor: nextCursor) }
-                } label: {
-                    if snapshot.threads.isLoadingMore {
-                        ProgressView()
-                            .controlSize(.small)
-                    } else {
-                        Label("Load More", systemImage: "chevron.down")
-                    }
                 }
-                .buttonStyle(.bordered)
-                .frame(maxWidth: .infinity)
-                .disabled(snapshot.threads.isLoadingMore)
             }
 
             if visibleThreads.isEmpty,
                !snapshot.threads.isLoading,
                snapshot.threads.error == nil {
-                Text(homeSearchTerm.isEmpty ? "No conversations in this project" : "No matching conversations")
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
-                    .padding(.vertical, 20)
-                    .frame(maxWidth: .infinity)
+                CodexEmptyState(
+                    title: homeSearchTerm.isEmpty ? "No Conversations" : "No Matches",
+                    detail: homeSearchTerm.isEmpty ? "Start a chat in this project when you're ready." : "Try a different search.",
+                    systemImage: homeSearchTerm.isEmpty ? "bubble.left.and.text.bubble.right" : "magnifyingglass"
+                )
             }
         }
     }
 
     private var projectsSection: some View {
         VStack(alignment: .leading, spacing: 10) {
-            CodexSectionHeader(title: "Projects", detail: selectedProjectPath.isEmpty ? "No project selected" : selectedProjectPath)
-
-            HStack(spacing: 8) {
-                TextField("Project path", text: $selectedPath)
-                    .textFieldStyle(.roundedBorder)
-                    .textInputAutocapitalization(.never)
-                    .autocorrectionDisabled()
-
-                Button {
-                    Task { await selectTypedProject() }
-                } label: {
-                    Image(systemName: "line.3.horizontal.decrease.circle")
-                }
-                .buttonStyle(.bordered)
-                .disabled(!canUseProjectActions)
-                .accessibilityLabel("Show Project Conversations")
-            }
+            CodexSectionHeader(title: "Projects")
 
             if !visibleProjectPaths.isEmpty {
                 VStack(alignment: .leading, spacing: 8) {
@@ -977,11 +1120,11 @@ struct CodexScreen: View {
 
             if visibleProjectPaths.isEmpty,
                !snapshot.threads.isLoading {
-                Text(homeSearchTerm.isEmpty ? "No projects" : "No matching projects")
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
-                    .padding(.vertical, 20)
-                    .frame(maxWidth: .infinity)
+                CodexEmptyState(
+                    title: homeSearchTerm.isEmpty ? "No Projects" : "No Matches",
+                    detail: homeSearchTerm.isEmpty ? "Start a chat to enter a workspace path." : "Try a different search.",
+                    systemImage: homeSearchTerm.isEmpty ? "folder" : "magnifyingglass"
+                )
             }
         }
     }
@@ -989,51 +1132,19 @@ struct CodexScreen: View {
     private var recentConversationsSection: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 8) {
-                CodexSectionHeader(title: "Recent Conversations", detail: historyScopeTitle)
+                CodexSectionHeader(title: "Recent Conversations", detail: historyScopeDetail)
 
                 Spacer()
 
-                Menu {
-                    Picker("Scope", selection: $historyScope) {
-                        Text("Current Project").tag(CodexHistoryScope.currentProject)
-                        Text("All Projects").tag(CodexHistoryScope.allProjects)
-                    }
-                } label: {
-                    Image(systemName: "line.3.horizontal.decrease.circle")
-                }
-                .accessibilityLabel("Conversation Scope")
-
-                Button {
-                    showArchivedThreads.toggle()
-                    Task { await refreshHistory() }
-                } label: {
-                    Image(systemName: showArchivedThreads ? "archivebox.fill" : "archivebox")
-                }
-                .buttonStyle(.bordered)
-                .accessibilityLabel("Toggle Archived Threads")
-
-                Button {
-                    Task { await refreshHistory() }
-                } label: {
-                    Image(systemName: "arrow.clockwise")
-                }
-                .buttonStyle(.bordered)
-                .disabled(!canUseHistoryActions)
-                .accessibilityLabel("Refresh Conversations")
+                recentConversationActionsMenu
             }
 
             if snapshot.threads.isLoading {
-                ProgressView()
-                    .controlSize(.small)
-                    .padding(.vertical, 8)
+                CodexInlineStatusRow(text: "Loading history", isLoading: true)
             }
 
             if let error = snapshot.threads.error {
-                Label(error, systemImage: "exclamationmark.triangle")
-                    .font(.callout)
-                    .foregroundStyle(.orange)
-                    .padding(10)
-                    .background(Color.orange.opacity(0.12), in: RoundedRectangle(cornerRadius: 8))
+                CodexInlineStatusRow(text: error, tone: .warning)
             }
 
             ForEach(visibleThreads) { thread in
@@ -1064,143 +1175,132 @@ struct CodexScreen: View {
             }
 
             if let nextCursor = snapshot.threads.nextCursor, !nextCursor.isEmpty, homeSearchTerm.isEmpty {
-                Button {
+                CodexLoadMoreButton(isLoading: snapshot.threads.isLoadingMore) {
                     Task { await loadMoreHistory(cursor: nextCursor) }
-                } label: {
-                    if snapshot.threads.isLoadingMore {
-                        ProgressView()
-                            .controlSize(.small)
-                    } else {
-                        Label("Load More", systemImage: "chevron.down")
-                    }
                 }
-                .buttonStyle(.bordered)
-                .frame(maxWidth: .infinity)
-                .disabled(snapshot.threads.isLoadingMore)
             }
 
             if visibleThreads.isEmpty,
                !snapshot.threads.isLoading,
                snapshot.threads.error == nil {
-                Text(homeSearchTerm.isEmpty ? "No recent conversations" : "No matching conversations")
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
-                    .padding(.vertical, 20)
-                    .frame(maxWidth: .infinity)
+                CodexEmptyState(
+                    title: homeSearchTerm.isEmpty ? "No Recent Conversations" : "No Matches",
+                    detail: homeSearchTerm.isEmpty ? "Start a chat from a workspace to see it here." : "Try a different search.",
+                    systemImage: homeSearchTerm.isEmpty ? "clock" : "magnifyingglass"
+                )
             }
         }
+    }
+
+    private var recentConversationActionsMenu: some View {
+        Menu {
+            Picker("Scope", selection: $historyScope) {
+                Text("Current Project").tag(CodexHistoryScope.currentProject)
+                Text("All Projects").tag(CodexHistoryScope.allProjects)
+            }
+
+            Button {
+                showArchivedThreads.toggle()
+                Task { await refreshHistory() }
+            } label: {
+                Label(showArchivedThreads ? "Hide Archived" : "Show Archived", systemImage: "archivebox")
+            }
+
+            Button {
+                Task { await refreshHistory() }
+            } label: {
+                Label("Refresh", systemImage: "arrow.clockwise")
+            }
+            .disabled(!canUseHistoryActions)
+        } label: {
+            CodexOverflowMenuLabel()
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Conversation Actions")
     }
 
     private var codexHomeSearchBar: some View {
-        HStack(alignment: .bottom, spacing: 10) {
-            modelSettingsButton
-
-            HStack(spacing: 8) {
-                Image(systemName: "magnifyingglass")
-                    .foregroundStyle(.secondary)
-                TextField("Search projects or conversations", text: $historySearch)
-                    .textInputAutocapitalization(.never)
-                    .autocorrectionDisabled()
-                    .submitLabel(.search)
-                    .onSubmit {
-                        Task { await refreshHistory() }
-                    }
+        HStack(alignment: .center, spacing: 10) {
+            CodexSearchField(
+                placeholder: "Search projects or conversations",
+                text: $historySearch
+            ) {
+                Task { await refreshHistory() }
             }
-            .padding(.horizontal, 10)
-            .padding(.vertical, 9)
-            .background(Color(.secondarySystemBackground), in: RoundedRectangle(cornerRadius: 8))
-            .frame(maxWidth: .infinity)
 
-            Button {
+            CodexActionIconButton(
+                systemImage: "square.and.pencil",
+                accessibilityLabel: "New Conversation",
+                isEnabled: snapshot.status == .connected
+            ) {
                 beginDraftChat()
-            } label: {
-                Label("Chat", systemImage: "bubble.left.and.text.bubble.right.fill")
             }
-            .buttonStyle(.borderedProminent)
-            .disabled(!canUseProjectActions)
-            .accessibilityLabel("Enter Codex Chat")
         }
-        .padding(12)
-        .background(.bar)
     }
 
     private var projectSearchBar: some View {
-        HStack(alignment: .bottom, spacing: 10) {
-            modelSettingsButton
-
-            HStack(spacing: 8) {
-                Image(systemName: "magnifyingglass")
-                    .foregroundStyle(.secondary)
-                TextField("Search this project", text: $historySearch)
-                    .textInputAutocapitalization(.never)
-                    .autocorrectionDisabled()
-                    .submitLabel(.search)
-                    .onSubmit {
-                        Task { await refreshHistory() }
-                    }
+        HStack(alignment: .center, spacing: 10) {
+            CodexSearchField(
+                placeholder: "Search this project",
+                text: $historySearch
+            ) {
+                Task { await refreshHistory() }
             }
-            .padding(.horizontal, 10)
-            .padding(.vertical, 9)
-            .background(Color(.secondarySystemBackground), in: RoundedRectangle(cornerRadius: 8))
-            .frame(maxWidth: .infinity)
 
-            Button {
+            CodexActionIconButton(
+                systemImage: "square.and.pencil",
+                accessibilityLabel: "New Conversation",
+                isEnabled: canUseProjectActions
+            ) {
                 beginDraftChat()
-            } label: {
-                Label("Chat", systemImage: "bubble.left.and.text.bubble.right.fill")
             }
-            .buttonStyle(.borderedProminent)
-            .disabled(!canUseProjectActions)
-            .accessibilityLabel("Start Chat In Project")
         }
-        .padding(12)
-        .background(.bar)
     }
 
     private var composer: some View {
-        HStack(alignment: .bottom, spacing: 10) {
-            modelSettingsButton
-
-            TextField("Message Codex", text: $draft, axis: .vertical)
-                .lineLimit(1...5)
-                .textFieldStyle(.roundedBorder)
-                .textInputAutocapitalization(.sentences)
-
-            Button {
-                sendDraft()
-            } label: {
-                Image(systemName: snapshot.turnActive ? "arrow.turn.down.right" : "paperplane.fill")
+        VStack(spacing: 4) {
+            if snapshot.turnActive {
+                CodexTurnStatusRow(onStop: onInterruptTurn)
             }
-            .buttonStyle(.borderedProminent)
-            .disabled(!canSend)
-            .accessibilityLabel("Send")
+
+            HStack(alignment: .bottom, spacing: 10) {
+                CodexMessageInput(
+                    text: $draft,
+                    placeholder: snapshot.turnActive ? "Steer Codex" : "Message Codex",
+                    isActiveTurn: snapshot.turnActive
+                )
+
+                if canSend {
+                    CodexActionIconButton(
+                        systemImage: snapshot.turnActive ? "arrow.turn.down.right" : "paperplane.fill",
+                        accessibilityLabel: snapshot.turnActive ? "Steer Codex" : "Send",
+                        isEnabled: true
+                    ) {
+                        sendDraft()
+                    }
+                }
+            }
         }
-        .padding(12)
+        .padding(.horizontal, 12)
+        .padding(.top, snapshot.turnActive ? 6 : 8)
+        .padding(.bottom, 10)
         .background(.bar)
     }
 
     private var draftComposer: some View {
         HStack(alignment: .bottom, spacing: 10) {
-            modelSettingsButton
+            CodexMessageInput(text: $draft)
 
-            TextField("Message Codex", text: $draft, axis: .vertical)
-                .lineLimit(1...5)
-                .textFieldStyle(.roundedBorder)
-                .textInputAutocapitalization(.sentences)
-
-            Button {
-                Task { await sendInitialDraft() }
-            } label: {
-                if isStartingDraftThread {
-                    ProgressView()
-                        .controlSize(.small)
-                } else {
-                    Image(systemName: "paperplane.fill")
+            if canSendInitialDraft || isStartingDraftThread {
+                CodexActionIconButton(
+                    systemImage: "paperplane.fill",
+                    accessibilityLabel: "Send",
+                    isEnabled: canSendInitialDraft,
+                    isLoading: isStartingDraftThread
+                ) {
+                    Task { await sendInitialDraft() }
                 }
             }
-            .buttonStyle(.borderedProminent)
-            .disabled(!canSendInitialDraft)
-            .accessibilityLabel("Send")
         }
         .padding(12)
         .background(.bar)
@@ -1245,23 +1345,17 @@ struct CodexScreen: View {
         return modelOptions.first(where: { $0.id == model })?.name ?? model
     }
 
-    private var modelSettingsButton: some View {
-        Button {
-            settingsModel = snapshot.settings.model ?? ""
-            settingsApprovalPolicy = snapshot.settings.approvalPolicy ?? ""
-            settingsSandbox = snapshot.settings.sandbox ?? ""
-            showingSettings = true
-        } label: {
-            HStack(spacing: 6) {
-                Image(systemName: "slider.horizontal.3")
-                Text(selectedModelTitle)
-                    .lineLimit(1)
-                    .truncationMode(.tail)
-            }
-        }
-        .buttonStyle(.bordered)
-        .frame(maxWidth: 145)
-        .accessibilityLabel("Codex Settings")
+    private var settingsCanApply: Bool {
+        settingsModel.trimmingCharacters(in: .whitespacesAndNewlines) != (snapshot.settings.model ?? "").trimmingCharacters(in: .whitespacesAndNewlines) ||
+            settingsApprovalPolicy != (snapshot.settings.approvalPolicy ?? "") ||
+            settingsSandbox != (snapshot.settings.sandbox ?? "")
+    }
+
+    private func presentCodexSettings() {
+        settingsModel = snapshot.settings.model ?? ""
+        settingsApprovalPolicy = snapshot.settings.approvalPolicy ?? ""
+        settingsSandbox = snapshot.settings.sandbox ?? ""
+        showingSettings = true
     }
 
     private var selectedProjectPath: String {
@@ -1272,12 +1366,12 @@ struct CodexScreen: View {
         historySearch.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
-    private var historyScopeTitle: String {
+    private var historyScopeDetail: String? {
         switch historyScope {
         case .currentProject:
             "Current project"
         case .allProjects:
-            "All projects"
+            nil
         }
     }
 
@@ -1408,8 +1502,6 @@ struct CodexScreen: View {
     }
 
     private func beginDraftChat() {
-        let path = selectedProjectPath
-        guard !path.isEmpty else { return }
         draftReturnRoute = homeRoute
         homeRoute = .draft
     }
@@ -1457,18 +1549,277 @@ private enum CodexHistoryScope: Hashable {
 
 private struct CodexSectionHeader: View {
     let title: String
-    let detail: String
+    var detail: String?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 2) {
             Text(title)
                 .font(.headline)
                 .foregroundStyle(.primary)
-            Text(detail)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
+            if let detail, !detail.isEmpty {
+                Text(detail)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
         }
+    }
+}
+
+private struct CodexOverflowMenuLabel: View {
+    var body: some View {
+        Image(systemName: "ellipsis")
+            .font(.system(size: 17, weight: .semibold))
+            .frame(width: 30, height: 30)
+            .foregroundStyle(.secondary)
+            .contentShape(Circle())
+    }
+}
+
+private struct CodexBackButton: View {
+    let accessibilityLabel: String
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: "chevron.left")
+                .font(.system(size: 15, weight: .semibold))
+                .frame(width: 30, height: 30)
+                .foregroundStyle(.secondary)
+                .contentShape(Circle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(accessibilityLabel)
+    }
+}
+
+private struct CodexActionIconButton: View {
+    let systemImage: String
+    let accessibilityLabel: String
+    let isEnabled: Bool
+    var isLoading = false
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            ZStack {
+                if isLoading {
+                    ProgressView()
+                        .controlSize(.small)
+                } else {
+                    Image(systemName: systemImage)
+                        .font(.system(size: 15, weight: .semibold))
+                }
+            }
+            .frame(width: 34, height: 34)
+            .foregroundStyle(isEnabled ? ShellowTheme.accent : Color.secondary)
+            .background(Color(.tertiarySystemFill), in: RoundedRectangle(cornerRadius: 8))
+            .contentShape(RoundedRectangle(cornerRadius: 8))
+            .opacity(isEnabled ? 1 : 0.45)
+        }
+        .buttonStyle(.plain)
+        .disabled(!isEnabled || isLoading)
+        .accessibilityLabel(accessibilityLabel)
+    }
+}
+
+private struct CodexTurnStatusRow: View {
+    let onStop: () -> Void
+
+    var body: some View {
+        HStack(spacing: 8) {
+            ProgressView()
+                .controlSize(.mini)
+            Text("Working")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+            Spacer()
+            Button(action: onStop) {
+                Text("Stop")
+                    .font(.caption2.weight(.semibold))
+                    .foregroundStyle(.red)
+                    .padding(.vertical, 2)
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Interrupt Codex Turn")
+        }
+        .padding(.horizontal, 4)
+        .padding(.vertical, 1)
+    }
+}
+
+private enum CodexInlineStatusTone {
+    case neutral
+    case success
+    case warning
+}
+
+private struct CodexInlineStatusRow: View {
+    let text: String
+    var tone: CodexInlineStatusTone = .neutral
+    var isLoading = false
+
+    var body: some View {
+        HStack(spacing: 8) {
+            if isLoading {
+                ProgressView()
+                    .controlSize(.mini)
+            } else if tone == .success {
+                Image(systemName: "checkmark.circle")
+                    .font(.caption.weight(.semibold))
+            } else if tone == .warning {
+                Image(systemName: "exclamationmark.triangle")
+                    .font(.caption.weight(.semibold))
+            }
+
+            Text(text)
+                .font(.callout)
+                .lineLimit(2)
+        }
+        .foregroundStyle(foregroundStyle)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.horizontal, 4)
+        .padding(.vertical, 6)
+    }
+
+    private var foregroundStyle: Color {
+        switch tone {
+        case .neutral:
+            return .secondary
+        case .success:
+            return .green
+        case .warning:
+            return .orange
+        }
+    }
+}
+
+private struct CodexMessageInput: View {
+    @Binding var text: String
+    var placeholder = "Message Codex"
+    var isActiveTurn = false
+
+    var body: some View {
+        TextField(placeholder, text: $text, axis: .vertical)
+            .font(.body)
+            .lineLimit(1...5)
+            .textInputAutocapitalization(.sentences)
+            .tint(ShellowTheme.accent)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 8)
+            .background(inputBackground, in: RoundedRectangle(cornerRadius: 8))
+            .overlay {
+                RoundedRectangle(cornerRadius: 8)
+                    .stroke(inputStroke, lineWidth: isActiveTurn ? 1 : 0)
+            }
+            .frame(maxWidth: .infinity)
+            .accessibilityLabel(placeholder)
+    }
+
+    private var inputBackground: Color {
+        isActiveTurn ? ShellowTheme.accent.opacity(0.08) : Color(.tertiarySystemFill)
+    }
+
+    private var inputStroke: Color {
+        isActiveTurn ? ShellowTheme.accent.opacity(0.28) : .clear
+    }
+}
+
+private struct CodexLoadMoreButton: View {
+    let isLoading: Bool
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 6) {
+                if isLoading {
+                    ProgressView()
+                        .controlSize(.small)
+                } else {
+                    Image(systemName: "chevron.down")
+                        .font(.caption.weight(.semibold))
+                }
+
+                Text(isLoading ? "Loading" : "Load More")
+                    .font(.subheadline.weight(.semibold))
+            }
+            .foregroundStyle(.secondary)
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 8)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .disabled(isLoading)
+    }
+}
+
+private struct CodexSearchField: View {
+    let placeholder: String
+    @Binding var text: String
+    let onSubmit: () -> Void
+
+    var body: some View {
+        CodexInlineTextField(
+            systemImage: "magnifyingglass",
+            placeholder: placeholder,
+            text: $text,
+            submitLabel: .search,
+            onSubmit: onSubmit
+        )
+    }
+}
+
+private struct CodexInlineTextField: View {
+    let systemImage: String
+    let placeholder: String
+    @Binding var text: String
+    let submitLabel: SubmitLabel
+    let onSubmit: () -> Void
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Image(systemName: systemImage)
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(.secondary)
+
+            TextField(placeholder, text: $text)
+                .font(.subheadline)
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled()
+                .submitLabel(submitLabel)
+                .onSubmit(onSubmit)
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 8)
+        .background(Color(.tertiarySystemFill), in: RoundedRectangle(cornerRadius: 8))
+        .frame(maxWidth: .infinity)
+    }
+}
+
+private struct CodexEmptyState: View {
+    let title: String
+    let detail: String
+    let systemImage: String
+
+    var body: some View {
+        VStack(spacing: 7) {
+            Image(systemName: systemImage)
+                .font(.system(size: 18, weight: .semibold))
+                .foregroundStyle(.secondary)
+
+            VStack(spacing: 3) {
+                Text(title)
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(.primary)
+                Text(detail)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+            }
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 18)
+        .padding(.horizontal, 12)
     }
 }
 
@@ -1482,19 +1833,19 @@ private struct CodexDirectoryRow: View {
         Button(action: action) {
             HStack(spacing: 10) {
                 Image(systemName: systemImage)
-                    .font(.system(size: 15, weight: .semibold))
-                    .frame(width: 28, height: 28)
-                    .foregroundStyle(ShellowTheme.accent)
-                    .background(ShellowTheme.accent.opacity(0.12), in: RoundedRectangle(cornerRadius: 6))
+                    .font(.system(size: 14, weight: .semibold))
+                    .frame(width: 22, height: 22)
+                    .foregroundStyle(.secondary)
 
                 VStack(alignment: .leading, spacing: 2) {
                     Text(title)
-                        .font(.body.weight(.medium))
+                        .font(.body.weight(.semibold))
                         .foregroundStyle(.primary)
-                    Text(subtitle)
+                    Text(codexCompactPath(subtitle))
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
+                        .truncationMode(.middle)
                 }
 
                 Spacer()
@@ -1503,10 +1854,12 @@ private struct CodexDirectoryRow: View {
                     .font(.caption.weight(.semibold))
                     .foregroundStyle(.tertiary)
             }
-            .padding(10)
-            .background(Color(.secondarySystemBackground), in: RoundedRectangle(cornerRadius: 8))
+            .padding(.horizontal, 4)
+            .padding(.vertical, 8)
+            .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        .accessibilityLabel("\(title), \(subtitle)")
     }
 }
 
@@ -1514,6 +1867,7 @@ private struct CodexThreadRow: View {
     let thread: CodexThreadSummary
     let archived: Bool
     let isOpening: Bool
+    var showsProjectContext = true
     let resume: () -> Void
     let rename: () -> Void
     let fork: () -> Void
@@ -1522,94 +1876,89 @@ private struct CodexThreadRow: View {
     let delete: () -> Void
 
     var body: some View {
-        HStack(alignment: .top, spacing: 8) {
-            Button(action: resume) {
-                HStack(alignment: .top, spacing: 10) {
-                    Image(systemName: "bubble.left.and.text.bubble.right")
-                        .font(.system(size: 15, weight: .semibold))
-                        .frame(width: 28, height: 28)
-                        .foregroundStyle(.green)
-                        .background(Color.green.opacity(0.12), in: RoundedRectangle(cornerRadius: 6))
+        Button(action: resume) {
+            HStack(alignment: .top, spacing: 8) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(thread.displayTitle)
+                        .font(.body.weight(.semibold))
+                        .foregroundStyle(.primary)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                    Text(historyMeta)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
 
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text(thread.displayTitle)
-                            .font(.body.weight(.semibold))
-                            .foregroundStyle(.primary)
-                            .lineLimit(2)
-                        Text(thread.cwd)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                            .lineLimit(1)
-                        Text(historyMeta)
-                            .font(.caption2)
-                            .foregroundStyle(.tertiary)
-                    }
-
-                    Spacer(minLength: 0)
+                if isOpening {
+                    ProgressView()
+                        .controlSize(.mini)
+                        .frame(width: 30, height: 30)
                 }
             }
-            .buttonStyle(.plain)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .disabled(isOpening)
-
-            if isOpening {
-                ProgressView()
-                    .controlSize(.small)
-                    .frame(width: 32, height: 32)
-            } else {
-                Button(action: resume) {
-                    Image(systemName: "arrow.forward.circle")
-                        .font(.system(size: 19, weight: .semibold))
-                        .frame(width: 32, height: 32)
-                }
-                .buttonStyle(.plain)
-                .foregroundStyle(ShellowTheme.accent)
-                .accessibilityLabel("Open Thread")
-            }
-
-            Menu {
-                Button(action: rename) {
-                    Label("Rename", systemImage: "pencil")
-                }
-                Button(action: fork) {
-                    Label("Fork", systemImage: "arrow.triangle.branch")
-                }
-                if archived {
-                    Button(action: unarchive) {
-                        Label("Unarchive", systemImage: "archivebox")
-                    }
-                } else {
-                    Button(action: archive) {
-                        Label("Archive", systemImage: "archivebox.fill")
-                    }
-                }
-                Button(role: .destructive, action: delete) {
-                    Label("Delete", systemImage: "trash")
-                }
-            } label: {
-                Image(systemName: "ellipsis.circle")
-                    .font(.system(size: 19, weight: .semibold))
-                    .frame(width: 32, height: 32)
-                    .foregroundStyle(.secondary)
-            }
-            .buttonStyle(.plain)
-            .accessibilityLabel("Thread Actions")
+            .padding(.horizontal, 4)
+            .padding(.vertical, 8)
+            .contentShape(Rectangle())
         }
-        .padding(10)
-        .background(Color(.secondarySystemBackground), in: RoundedRectangle(cornerRadius: 8))
+        .buttonStyle(.plain)
+        .disabled(isOpening)
+        .contextMenu {
+            actionsMenu
+        }
+        .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+            Button(role: .destructive, action: delete) {
+                Label("Delete", systemImage: "trash")
+            }
+            Button(action: archived ? unarchive : archive) {
+                Label(archived ? "Unarchive" : "Archive", systemImage: archived ? "archivebox" : "archivebox.fill")
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var actionsMenu: some View {
+        Button(action: rename) {
+            Label("Rename", systemImage: "pencil")
+        }
+        Button(action: fork) {
+            Label("Fork", systemImage: "arrow.triangle.branch")
+        }
+        if archived {
+            Button(action: unarchive) {
+                Label("Unarchive", systemImage: "archivebox")
+            }
+        } else {
+            Button(action: archive) {
+                Label("Archive", systemImage: "archivebox.fill")
+            }
+        }
+        Button(role: .destructive, action: delete) {
+            Label("Delete", systemImage: "trash")
+        }
     }
 
     private var historyMeta: String {
         let date = Date(timeIntervalSince1970: TimeInterval(thread.updatedAt))
-        var parts = [
-            date.formatted(date: .abbreviated, time: .shortened),
-            thread.status
-        ]
+        var parts: [String] = []
+        if showsProjectContext {
+            parts.append(lastPathComponent(thread.cwd))
+        }
+        parts.append(Self.compactDateFormatter.string(from: date))
+        parts.append(thread.status)
+        parts = parts.filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
         if thread.forkedFromId != nil {
             parts.append("fork")
         }
-        return parts.joined(separator: "  ")
+        return parts.joined(separator: " · ")
     }
+
+    private static let compactDateFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.locale = .current
+        formatter.dateFormat = "MMM d, HH:mm"
+        return formatter
+    }()
 }
 
 private struct CodexMessageRow: View {
@@ -1624,39 +1973,58 @@ private struct CodexMessageRow: View {
         }
     }
 
+    @ViewBuilder
     private var primaryBody: some View {
-        HStack(alignment: .top, spacing: 10) {
-            Image(systemName: icon)
-                .font(.system(size: 14, weight: .semibold))
-                .frame(width: 24, height: 24)
-                .foregroundStyle(tint)
-                .background(tint.opacity(0.12), in: RoundedRectangle(cornerRadius: 6))
+        if usesPrimaryChrome {
+            HStack(alignment: .top, spacing: 10) {
+                Image(systemName: icon)
+                    .font(.system(size: 14, weight: .semibold))
+                    .frame(width: 22, height: 22)
+                    .foregroundStyle(tint)
+                    .background(iconBackground, in: RoundedRectangle(cornerRadius: 6))
 
+                CodexMarkdownContent(message: message)
+                    .foregroundStyle(foreground)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .padding(.horizontal, primaryHorizontalPadding)
+            .padding(.vertical, primaryVerticalPadding)
+            .background(primaryContainer, in: RoundedRectangle(cornerRadius: 8))
+        } else {
             CodexMarkdownContent(message: message)
                 .foregroundStyle(foreground)
                 .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, primaryHorizontalPadding)
+                .padding(.vertical, primaryVerticalPadding)
         }
-        .padding(10)
-        .background(background, in: RoundedRectangle(cornerRadius: 8))
     }
 
     private var compactBody: some View {
-        VStack(alignment: .leading, spacing: 7) {
+        VStack(alignment: .leading, spacing: isRoutineCommandCompletion ? 4 : 6) {
             HStack(alignment: .top, spacing: 8) {
-                Text(compactGlyph)
-                    .font(.caption.weight(.semibold).monospaced())
-                    .foregroundStyle(.secondary)
-                    .frame(width: 18)
+                Image(systemName: isRoutineCommandCompletion ? "checkmark.circle" : compactIcon)
+                    .font(.system(size: isRoutineCommandCompletion ? 10 : 11, weight: .semibold))
+                    .foregroundStyle(isRoutineCommandCompletion ? .tertiary : .secondary)
+                    .frame(width: 16, height: 16)
+                    .padding(.top, 2)
 
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(message.title ?? compactTitle)
-                        .font(.caption.weight(.semibold))
-                        .foregroundStyle(.primary)
-                    if !compactText.isEmpty {
-                        Text(compactText)
-                            .font(.footnote)
-                            .foregroundStyle(.secondary)
-                            .lineLimit(isExpanded ? nil : 2)
+                if isCompactStatus {
+                    Text(compactText.isEmpty ? (message.title ?? compactTitle) : compactText)
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(isExpanded ? nil : 2)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                } else {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(message.title ?? compactTitle)
+                            .font(isRoutineCommandCompletion ? .caption2 : .caption.weight(.semibold))
+                            .foregroundStyle(isRoutineCommandCompletion ? .secondary : .primary)
+                        if !compactText.isEmpty, !hidesCompactSecondaryText {
+                            Text(compactText)
+                                .font(.footnote)
+                                .foregroundStyle(.secondary)
+                                .lineLimit(isExpanded ? nil : 2)
+                        }
                     }
                 }
 
@@ -1666,15 +2034,24 @@ private struct CodexMessageRow: View {
                     ProgressView()
                         .controlSize(.mini)
                 } else if hasCompactDetails {
-                    Text(isExpanded ? "Hide" : "Details")
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
+                    Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
+                        .font(.caption2.weight(.semibold))
+                        .foregroundStyle(.tertiary)
+                        .frame(width: 18, height: 18)
                 }
             }
 
             if isExpanded {
-                if let detail = message.detail, !detail.isEmpty, detail != compactText {
+                if hidesCompactSecondaryText, !compactText.isEmpty {
+                    Text(compactText)
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                } else if let detail = message.detail, !detail.isEmpty, detail != compactText {
                     Text(detail)
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                } else if isCompactStatus, rawCompactText != compactText {
+                    Text(rawCompactText)
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                 }
@@ -1688,8 +2065,8 @@ private struct CodexMessageRow: View {
                 }
             }
         }
-        .padding(10)
-        .background(Color(.secondarySystemBackground).opacity(0.72), in: RoundedRectangle(cornerRadius: 8))
+        .padding(.horizontal, 4)
+        .padding(.vertical, isRoutineCommandCompletion ? 3 : 6)
         .contentShape(Rectangle())
         .onTapGesture {
             guard hasCompactDetails else { return }
@@ -1700,14 +2077,52 @@ private struct CodexMessageRow: View {
     }
 
     private var compactText: String {
+        let rawText = rawCompactText
+        guard isCompactStatus else {
+            return rawText
+        }
+        return normalizedCompactStatusText(rawText)
+    }
+
+    private var rawCompactText: String {
         if !message.text.isEmpty {
             return message.text
         }
         return message.detail ?? ""
     }
 
+    private func normalizedCompactStatusText(_ text: String) -> String {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.hasPrefix("app-server sent non-JSON output") else {
+            return text
+        }
+        if let openParen = trimmed.firstIndex(of: "("),
+           let closeParen = trimmed[openParen...].firstIndex(of: ")") {
+            return "Server output was not JSON \(trimmed[openParen...closeParen])"
+        }
+        return "Server output was not JSON"
+    }
+
+    private var isCompactStatus: Bool {
+        message.kind == .status
+    }
+
+    private var hidesCompactSecondaryText: Bool {
+        message.title?.trimmingCharacters(in: .whitespacesAndNewlines) == "Command completed"
+    }
+
+    private var isRoutineCommandCompletion: Bool {
+        hidesCompactSecondaryText && !message.isStreaming
+    }
+
     private var hasCompactDetails: Bool {
         if let transcript = message.transcript, !transcript.isEmpty {
+            return true
+        }
+        if hidesCompactSecondaryText, !compactText.isEmpty {
+            return true
+        }
+        if isCompactStatus, rawCompactText != compactText {
             return true
         }
         if let detail = message.detail, !detail.isEmpty, detail != compactText {
@@ -1739,24 +2154,24 @@ private struct CodexMessageRow: View {
         }
     }
 
-    private var compactGlyph: String {
+    private var compactIcon: String {
         switch message.kind {
         case .command, .commandOutput:
-            "$"
+            "terminal"
         case .fileChange:
-            "+"
+            "doc.text"
         case .reasoningSummary:
-            "..."
+            "brain.head.profile"
         case .status:
-            "i"
+            "info.circle"
         case .toolCall, .toolResult:
-            ">"
+            "wrench.and.screwdriver"
         case .plan:
-            "#"
+            "checklist"
         case .commentary, .finalAnswer:
-            "*"
+            "sparkles"
         case .userMessage:
-            "@"
+            "person"
         }
     }
 
@@ -1780,11 +2195,10 @@ private struct CodexMessageRow: View {
         }
     }
 
-    private var background: Color {
+    private var primaryContainer: Color {
         switch message.role {
         case .user: ShellowTheme.accent.opacity(0.08)
-        case .assistant: Color(.secondarySystemBackground)
-        case .status: Color(.tertiarySystemBackground)
+        case .assistant, .status: .clear
         case .tool, .commandOutput: Color(.secondarySystemBackground)
         }
     }
@@ -1793,11 +2207,50 @@ private struct CodexMessageRow: View {
         message.role == .status ? .secondary : .primary
     }
 
+    private var iconBackground: Color {
+        message.role == .user ? tint.opacity(0.12) : .clear
+    }
+
+    private var usesPrimaryChrome: Bool {
+        switch message.role {
+        case .user, .tool, .commandOutput:
+            true
+        case .assistant, .status:
+            false
+        }
+    }
+
+    private var primaryHorizontalPadding: CGFloat {
+        switch message.role {
+        case .assistant, .status:
+            4
+        case .user, .tool, .commandOutput:
+            10
+        }
+    }
+
+    private var primaryVerticalPadding: CGFloat {
+        switch message.role {
+        case .assistant, .status:
+            6
+        case .user, .tool, .commandOutput:
+            10
+        }
+    }
+
 }
 
 private extension CodexMessage {
     var isVisibleInChat: Bool {
-        visibility == .primary || visibility == .compact
+        (visibility == .primary || visibility == .compact) && !isRoutineLifecycleStatus
+    }
+
+    private var isRoutineLifecycleStatus: Bool {
+        guard kind == .status, visibility == .compact else {
+            return false
+        }
+        let body = text.isEmpty ? (detail ?? "") : text
+        return body.trimmingCharacters(in: .whitespacesAndNewlines) == "Codex thread resumed."
     }
 }
 
@@ -2151,12 +2604,13 @@ private struct CodexApprovalRow: View {
     let decide: (String) -> Void
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
+        VStack(alignment: .leading, spacing: 9) {
             HStack(spacing: 8) {
-                Image(systemName: "hand.raised.fill")
+                Image(systemName: "hand.raised")
+                    .font(.caption.weight(.semibold))
                     .foregroundStyle(.orange)
                 Text(approval.title)
-                    .font(.headline)
+                    .font(.subheadline.weight(.semibold))
                 Spacer()
             }
 
@@ -2168,34 +2622,54 @@ private struct CodexApprovalRow: View {
                 Text(cwd)
                     .font(.caption.monospaced())
                     .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
             }
 
-            HStack {
+            HStack(spacing: 14) {
                 Button {
                     decide("accept")
                 } label: {
                     Label("Allow", systemImage: "checkmark")
+                        .font(.caption.weight(.semibold))
+                        .labelStyle(.titleAndIcon)
+                        .padding(.vertical, 4)
                 }
-                .buttonStyle(.borderedProminent)
+                .buttonStyle(.plain)
+                .foregroundStyle(ShellowTheme.accent)
 
                 Button {
                     decide("acceptForSession")
                 } label: {
-                    Label("Session", systemImage: "checkmark.seal")
+                    Text("Session")
+                        .font(.caption.weight(.semibold))
+                        .padding(.vertical, 4)
                 }
-                .buttonStyle(.bordered)
+                .buttonStyle(.plain)
+                .foregroundStyle(.secondary)
+
+                Spacer(minLength: 4)
 
                 Button(role: .destructive) {
                     decide("decline")
                 } label: {
-                    Label("Deny", systemImage: "xmark")
+                    Text("Deny")
+                        .font(.caption.weight(.semibold))
+                        .padding(.vertical, 4)
                 }
-                .buttonStyle(.bordered)
+                .buttonStyle(.plain)
             }
-            .labelStyle(.iconOnly)
+            .padding(.top, 2)
         }
-        .padding(12)
-        .background(Color.orange.opacity(0.12), in: RoundedRectangle(cornerRadius: 8))
+        .padding(.horizontal, 14)
+        .padding(.vertical, 12)
+        .background(Color(.secondarySystemBackground), in: RoundedRectangle(cornerRadius: 8))
+        .overlay(alignment: .leading) {
+            Rectangle()
+                .fill(Color.orange.opacity(0.75))
+                .frame(width: 3)
+        }
+        .clipShape(RoundedRectangle(cornerRadius: 8))
     }
 }
 
@@ -2206,6 +2680,7 @@ private struct CodexSettingsSheet: View {
     let modelsError: String?
     @Binding var approvalPolicy: String
     @Binding var sandbox: String
+    let canApply: Bool
     let apply: () -> Void
 
     @Environment(\.dismiss) private var dismiss
@@ -2230,13 +2705,9 @@ private struct CodexSettingsSheet: View {
                         }
                     }
                     if isLoadingModels {
-                        ProgressView()
-                            .controlSize(.small)
+                        CodexInlineStatusRow(text: "Loading models", isLoading: true)
                     } else if let modelsError {
-                        Text(modelsError)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                            .lineLimit(2)
+                        CodexInlineStatusRow(text: modelsError, tone: .warning)
                     }
                 }
 
@@ -2271,6 +2742,7 @@ private struct CodexSettingsSheet: View {
                         apply()
                         dismiss()
                     }
+                    .disabled(!canApply)
                 }
             }
         }
@@ -2313,24 +2785,40 @@ private func lastPathComponent(_ path: String) -> String {
     return trimmed.split(separator: "/").last.map(String.init) ?? path
 }
 
+private func codexCompactPath(_ path: String) -> String {
+    let trimmed = path.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !trimmed.isEmpty else {
+        return path
+    }
+
+    let components = trimmed
+        .trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        .split(separator: "/")
+        .map(String.init)
+        .filter { !$0.isEmpty }
+    guard !components.isEmpty else {
+        return trimmed
+    }
+
+    if components.count >= 2, components[0] == "Users" {
+        let remainder = components.dropFirst(2)
+        return remainder.isEmpty ? "~" : "~/" + remainder.joined(separator: "/")
+    }
+
+    return trimmed.hasPrefix("/") ? "/" + components.joined(separator: "/") : components.joined(separator: "/")
+}
+
 func privateKeyLooksUsable(_ value: String) -> Bool {
     value.contains("BEGIN") && value.contains("PRIVATE KEY")
 }
 
 private struct HostProfileRow: View {
     let profile: HostProfile
-    let connectTerminal: () -> Void
-    let connectCodex: () -> Void
+    let open: () -> Void
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
+        Button(action: open) {
             HStack(spacing: 12) {
-                Image(systemName: "server.rack")
-                    .font(.system(size: 17, weight: .semibold))
-                    .frame(width: 34, height: 34)
-                    .foregroundStyle(ShellowTheme.accent)
-                    .background(ShellowTheme.accent.opacity(0.14), in: RoundedRectangle(cornerRadius: 8))
-
                 VStack(alignment: .leading, spacing: 3) {
                     Text(profile.name)
                         .font(.body.weight(.semibold))
@@ -2343,23 +2831,15 @@ private struct HostProfileRow: View {
                 }
 
                 Spacer()
-            }
 
-            HStack(spacing: 10) {
-                Button(action: connectTerminal) {
-                    Label("Terminal", systemImage: "terminal")
-                        .frame(maxWidth: .infinity)
-                }
-                .buttonStyle(.bordered)
-
-                Button(action: connectCodex) {
-                    Label("Codex", systemImage: "bubble.left.and.text.bubble.right")
-                        .frame(maxWidth: .infinity)
-                }
-                .buttonStyle(.borderedProminent)
+                Image(systemName: "chevron.right")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.tertiary)
             }
+            .padding(.vertical, 6)
+            .contentShape(Rectangle())
         }
-        .padding(.vertical, 6)
+        .buttonStyle(.plain)
     }
 }
 

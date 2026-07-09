@@ -1676,8 +1676,10 @@ private struct TerminalControlsPanel: View {
         VStack(spacing: 8) {
             TerminalInputBar(
                 isSearchVisible: $isSearchVisible,
+                isAltArmed: $isAltArmed,
                 selectedText: selectedText,
                 selectedLink: selectedLink,
+                applicationCursorKeys: applicationCursorKeys,
                 onEnter: onEnter,
                 onClearTerminal: onClearTerminal,
                 onResetTerminal: onResetTerminal,
@@ -1686,7 +1688,8 @@ private struct TerminalControlsPanel: View {
                 onCopySelection: onCopySelection,
                 onCopyLink: onCopyLink,
                 clearSelection: clearSelection,
-                onPasteClipboard: onPasteClipboard
+                onPasteClipboard: onPasteClipboard,
+                sendInput: sendInput
             )
 
             if showKeyboardToolbar {
@@ -1711,8 +1714,10 @@ private struct TerminalControlsPanel: View {
 
 private struct TerminalInputBar: View {
     @Binding var isSearchVisible: Bool
+    @Binding var isAltArmed: Bool
     let selectedText: String?
     let selectedLink: String?
+    let applicationCursorKeys: Bool
     let onEnter: () -> Void
     let onClearTerminal: () -> Void
     let onResetTerminal: () -> Void
@@ -1722,73 +1727,62 @@ private struct TerminalInputBar: View {
     let onCopyLink: () -> Void
     let clearSelection: () -> Void
     let onPasteClipboard: () -> Void
+    let sendInput: (String) -> Void
 
     var body: some View {
         HStack(spacing: 10) {
-            ScrollView(.horizontal) {
-                HStack(spacing: 10) {
-                    TerminalIconButton(
-                        systemName: "trash",
-                        accessibilityLabel: "Clear Terminal",
-                        action: onClearTerminal
-                    )
-                    TerminalIconButton(
-                        systemName: "arrow.counterclockwise",
-                        accessibilityLabel: "Reset Terminal",
-                        action: onResetTerminal
-                    )
-                    TerminalIconButton(
-                        systemName: "square.and.arrow.down",
-                        accessibilityLabel: "Save Transcript",
-                        action: onSaveTranscript
-                    )
-                    TerminalIconButton(
-                        systemName: "doc.on.doc",
-                        accessibilityLabel: "Copy Terminal",
-                        action: onCopyTerminal
-                    )
-                    TerminalIconButton(
-                        systemName: "magnifyingglass",
-                        accessibilityLabel: "Search Terminal",
-                        foreground: isSearchVisible ? ShellowTheme.accent : ShellowTheme.terminalText
-                    ) {
-                        isSearchVisible.toggle()
-                    }
-
-                    if selectedText != nil {
-                        TerminalIconButton(
-                            systemName: "doc.on.doc.fill",
-                            accessibilityLabel: "Copy Selection",
-                            foreground: ShellowTheme.accent,
-                            action: onCopySelection
-                        )
-
-                        if selectedLink != nil {
-                            TerminalIconButton(
-                                systemName: "link",
-                                accessibilityLabel: "Copy Link",
-                                foreground: ShellowTheme.accent,
-                                action: onCopyLink
-                            )
-                        }
-
-                        TerminalIconButton(
-                            systemName: "xmark.circle",
-                            accessibilityLabel: "Clear Selection",
-                            action: clearSelection
-                        )
-                    }
-
-                    TerminalIconButton(
-                        systemName: "doc.on.clipboard",
-                        accessibilityLabel: "Paste",
-                        action: onPasteClipboard
-                    )
+            Menu {
+                Button(action: onClearTerminal) {
+                    Label("Clear Terminal", systemImage: "trash")
                 }
-                .frame(maxWidth: .infinity, alignment: .leading)
+                Button(action: onResetTerminal) {
+                    Label("Reset Terminal", systemImage: "arrow.counterclockwise")
+                }
+                Button(action: onSaveTranscript) {
+                    Label("Save Transcript", systemImage: "square.and.arrow.down")
+                }
+                Button(action: onCopyTerminal) {
+                    Label("Copy Terminal", systemImage: "doc.on.doc")
+                }
+                Button {
+                    isSearchVisible.toggle()
+                } label: {
+                    Label(isSearchVisible ? "Hide Search" : "Search", systemImage: "magnifyingglass")
+                }
+                Button(action: onPasteClipboard) {
+                    Label("Paste", systemImage: "doc.on.clipboard")
+                }
+
+                if selectedText != nil {
+                    Divider()
+                    Button(action: onCopySelection) {
+                        Label("Copy Selection", systemImage: "doc.on.doc.fill")
+                    }
+                    if selectedLink != nil {
+                        Button(action: onCopyLink) {
+                            Label("Copy Link", systemImage: "link")
+                        }
+                    }
+                    Button(action: clearSelection) {
+                        Label("Clear Selection", systemImage: "xmark.circle")
+                    }
+                }
+            } label: {
+                Image(systemName: "ellipsis.circle")
+                    .font(.system(size: 15, weight: .semibold))
+                    .frame(width: 38, height: 38)
             }
-            .scrollIndicators(.hidden)
-            .frame(maxWidth: .infinity)
+            .buttonStyle(.plain)
+            .foregroundStyle(ShellowTheme.terminalText)
+            .background(ShellowTheme.keyBackground, in: RoundedRectangle(cornerRadius: 8))
+            .accessibilityLabel("Terminal Tools")
+
+            TerminalDirectionKeyStrip(
+                applicationCursorKeys: applicationCursorKeys,
+                sendInput: sendWithOptionalAlt
+            )
+
+            Spacer(minLength: 0)
 
             TerminalIconButton(
                 systemName: "return",
@@ -1800,6 +1794,49 @@ private struct TerminalInputBar: View {
             .fixedSize()
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func sendWithOptionalAlt(_ input: String) {
+        if isAltArmed {
+            sendInput("\u{1B}" + input)
+            isAltArmed = false
+        } else {
+            sendInput(input)
+        }
+    }
+}
+
+private struct TerminalDirectionKeyStrip: View {
+    let applicationCursorKeys: Bool
+    let sendInput: (String) -> Void
+
+    var body: some View {
+        HStack(spacing: 6) {
+            TerminalIconButton(
+                systemName: "arrow.up",
+                accessibilityLabel: "Arrow Up"
+            ) {
+                sendInput(TerminalArrowKey.up.sequence(applicationCursorKeys: applicationCursorKeys))
+            }
+            TerminalIconButton(
+                systemName: "arrow.down",
+                accessibilityLabel: "Arrow Down"
+            ) {
+                sendInput(TerminalArrowKey.down.sequence(applicationCursorKeys: applicationCursorKeys))
+            }
+            TerminalIconButton(
+                systemName: "arrow.left",
+                accessibilityLabel: "Arrow Left"
+            ) {
+                sendInput(TerminalArrowKey.left.sequence(applicationCursorKeys: applicationCursorKeys))
+            }
+            TerminalIconButton(
+                systemName: "arrow.right",
+                accessibilityLabel: "Arrow Right"
+            ) {
+                sendInput(TerminalArrowKey.right.sequence(applicationCursorKeys: applicationCursorKeys))
+            }
+        }
     }
 }
 

@@ -2272,8 +2272,9 @@ impl SystemFontRasterizer {
                 .map(|face| face.font.rasterize_indexed(glyph, Self::PIXELS_PER_EM))
                 .unwrap_or_else(|| (fontdue::Metrics::default(), Vec::new())),
         };
+        let should_fallback = should_write_visible_glyph_fallback(glyph, metrics);
         if bitmap.is_empty() || metrics.width == 0 || metrics.height == 0 {
-            if matches!(glyph, GlyphKey::Codepoint(codepoint) if !codepoint.is_whitespace()) {
+            if should_fallback {
                 write_procedural_glyph_pixels(
                     index,
                     glyph,
@@ -2291,6 +2292,7 @@ impl SystemFontRasterizer {
         let origin_y = (index / columns) * cell_height;
         let x_offset = ((cell_width as i32 - metrics.width as i32) / 2).max(0);
         let y_offset = ((cell_height as i32 - metrics.height as i32) / 2).max(0);
+        let mut wrote_pixel = false;
 
         for y in 0..metrics.height as u32 {
             let dest_y = y_offset + y as i32;
@@ -2308,6 +2310,7 @@ impl SystemFontRasterizer {
                 if alpha == 0 {
                     continue;
                 }
+                wrote_pixel = true;
 
                 let offset = (((origin_y + dest_y as u32) * atlas_width + origin_x + dest_x as u32)
                     * 4) as usize;
@@ -2316,6 +2319,18 @@ impl SystemFontRasterizer {
                 pixels[offset + 2] = 255;
                 pixels[offset + 3] = alpha;
             }
+        }
+
+        if !wrote_pixel && should_fallback {
+            write_procedural_glyph_pixels(
+                index,
+                glyph,
+                cell_width,
+                cell_height,
+                columns,
+                atlas_width,
+                pixels,
+            );
         }
     }
 
@@ -2383,6 +2398,14 @@ impl SystemFontRasterizer {
 }
 
 #[cfg(feature = "native-integrations")]
+fn should_write_visible_glyph_fallback(glyph: GlyphKey, metrics: fontdue::Metrics) -> bool {
+    match glyph {
+        GlyphKey::Codepoint(glyph) => !glyph.is_whitespace() && !glyph.is_control(),
+        GlyphKey::FontGlyph { .. } => metrics.width > 0 && metrics.height > 0,
+    }
+}
+
+#[cfg(feature = "native-integrations")]
 struct SystemFontRun {
     font_index: usize,
     byte_range: std::ops::Range<usize>,
@@ -2440,8 +2463,15 @@ fn system_font_candidates() -> Vec<String> {
             "/system/fonts/RobotoMono-Regular.ttf",
             "/system/fonts/DroidSansMono.ttf",
             "/system/fonts/NotoSansMono-Regular.ttf",
+            "/system/fonts/SysSans-Hans-Regular.ttf",
+            "/system/fonts/SysFont-Hans-Regular.ttf",
+            "/system/fonts/SysSans-Hant-Regular.ttf",
+            "/system/fonts/SysFont-Hant-Regular.ttf",
+            "/system/fonts/CarroisGothicSC-Regular.ttf",
+            "/system/fonts/FZZWXBTOT_Uni.ttf",
             "/system/fonts/Roboto-Regular.ttf",
             "/system/fonts/NotoSansCJK-Regular.ttc",
+            "/system/fonts/NotoSerifCJK-Regular.ttc",
             "/system/fonts/NotoSansSC-Regular.otf",
             "/system/fonts/NotoSansCJKsc-Regular.otf",
         ]
@@ -3915,5 +3945,30 @@ mod tests {
         );
 
         assert!(pixels.iter().all(|component| *component == 0));
+    }
+
+    #[cfg(feature = "native-integrations")]
+    #[test]
+    fn visible_glyph_fallback_skips_spaces_but_keeps_shaped_glyphs_visible() {
+        let mut visible_metrics = fontdue::Metrics::default();
+        visible_metrics.width = 12;
+        visible_metrics.height = 18;
+
+        assert!(!should_write_visible_glyph_fallback(
+            GlyphKey::Codepoint(' '),
+            visible_metrics
+        ));
+        assert!(should_write_visible_glyph_fallback(
+            GlyphKey::Codepoint('中'),
+            fontdue::Metrics::default()
+        ));
+        assert!(should_write_visible_glyph_fallback(
+            GlyphKey::FontGlyph { font: 1, glyph: 42 },
+            visible_metrics
+        ));
+        assert!(!should_write_visible_glyph_fallback(
+            GlyphKey::FontGlyph { font: 1, glyph: 3 },
+            fontdue::Metrics::default()
+        ));
     }
 }
