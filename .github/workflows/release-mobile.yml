@@ -34,6 +34,10 @@ on:
         description: Optional store version name, for example 0.1.1
         required: false
         type: string
+      build_only:
+        description: Build the selected platform without signing or publishing
+        type: boolean
+        default: false
   push:
     tags:
       - "v*"
@@ -205,6 +209,7 @@ jobs:
           xcrun --sdk iphoneos --show-sdk-version
 
       - name: Validate iOS release secrets
+        if: ${{ !inputs.build_only }}
         shell: bash
         run: |
           set -euo pipefail
@@ -245,22 +250,32 @@ jobs:
         with:
           version: ${{ env.ZIG_VERSION }}
 
-      - name: Cache Rust and Zig build output
+      - name: Show Zig environment
+        shell: bash
+        run: |
+          set -euo pipefail
+          uname -m
+          sw_vers
+          command -v zig
+          zig version
+          zig env
+
+      - name: Cache Rust and Zig dependencies
         uses: actions/cache@v4
         with:
           path: |
             ~/.cargo/git
             ~/.cargo/registry
-            target
-            work/zig-global-cache
-          key: ${{ runner.os }}-ios-xcode-${{ env.XCODE_VERSION }}-rust-zig-${{ hashFiles('Cargo.lock') }}
+            work/zig-global-cache/p
+          key: ${{ runner.os }}-${{ runner.arch }}-ios-xcode-${{ env.XCODE_VERSION }}-zig-${{ env.ZIG_VERSION }}-deps-v2-${{ hashFiles('Cargo.lock', 'crates/libghostty-vt-sys/build.rs', 'scripts/libghostty-vt-env.sh') }}
           restore-keys: |
-            ${{ runner.os }}-ios-xcode-${{ env.XCODE_VERSION }}-rust-zig-
+            ${{ runner.os }}-${{ runner.arch }}-ios-xcode-${{ env.XCODE_VERSION }}-zig-${{ env.ZIG_VERSION }}-deps-v2-
 
       - name: Build iOS Rust framework
         run: ./scripts/build-ios-rust.sh
 
       - name: Prepare App Store Connect API key
+        if: ${{ !inputs.build_only }}
         shell: bash
         run: |
           set -euo pipefail
@@ -279,6 +294,7 @@ jobs:
           echo "APP_STORE_CONNECT_API_KEY_PATH=$asc_key_path" >> "$GITHUB_ENV"
 
       - name: Archive iOS app
+        if: ${{ !inputs.build_only }}
         shell: bash
         run: |
           set -euo pipefail
@@ -298,6 +314,7 @@ jobs:
             MARKETING_VERSION="$IOS_MARKETING_VERSION"
 
       - name: Upload archive to App Store Connect
+        if: ${{ !inputs.build_only }}
         shell: bash
         run: |
           set -euo pipefail
@@ -335,7 +352,7 @@ jobs:
             -authenticationKeyIssuerID "$APP_STORE_CONNECT_ISSUER_ID"
 
       - name: Upload iOS archive artifact
-        if: ${{ always() }}
+        if: ${{ always() && !inputs.build_only }}
         uses: actions/upload-artifact@v4
         with:
           name: shellow-ios-xcarchive

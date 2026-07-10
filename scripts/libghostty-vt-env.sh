@@ -1,9 +1,5 @@
 #!/usr/bin/env bash
 
-if [ -x /opt/homebrew/opt/zig@0.15/bin/zig ]; then
-  export PATH="/opt/homebrew/opt/zig@0.15/bin:$PATH"
-fi
-
 export ZIG_GLOBAL_CACHE_DIR="${ZIG_GLOBAL_CACHE_DIR:-$ROOT_DIR/work/zig-global-cache}"
 export LIBGHOSTTY_VT_SYS_OPTIMIZE="${LIBGHOSTTY_VT_SYS_OPTIMIZE:-ReleaseFast}"
 
