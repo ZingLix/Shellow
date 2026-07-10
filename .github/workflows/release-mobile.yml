@@ -47,6 +47,7 @@ concurrency:
 
 env:
   ZIG_VERSION: 0.15.2
+  XCODE_VERSION: 26.4.1
 
 jobs:
   android-google-play:
@@ -196,7 +197,7 @@ jobs:
       - name: Set up Xcode
         uses: maxim-lobanov/setup-xcode@v1
         with:
-          xcode-version: "26.6"
+          xcode-version: ${{ env.XCODE_VERSION }}
 
       - name: Show Xcode environment
         run: |
@@ -252,9 +253,9 @@ jobs:
             ~/.cargo/registry
             target
             work/zig-global-cache
-          key: ${{ runner.os }}-ios-rust-zig-${{ hashFiles('Cargo.lock') }}
+          key: ${{ runner.os }}-ios-xcode-${{ env.XCODE_VERSION }}-rust-zig-${{ hashFiles('Cargo.lock') }}
           restore-keys: |
-            ${{ runner.os }}-ios-rust-zig-
+            ${{ runner.os }}-ios-xcode-${{ env.XCODE_VERSION }}-rust-zig-
 
       - name: Build iOS Rust framework
         run: ./scripts/build-ios-rust.sh
