@@ -1417,7 +1417,7 @@ private fun CodexScreen(
                 showCodexSettings()
               },
             )
-            if (snapshot.status == CodexStatus.Disconnected) onReconnect?.let {
+            if (snapshot.status == CodexStatus.Disconnected || snapshot.status == CodexStatus.Failed) onReconnect?.let {
               DropdownMenuItem(
                 text = { Text("Reconnect") },
                 onClick = {
@@ -1440,7 +1440,7 @@ private fun CodexScreen(
       }
     }
 
-    snapshot.operation.lastError?.let { error ->
+    (snapshot.operation.lastError ?: snapshot.lastError)?.let { error ->
       CodexInlineStatusRow(
         text = error,
         tone = CodexInlineStatusTone.Warning,

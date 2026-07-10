@@ -7,7 +7,7 @@ use std::hash::{Hash, Hasher};
 #[cfg(feature = "native-integrations")]
 use std::ptr::NonNull;
 use std::sync::{
-    OnceLock,
+    Arc, OnceLock,
     atomic::{AtomicU64, Ordering},
 };
 
@@ -1806,7 +1806,7 @@ struct GlyphAtlasGlyphMetrics {
 
 enum GlyphAtlasRasterizer {
     #[cfg(feature = "native-integrations")]
-    FontdueSystemFont(SystemFontRasterizer),
+    FontdueSystemFont(Arc<SystemFontRasterizer>),
     ProceduralCell,
 }
 
@@ -2087,13 +2087,11 @@ impl GlyphAtlasRasterizer {
 }
 
 #[cfg(feature = "native-integrations")]
-#[derive(Clone)]
 struct SystemFontRasterizer {
     faces: Vec<SystemFontFace>,
 }
 
 #[cfg(feature = "native-integrations")]
-#[derive(Clone)]
 struct SystemFontFace {
     font: fontdue::Font,
     data: Vec<u8>,
@@ -2105,10 +2103,14 @@ impl SystemFontRasterizer {
     const PIXELS_PER_EM: f32 = 48.0;
     const EMBEDDED_MONO_FONT: &'static [u8] = include_bytes!("../assets/JetBrainsMono-Regular.ttf");
     const MAX_COLLECTION_FACES: u32 = 16;
+    const SYSTEM_FALLBACK_PROBE_GLYPHS: &'static [char] = &['中', '漢'];
 
-    fn cached() -> Option<Self> {
-        static SYSTEM_FONT_RASTERIZER: OnceLock<Option<SystemFontRasterizer>> = OnceLock::new();
-        SYSTEM_FONT_RASTERIZER.get_or_init(Self::load).clone()
+    fn cached() -> Option<Arc<Self>> {
+        static SYSTEM_FONT_RASTERIZER: OnceLock<Option<Arc<SystemFontRasterizer>>> =
+            OnceLock::new();
+        SYSTEM_FONT_RASTERIZER
+            .get_or_init(|| Self::load().map(Arc::new))
+            .clone()
     }
 
     fn load() -> Option<Self> {
@@ -2122,13 +2124,16 @@ impl SystemFontRasterizer {
                 continue;
             };
 
-            let face_count = rustybuzz::ttf_parser::fonts_in_collection(&bytes)
-                .unwrap_or(1)
-                .min(Self::MAX_COLLECTION_FACES);
-            for collection_index in 0..face_count {
-                if let Some(face) = load_system_font_face(bytes.clone(), collection_index) {
-                    faces.push(face);
-                }
+            let Some(collection_index) = first_collection_face_supporting(
+                &bytes,
+                Self::SYSTEM_FALLBACK_PROBE_GLYPHS,
+                Self::MAX_COLLECTION_FACES,
+            ) else {
+                continue;
+            };
+            if let Some(face) = load_system_font_face(bytes, collection_index) {
+                faces.push(face);
+                break;
             }
         }
 
@@ -2395,6 +2400,24 @@ impl SystemFontRasterizer {
             GlyphKey::FontGlyph { font, .. } => self.faces.get(font as usize),
         }
     }
+}
+
+#[cfg(feature = "native-integrations")]
+fn first_collection_face_supporting(
+    bytes: &[u8],
+    glyphs: &[char],
+    max_collection_faces: u32,
+) -> Option<u32> {
+    let face_count = rustybuzz::ttf_parser::fonts_in_collection(bytes)
+        .unwrap_or(1)
+        .min(max_collection_faces);
+    (0..face_count).find(|collection_index| {
+        rustybuzz::Face::from_slice(bytes, *collection_index).is_some_and(|face| {
+            glyphs
+                .iter()
+                .any(|glyph| face.glyph_index(*glyph).is_some())
+        })
+    })
 }
 
 #[cfg(feature = "native-integrations")]
@@ -3918,6 +3941,29 @@ mod tests {
         let glyph_height = terminal_glyph_quad_height(14.0, row_height);
 
         assert_eq!(glyph_height, row_height);
+    }
+
+    #[cfg(feature = "native-integrations")]
+    #[test]
+    fn system_font_rasterizer_cache_is_shared() {
+        let first = SystemFontRasterizer::cached().expect("embedded mono font should load");
+        let second = SystemFontRasterizer::cached().expect("embedded mono font should stay cached");
+
+        assert!(Arc::ptr_eq(&first, &second));
+        assert!(first.faces.len() <= 2);
+    }
+
+    #[cfg(feature = "native-integrations")]
+    #[test]
+    fn embedded_font_collection_probe_does_not_claim_cjk_coverage() {
+        assert_eq!(
+            first_collection_face_supporting(
+                SystemFontRasterizer::EMBEDDED_MONO_FONT,
+                SystemFontRasterizer::SYSTEM_FALLBACK_PROBE_GLYPHS,
+                SystemFontRasterizer::MAX_COLLECTION_FACES,
+            ),
+            None,
+        );
     }
 
     #[cfg(feature = "native-integrations")]
