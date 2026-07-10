@@ -246,10 +246,13 @@ jobs:
           targets: aarch64-apple-ios,aarch64-apple-ios-sim
 
       - name: Set up Zig
-        uses: mlugg/setup-zig@v2.2.1
-        with:
-          version: ${{ env.ZIG_VERSION }}
-          use-cache: false
+        shell: bash
+        env:
+          HOMEBREW_NO_AUTO_UPDATE: 1
+        run: |
+          set -euo pipefail
+          brew install zig@0.15
+          echo "$(brew --prefix zig@0.15)/bin" >> "$GITHUB_PATH"
 
       - name: Isolate Zig cache directories
         shell: bash
