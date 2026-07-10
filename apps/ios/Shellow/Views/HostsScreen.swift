@@ -1286,7 +1286,7 @@ struct CodexScreen: View {
 
     @ViewBuilder
     private var operationBanner: some View {
-        if let message = snapshot.operation.lastError {
+        if let message = snapshot.operation.lastError ?? snapshot.lastError {
             CodexInlineStatusRow(text: message, tone: .warning)
                 .padding(.horizontal, 14)
         } else if let message = visibleOperationSuccess {
@@ -1377,7 +1377,7 @@ struct CodexScreen: View {
                     Label("Settings", systemImage: "slider.horizontal.3")
                 }
 
-                if snapshot.status == .disconnected, let onReconnect {
+                if snapshot.status == .disconnected || snapshot.status == .failed, let onReconnect {
                     Button(action: onReconnect) {
                         Label("Reconnect", systemImage: "arrow.clockwise")
                     }

@@ -21,6 +21,7 @@
 		8B0E6E302D2A000100000001 /* ShellowCoreBridge.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8B0E6E2E2D2A000100000001 /* ShellowCoreBridge.swift */; };
 		8B0E6E312D2A000100000001 /* ShellowCore.xcframework in Frameworks */ = {isa = PBXBuildFile; fileRef = 8B0E6E2F2D2A000100000001 /* ShellowCore.xcframework */; };
 		8B0E6E342D2A000100000001 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 8B0E6E352D2A000100000001 /* Assets.xcassets */; };
+		8B0E6E362D2A000100000001 /* PrivacyInfo.xcprivacy in Resources */ = {isa = PBXBuildFile; fileRef = 8B0E6E372D2A000100000001 /* PrivacyInfo.xcprivacy */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -39,6 +40,7 @@
 		8B0E6E2E2D2A000100000001 /* ShellowCoreBridge.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShellowCoreBridge.swift; sourceTree = "<group>"; };
 		8B0E6E2F2D2A000100000001 /* ShellowCore.xcframework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.xcframework; path = ShellowCore.xcframework; sourceTree = "<group>"; };
 		8B0E6E352D2A000100000001 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+		8B0E6E372D2A000100000001 /* PrivacyInfo.xcprivacy */ = {isa = PBXFileReference; lastKnownFileType = text.xml; path = PrivacyInfo.xcprivacy; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -77,6 +79,7 @@
 				8B0E6DFE2D2A000100000001 /* AppShell.swift */,
 				8B0E6DFF2D2A000100000001 /* AppTab.swift */,
 				8B0E6E352D2A000100000001 /* Assets.xcassets */,
+				8B0E6E372D2A000100000001 /* PrivacyInfo.xcprivacy */,
 				8B0E6E332D2A000100000001 /* Bridge */,
 				8B0E6E202D2A000100000001 /* Models */,
 				8B0E6E212D2A000100000001 /* Views */,
@@ -181,6 +184,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				8B0E6E342D2A000100000001 /* Assets.xcassets in Resources */,
+				8B0E6E362D2A000100000001 /* PrivacyInfo.xcprivacy in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -338,6 +342,7 @@
 				FRAMEWORK_SEARCH_PATHS = "$(PROJECT_DIR)/Frameworks";
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_CFBundleDisplayName = Shellow;
+				INFOPLIST_KEY_ITSAppUsesNonExemptEncryption = NO;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.utilities";
 				INFOPLIST_KEY_NSLocalNetworkUsageDescription = "Shellow connects to SSH hosts on your local network.";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
@@ -367,6 +372,7 @@
 				FRAMEWORK_SEARCH_PATHS = "$(PROJECT_DIR)/Frameworks";
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_CFBundleDisplayName = Shellow;
+				INFOPLIST_KEY_ITSAppUsesNonExemptEncryption = NO;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.utilities";
 				INFOPLIST_KEY_NSLocalNetworkUsageDescription = "Shellow connects to SSH hosts on your local network.";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;

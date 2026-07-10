@@ -235,11 +235,12 @@ pub struct CodexSettingsState {
 
 impl Default for CodexSettingsState {
     fn default() -> Self {
+        let available_models = default_model_options();
         Self {
-            model: None,
+            model: available_models.first().map(|model| model.id.clone()),
             approval_policy: None,
             sandbox: None,
-            available_models: default_model_options(),
+            available_models,
             is_loading_models: false,
             models_error: None,
         }
@@ -758,6 +759,7 @@ pub struct CodexSession {
     active_turn: Option<CodexActiveTurn>,
     operation: CodexOperationState,
     settings: CodexSettingsState,
+    model_explicitly_selected: bool,
     last_error: Option<String>,
     line_buffer: String,
     next_request_id: u64,
@@ -861,6 +863,7 @@ impl CodexSession {
             active_turn: None,
             operation: CodexOperationState::idle(),
             settings: CodexSettingsState::default(),
+            model_explicitly_selected: false,
             last_error: None,
             line_buffer: String::new(),
             next_request_id: 1,
@@ -950,6 +953,7 @@ impl CodexSession {
             return Ok(self.snapshot());
         };
 
+        self.clear_error();
         let user_message_id = self.next_message_id("user");
         self.messages
             .push(CodexMessage::user(user_message_id, text.to_string()));
@@ -992,8 +996,15 @@ impl CodexSession {
         approval_policy: Option<&str>,
         sandbox: Option<&str>,
     ) -> Result<CodexSnapshot, String> {
+        self.clear_error();
+        let requested_model = normalize_setting(model).or_else(|| self.settings.model.clone());
+        let selected_model = preferred_model_id(
+            requested_model.as_deref(),
+            &self.settings.available_models,
+            None,
+        );
         self.settings = CodexSettingsState {
-            model: normalize_setting(model),
+            model: selected_model,
             approval_policy: normalize_approval_policy(approval_policy),
             sandbox: normalize_sandbox(sandbox),
             available_models: if self.settings.available_models.is_empty() {
@@ -1004,6 +1015,7 @@ impl CodexSession {
             is_loading_models: self.settings.is_loading_models,
             models_error: self.settings.models_error.clone(),
         };
+        self.model_explicitly_selected = normalize_setting(model).is_some();
         self.operation = CodexOperationState::succeeded("Codex settings updated.");
         self.bump_revision();
         Ok(self.snapshot())
@@ -1011,6 +1023,7 @@ impl CodexSession {
 
     pub fn browse_directory(&mut self, path: &str) -> Result<CodexSnapshot, String> {
         self.poll();
+        self.clear_error();
         let path = normalize_path_input(path)
             .or_else(|| self.cwd.clone())
             .or_else(|| self.remote_cwd.clone())
@@ -1032,7 +1045,8 @@ impl CodexSession {
             )?;
             if let Err(error) = self.wait_for_request(id) {
                 self.directory.is_loading = false;
-                self.directory.error = Some(error);
+                self.directory.error = Some(error.clone());
+                self.report_error_if_absent(error);
                 self.bump_revision();
             }
         }
@@ -1064,6 +1078,7 @@ impl CodexSession {
         append: bool,
     ) -> Result<CodexSnapshot, String> {
         self.poll();
+        self.clear_error();
         let cwd = normalize_path_input_opt(cwd);
         let search_term = search_term
             .map(str::trim)
@@ -1116,7 +1131,8 @@ impl CodexSession {
             if let Err(error) = self.wait_for_request(id) {
                 self.threads.is_loading = false;
                 self.threads.is_loading_more = false;
-                self.threads.error = Some(error);
+                self.threads.error = Some(error.clone());
+                self.report_error_if_absent(error);
                 self.bump_revision();
             }
         }
@@ -1133,6 +1149,7 @@ impl CodexSession {
 
     pub fn start_thread(&mut self, cwd: Option<&str>) -> Result<CodexSnapshot, String> {
         self.poll();
+        self.clear_error();
         let cwd = normalize_path_input_opt(cwd)
             .or_else(|| self.cwd.clone())
             .or_else(|| self.remote_cwd.clone());
@@ -1162,7 +1179,7 @@ impl CodexSession {
                 ClientRequestKind::ThreadStart,
             )?;
             if let Err(error) = self.wait_for_request(id) {
-                self.push_status(error);
+                self.report_error_if_absent(error);
             }
         }
 
@@ -1177,6 +1194,7 @@ impl CodexSession {
 
     pub fn resume_thread(&mut self, thread_id: &str) -> Result<CodexSnapshot, String> {
         self.poll();
+        self.clear_error();
         let thread_id = thread_id.trim();
         if thread_id.is_empty() {
             self.push_status("Choose a Codex thread to resume.");
@@ -1211,8 +1229,7 @@ impl CodexSession {
                 ClientRequestKind::ThreadResume,
             )?;
             if let Err(error) = self.wait_for_request(id) {
-                self.operation = CodexOperationState::failed(error.clone());
-                self.push_status(error);
+                self.report_error_if_absent(error);
             }
         }
 
@@ -1227,6 +1244,7 @@ impl CodexSession {
 
     pub fn read_thread(&mut self, thread_id: &str) -> Result<CodexSnapshot, String> {
         self.poll();
+        self.clear_error();
         let thread_id = thread_id.trim();
         if thread_id.is_empty() {
             self.thread_detail.error = Some("Choose a Codex thread to inspect.".to_string());
@@ -1250,7 +1268,7 @@ impl CodexSession {
             if let Err(error) = self.wait_for_request(id) {
                 self.thread_detail.is_loading = false;
                 self.thread_detail.error = Some(error.clone());
-                self.operation = CodexOperationState::failed(error);
+                self.report_error_if_absent(error);
                 self.bump_revision();
             }
         }
@@ -1264,6 +1282,7 @@ impl CodexSession {
         cursor: Option<&str>,
     ) -> Result<CodexSnapshot, String> {
         self.poll();
+        self.clear_error();
         let thread_id = thread_id.trim();
         if thread_id.is_empty() {
             return Ok(self.snapshot());
@@ -1295,7 +1314,8 @@ impl CodexSession {
             )?;
             if let Err(error) = self.wait_for_request(id) {
                 self.thread_detail.is_loading_more = false;
-                self.thread_detail.error = Some(error);
+                self.thread_detail.error = Some(error.clone());
+                self.report_error_if_absent(error);
                 self.bump_revision();
             }
         }
@@ -1345,6 +1365,7 @@ impl CodexSession {
         cwd: Option<&str>,
     ) -> Result<CodexSnapshot, String> {
         self.poll();
+        self.clear_error();
         let thread_id = thread_id.trim();
         if thread_id.is_empty() {
             self.operation = CodexOperationState::failed("Choose a Codex thread to fork.");
@@ -1371,8 +1392,7 @@ impl CodexSession {
                 ClientRequestKind::ThreadFork,
             )?;
             if let Err(error) = self.wait_for_request(id) {
-                self.operation = CodexOperationState::failed(error.clone());
-                self.push_status(error);
+                self.report_error_if_absent(error);
             }
         }
 
@@ -1381,6 +1401,7 @@ impl CodexSession {
 
     pub fn interrupt_turn(&mut self) -> Result<CodexSnapshot, String> {
         self.poll();
+        self.clear_error();
         let Some(thread_id) = self.thread_id.clone() else {
             self.push_status("No Codex thread is active.");
             return Ok(self.snapshot());
@@ -1401,8 +1422,7 @@ impl CodexSession {
                 ClientRequestKind::TurnInterrupt,
             )?;
             if let Err(error) = self.wait_for_request(id) {
-                self.operation = CodexOperationState::failed(error.clone());
-                self.push_status(error);
+                self.report_error_if_absent(error);
             }
         }
 
@@ -1520,12 +1540,31 @@ impl CodexSession {
                 "non-json app-server line bytes={}",
                 line.len()
             ));
-            self.push_status(format!(
-                "app-server sent non-JSON output ({} bytes).",
-                line.len()
-            ));
+            let output = truncate_status_message(line.to_string());
+            if app_server_output_is_error(&output) {
+                self.report_error(format!("Codex app-server: {output}"));
+            } else {
+                self.push_status(format!("Codex app-server output: {output}"));
+            }
             return;
         };
+
+        if let Some(level) = message.get("level").and_then(Value::as_str) {
+            let log_message = message
+                .pointer("/fields/message")
+                .and_then(Value::as_str)
+                .or_else(|| message.get("message").and_then(Value::as_str));
+            if let Some(log_message) = log_message {
+                if level.eq_ignore_ascii_case("error") {
+                    self.report_error(format!("Codex app-server error: {log_message}"));
+                } else if level.eq_ignore_ascii_case("warn")
+                    && log_message.to_ascii_lowercase().contains("unknown model")
+                {
+                    self.push_status(format!("Codex warning: {log_message}"));
+                }
+            }
+            return;
+        }
 
         if let Some(id) = message.get("id") {
             if message.get("method").is_some() && message.get("params").is_some() {
@@ -1557,18 +1596,12 @@ impl CodexSession {
         let started = Instant::now();
 
         if let Some(error) = message.get("error") {
-            let description = error
-                .get("message")
-                .and_then(Value::as_str)
-                .map(str::to_string)
-                .unwrap_or_else(|| error.to_string());
-            if !matches!(kind, Some(ClientRequestKind::ModelList)) {
-                self.last_error = Some(description.clone());
-            }
+            let description = describe_codex_error(error)
+                .unwrap_or_else(|| truncate_status_message(error.to_string()));
+            self.report_error(format!("Codex request failed: {description}"));
             match kind {
                 Some(ClientRequestKind::Initialize) => {
                     self.status = CodexStatus::Failed;
-                    self.push_status(format!("Codex request failed: {description}"));
                 }
                 Some(ClientRequestKind::ModelList) => {
                     self.settings.is_loading_models = false;
@@ -1591,23 +1624,17 @@ impl CodexSession {
                     self.thread_detail.is_loading_more = false;
                     self.thread_detail.error = Some(description.clone());
                 }
-                Some(ClientRequestKind::ThreadResume) => {
-                    self.operation = CodexOperationState::failed(description.clone());
+                Some(ClientRequestKind::ThreadStart) | Some(ClientRequestKind::ThreadResume) => {
                     self.thread_detail.is_loading = false;
                     self.thread_detail.error = Some(description.clone());
-                    self.push_status(format!("Codex request failed: {description}"));
                 }
-                Some(ClientRequestKind::ThreadArchive)
-                | Some(ClientRequestKind::ThreadUnarchive)
-                | Some(ClientRequestKind::ThreadDelete)
-                | Some(ClientRequestKind::ThreadRename)
-                | Some(ClientRequestKind::ThreadFork)
+                Some(ClientRequestKind::TurnStart)
                 | Some(ClientRequestKind::TurnSteer)
                 | Some(ClientRequestKind::TurnInterrupt) => {
-                    self.operation = CodexOperationState::failed(description.clone());
-                    self.push_status(format!("Codex request failed: {description}"));
+                    self.turn_active = false;
+                    self.active_turn = None;
                 }
-                _ => self.push_status(format!("Codex request failed: {description}")),
+                _ => {}
             }
             if let Some(id) = id_u64.filter(|_| known_request) {
                 self.completed_requests.insert(id, Err(description));
@@ -1629,6 +1656,7 @@ impl CodexSession {
             Some(ClientRequestKind::Initialize) => {
                 self.initialized = true;
                 self.status = CodexStatus::Connected;
+                self.clear_error();
                 self.push_status("JSON-RPC initialized.");
                 #[cfg(feature = "native-integrations")]
                 self.request_model_list();
@@ -1768,6 +1796,21 @@ impl CodexSession {
                 self.active_turn = None;
                 self.mark_streaming_messages_complete();
                 self.hide_reasoning_summaries();
+                let status = params
+                    .pointer("/turn/status")
+                    .and_then(Value::as_str)
+                    .unwrap_or("completed");
+                if let Some(description) = turn_completed_error_description(params) {
+                    self.report_error(description);
+                } else {
+                    self.clear_error();
+                    self.operation = if status == "interrupted" {
+                        CodexOperationState::succeeded("Turn interrupted.")
+                    } else {
+                        CodexOperationState::idle()
+                    };
+                    self.bump_revision();
+                }
             }
             "item/agentMessage/delta" => {
                 let item_id = params
@@ -1810,12 +1853,28 @@ impl CodexSession {
             }
             "error" => {
                 let description = params
-                    .get("message")
-                    .and_then(Value::as_str)
-                    .unwrap_or("Codex app-server reported an error")
-                    .to_string();
-                self.last_error = Some(description.clone());
-                self.push_status(description);
+                    .get("error")
+                    .and_then(describe_codex_error)
+                    .or_else(|| describe_codex_error(params))
+                    .unwrap_or_else(|| "Codex app-server reported an error.".to_string());
+                let description = if params
+                    .get("willRetry")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false)
+                {
+                    format!("{description} Codex will retry automatically.")
+                } else {
+                    description
+                };
+                self.report_error(format!("Codex error: {description}"));
+            }
+            "thread/realtime/error" => {
+                let description = params
+                    .get("error")
+                    .and_then(describe_codex_error)
+                    .or_else(|| describe_codex_error(params))
+                    .unwrap_or_else(|| "Codex realtime connection failed.".to_string());
+                self.report_error(format!("Codex realtime error: {description}"));
             }
             "remoteControl/status/changed"
             | "account/updated"
@@ -1880,11 +1939,31 @@ impl CodexSession {
             remember_unique(&mut self.projects.recent, cwd, 12);
         }
 
-        self.settings.model = message
+        let response_model = message
             .pointer("/result/model")
             .and_then(Value::as_str)
-            .map(str::to_string)
-            .or_else(|| self.settings.model.clone());
+            .and_then(clean_model_text);
+        let response_model_is_available = response_model.as_deref().is_some_and(|model| {
+            self.settings
+                .available_models
+                .iter()
+                .any(|option| option.id == model)
+        });
+        self.settings.model = preferred_model_id(
+            self.settings.model.as_deref(),
+            &self.settings.available_models,
+            response_model
+                .as_deref()
+                .filter(|_| response_model_is_available),
+        );
+        let model_warning = response_model
+            .filter(|_| !response_model_is_available)
+            .zip(self.settings.model.clone())
+            .map(|(unsupported, fallback)| {
+                format!(
+                    "Thread model {unsupported} is unavailable in this Codex app-server; using {fallback} for the next turn."
+                )
+            });
         self.settings.approval_policy = message
             .pointer("/result/approvalPolicy")
             .map(approval_policy_to_string)
@@ -1895,6 +1974,7 @@ impl CodexSession {
         self.thread_detail.is_loading = false;
         self.thread_detail.error = None;
         self.operation = CodexOperationState::succeeded(status_message);
+        self.last_error = None;
 
         if let Some(page) = message.pointer("/result/initialTurnsPage") {
             self.load_turn_page_messages(page, false);
@@ -1912,6 +1992,9 @@ impl CodexSession {
             .is_some_and(|turns| !turns.is_empty())
         {
             self.load_thread_messages(thread);
+        }
+        if let Some(model_warning) = model_warning {
+            self.push_status(model_warning);
         }
         self.push_status(status_message);
         codex_debug(format_args!(
@@ -2630,6 +2713,7 @@ impl CodexSession {
         label: &str,
     ) -> Result<CodexSnapshot, String> {
         self.poll();
+        self.clear_error();
         let thread_id = params
             .get("threadId")
             .and_then(Value::as_str)
@@ -2650,8 +2734,7 @@ impl CodexSession {
         {
             let id = self.send_request(method, params, kind)?;
             if let Err(error) = self.wait_for_request(id) {
-                self.operation = CodexOperationState::failed(error.clone());
-                self.push_status(error);
+                self.report_error_if_absent(error);
             }
         }
 
@@ -2686,11 +2769,17 @@ impl CodexSession {
     }
 
     fn apply_model_list_response(&mut self, message: &Value) {
-        let mut models = parse_model_options(message);
+        let (mut models, mut default_model) = parse_model_catalog(message);
         if models.is_empty() {
             models = default_model_options();
+            default_model = models.first().map(|model| model.id.clone());
         }
 
+        let current_model = self
+            .model_explicitly_selected
+            .then_some(self.settings.model.as_deref())
+            .flatten();
+        self.settings.model = preferred_model_id(current_model, &models, default_model.as_deref());
         self.settings.available_models = models;
         self.settings.is_loading_models = false;
         self.settings.models_error = None;
@@ -2784,15 +2873,16 @@ impl CodexSession {
                 if self.status != CodexStatus::Disconnected {
                     self.status = CodexStatus::Disconnected;
                     self.turn_active = false;
-                    self.push_status("Codex app-server closed.");
+                    self.active_turn = None;
+                    self.report_error_if_absent("Codex app-server closed unexpectedly.");
                 }
             }
             ssh::ExecStdioStatus::Failed(error) => {
                 if self.last_error.as_deref() != Some(error.as_str()) {
-                    self.last_error = Some(error.clone());
                     self.status = CodexStatus::Failed;
                     self.turn_active = false;
-                    self.push_status(error);
+                    self.active_turn = None;
+                    self.report_error(error);
                 }
             }
         }
@@ -3065,6 +3155,26 @@ impl CodexSession {
         self.bump_revision();
     }
 
+    fn clear_error(&mut self) {
+        self.last_error = None;
+        if self.operation.last_error.is_some() {
+            self.operation = CodexOperationState::idle();
+        }
+    }
+
+    fn report_error(&mut self, message: impl Into<String>) {
+        let message = truncate_status_message(message.into());
+        self.last_error = Some(message.clone());
+        self.operation = CodexOperationState::failed(message.clone());
+        self.push_status(message);
+    }
+
+    fn report_error_if_absent(&mut self, message: impl Into<String>) {
+        if self.last_error.is_none() {
+            self.report_error(message);
+        }
+    }
+
     fn next_message_id(&mut self, prefix: &str) -> String {
         let id = format!("{prefix}-{}", self.next_local_message_id);
         self.next_local_message_id = self.next_local_message_id.saturating_add(1);
@@ -3266,6 +3376,84 @@ fn truncate_status_message(value: String) -> String {
         .collect::<String>();
     truncated.push_str("\n\n[Status message truncated in Shellow preview.]");
     truncated
+}
+
+fn describe_codex_error(value: &Value) -> Option<String> {
+    if let Some(message) = value.as_str().and_then(clean_model_text) {
+        return Some(truncate_status_message(message));
+    }
+
+    let object = value.as_object()?;
+    let mut parts = Vec::new();
+    if let Some(message) = object
+        .get("message")
+        .and_then(Value::as_str)
+        .and_then(clean_model_text)
+    {
+        parts.push(message);
+    }
+    if let Some(details) = object
+        .get("additionalDetails")
+        .or_else(|| object.get("additional_details"))
+        .and_then(Value::as_str)
+        .and_then(clean_model_text)
+        .filter(|details| !parts.iter().any(|part| part == details))
+    {
+        parts.push(format!("Details: {details}"));
+    }
+    if let Some(info) = object
+        .get("codexErrorInfo")
+        .or_else(|| object.get("codex_error_info"))
+        .filter(|info| !info.is_null())
+    {
+        let info = info
+            .as_str()
+            .map(str::to_string)
+            .unwrap_or_else(|| info.to_string());
+        parts.push(format!("Code: {info}"));
+    } else if let Some(code) = object.get("code").filter(|code| !code.is_null()) {
+        parts.push(format!("Code: {code}"));
+    }
+    if let Some(data) = object.get("data").filter(|data| !data.is_null()) {
+        let data = data
+            .as_str()
+            .map(str::to_string)
+            .unwrap_or_else(|| data.to_string());
+        if !data.trim().is_empty() {
+            parts.push(format!("Data: {data}"));
+        }
+    }
+
+    if parts.is_empty() {
+        Some(truncate_status_message(value.to_string()))
+    } else {
+        Some(truncate_status_message(parts.join("\n")))
+    }
+}
+
+fn turn_completed_error_description(params: &Value) -> Option<String> {
+    (params.pointer("/turn/status").and_then(Value::as_str) == Some("failed")).then(|| {
+        let description = params
+            .pointer("/turn/error")
+            .and_then(describe_codex_error)
+            .unwrap_or_else(|| "Codex turn failed without error details.".to_string());
+        format!("Codex turn failed: {description}")
+    })
+}
+
+fn app_server_output_is_error(value: &str) -> bool {
+    let value = value.to_ascii_lowercase();
+    [
+        "error",
+        "failed",
+        "fatal",
+        "panic",
+        "not found",
+        "permission denied",
+        "operation not permitted",
+    ]
+    .iter()
+    .any(|needle| value.contains(needle))
 }
 
 fn apply_command_output_preview(message: &mut CodexMessage, output: &str) {
@@ -4036,9 +4224,10 @@ fn default_model_options() -> Vec<CodexModelOption> {
     .collect()
 }
 
-fn parse_model_options(message: &Value) -> Vec<CodexModelOption> {
+fn parse_model_catalog(message: &Value) -> (Vec<CodexModelOption>, Option<String>) {
     let result = message.get("result").unwrap_or(&Value::Null);
     let mut models = Vec::new();
+    let mut default_model = None;
 
     for candidate in [
         result.get("models"),
@@ -4053,11 +4242,56 @@ fn parse_model_options(message: &Value) -> Vec<CodexModelOption> {
     {
         collect_model_options(candidate, &mut models);
         if !models.is_empty() {
+            default_model = find_default_model_id(candidate);
             break;
         }
     }
 
-    models
+    (models, default_model)
+}
+
+fn find_default_model_id(value: &Value) -> Option<String> {
+    match value {
+        Value::Array(items) => items.iter().find_map(find_default_model_id),
+        Value::Object(object) => {
+            if object
+                .get("isDefault")
+                .or_else(|| object.get("is_default"))
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+            {
+                return parse_model_option(value, None).map(|model| model.id);
+            }
+
+            object.iter().find_map(|(key, item)| {
+                if item
+                    .get("isDefault")
+                    .or_else(|| item.get("is_default"))
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false)
+                {
+                    parse_model_option(item, Some(key)).map(|model| model.id)
+                } else {
+                    find_default_model_id(item)
+                }
+            })
+        }
+        _ => None,
+    }
+}
+
+fn preferred_model_id(
+    current: Option<&str>,
+    models: &[CodexModelOption],
+    server_default: Option<&str>,
+) -> Option<String> {
+    current
+        .filter(|current| models.iter().any(|model| model.id == *current))
+        .or_else(|| {
+            server_default.filter(|default| models.iter().any(|model| model.id == *default))
+        })
+        .map(str::to_string)
+        .or_else(|| models.first().map(|model| model.id.clone()))
 }
 
 fn collect_model_options(value: &Value, target: &mut Vec<CodexModelOption>) {
@@ -4264,6 +4498,102 @@ mod tests {
             Some("danger-full-access".to_string())
         );
         assert_eq!(normalize_sandbox(Some("root")), None);
+    }
+
+    #[test]
+    fn defaults_to_a_concrete_supported_model() {
+        let settings = CodexSettingsState::default();
+
+        assert_eq!(settings.model.as_deref(), Some("gpt-5.5"));
+        assert!(
+            settings
+                .available_models
+                .iter()
+                .any(|model| Some(model.id.as_str()) == settings.model.as_deref())
+        );
+    }
+
+    #[test]
+    fn parses_and_selects_the_app_server_default_model() {
+        let response = json!({
+            "result": {
+                "data": [
+                    {
+                        "id": "gpt-old",
+                        "model": "gpt-old",
+                        "displayName": "Old",
+                        "isDefault": false
+                    },
+                    {
+                        "id": "gpt-current",
+                        "model": "gpt-current",
+                        "displayName": "Current",
+                        "isDefault": true
+                    }
+                ]
+            }
+        });
+
+        let (models, server_default) = parse_model_catalog(&response);
+        assert_eq!(models.len(), 2);
+        assert_eq!(server_default.as_deref(), Some("gpt-current"));
+        assert_eq!(
+            preferred_model_id(Some("gpt-removed"), &models, server_default.as_deref()).as_deref(),
+            Some("gpt-current")
+        );
+        assert_eq!(
+            preferred_model_id(Some("gpt-old"), &models, server_default.as_deref()).as_deref(),
+            Some("gpt-old")
+        );
+    }
+
+    #[test]
+    fn exposes_nested_codex_error_details() {
+        let error = json!({
+            "message": "The selected model is unavailable.",
+            "additionalDetails": "Choose a model returned by model/list.",
+            "codexErrorInfo": "badRequest"
+        });
+
+        let description = describe_codex_error(&error).expect("error description");
+        assert!(description.contains("The selected model is unavailable."));
+        assert!(description.contains("Choose a model returned by model/list."));
+        assert!(description.contains("badRequest"));
+    }
+
+    #[test]
+    fn exposes_failed_turn_completion_errors() {
+        let completed = json!({
+            "threadId": "thread-1",
+            "turn": {
+                "id": "turn-1",
+                "status": "failed",
+                "items": [],
+                "error": {
+                    "message": "Model gpt-preview is not available.",
+                    "codexErrorInfo": "badRequest"
+                }
+            }
+        });
+
+        let description =
+            turn_completed_error_description(&completed).expect("failed turn description");
+        assert!(description.contains("Model gpt-preview is not available."));
+        assert!(description.contains("badRequest"));
+
+        let successful = json!({
+            "turn": { "id": "turn-2", "status": "completed", "items": [] }
+        });
+        assert_eq!(turn_completed_error_description(&successful), None);
+    }
+
+    #[test]
+    fn distinguishes_app_server_errors_from_plain_output() {
+        assert!(app_server_output_is_error(
+            "Error: failed to initialize Codex state"
+        ));
+        assert!(app_server_output_is_error("codex executable not found"));
+        assert!(!app_server_output_is_error("Codex app-server ready"));
     }
 
     #[test]
