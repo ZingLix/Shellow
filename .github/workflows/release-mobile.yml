@@ -249,6 +249,14 @@ jobs:
         uses: mlugg/setup-zig@v2.2.1
         with:
           version: ${{ env.ZIG_VERSION }}
+          use-cache: false
+
+      - name: Isolate Zig cache directories
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "ZIG_GLOBAL_CACHE_DIR=$GITHUB_WORKSPACE/work/zig-global-cache" >> "$GITHUB_ENV"
+          echo "ZIG_LOCAL_CACHE_DIR=$GITHUB_WORKSPACE/work/zig-local-cache" >> "$GITHUB_ENV"
 
       - name: Show Zig environment
         shell: bash
