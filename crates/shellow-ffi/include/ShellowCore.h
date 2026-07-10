@@ -47,6 +47,17 @@ char *shellow_engine_connect_password_exec_json(
     const char *password,
     const char *command
 );
+char *shellow_engine_connect_private_key_exec_json(
+    ShellowEngine *engine,
+    const char *name,
+    const char *host,
+    uint16_t port,
+    const char *username,
+    const char *trusted_host_key_sha256,
+    const char *private_key_pem,
+    const char *passphrase,
+    const char *command
+);
 char *shellow_engine_start_password_shell_json(
     ShellowEngine *engine,
     const char *name,

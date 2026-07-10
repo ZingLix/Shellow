@@ -217,6 +217,50 @@ final class ShellowCoreSession: @unchecked Sendable {
         }
     }
 
+    func connectPrivateKeyExec(
+        to profile: HostProfile,
+        privateKeyPEM: String,
+        passphrase: String?,
+        command: String
+    ) async -> TerminalSession {
+        await withCheckedContinuation { continuation in
+            DispatchQueue.global(qos: .userInitiated).async {
+                let result = self.withLockedEngine {
+                    let trustedHostKeySHA256 = profile.trustedHostKeySHA256 ?? ""
+                    let passphrase = passphrase ?? ""
+                    return profile.name.withCString { name in
+                        profile.host.withCString { host in
+                            profile.username.withCString { username in
+                                trustedHostKeySHA256.withCString { trustedHostKeySHA256 in
+                                    privateKeyPEM.withCString { privateKeyPEM in
+                                        passphrase.withCString { passphrase in
+                                            command.withCString { command in
+                                                self.decode(
+                                                    shellow_engine_connect_private_key_exec_json(
+                                                        self.engine,
+                                                        name,
+                                                        host,
+                                                        UInt16(clamping: profile.port),
+                                                        username,
+                                                        trustedHostKeySHA256,
+                                                        privateKeyPEM,
+                                                        passphrase,
+                                                        command
+                                                    )
+                                                )
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                continuation.resume(returning: result)
+            }
+        }
+    }
+
     func startPasswordShell(to profile: HostProfile, password: String) async -> TerminalSession {
         await withCheckedContinuation { continuation in
             DispatchQueue.global(qos: .userInitiated).async {

@@ -144,6 +144,11 @@ import xyz.zinglix.shellow.core.CodexThreadSummary
 import xyz.zinglix.shellow.core.ConnectionState
 import xyz.zinglix.shellow.core.HostProfile
 import xyz.zinglix.shellow.core.IntegrationReport
+import xyz.zinglix.shellow.core.PersistentTerminalBackend
+import xyz.zinglix.shellow.core.PersistentTerminalConfiguration
+import xyz.zinglix.shellow.core.RemoteComponentSupportLevel
+import xyz.zinglix.shellow.core.RemoteHostCapabilityProbe
+import xyz.zinglix.shellow.core.RemoteHostProbeOutcome
 import xyz.zinglix.shellow.core.ShellowCoreSession
 import xyz.zinglix.shellow.core.SSHSecretKind
 import xyz.zinglix.shellow.core.SSHSecretStore
@@ -392,6 +397,90 @@ fun ShellowApp() {
   var codexReconnectTarget by remember { mutableStateOf<CodexReconnectTarget?>(null) }
   var passwordPrompt by remember { mutableStateOf<PasswordPromptRequest?>(null) }
 
+  fun updateStoredProfile(updated: HostProfile) {
+    val index = profiles.indexOfFirst { it.id == updated.id }
+    if (index < 0) return
+    profiles[index] = updated
+    saveHostProfiles(context, profiles)
+    reconnectTarget = reconnectTarget?.takeIf { it.profile().id == updated.id }?.withProfile(updated) ?: reconnectTarget
+    codexReconnectTarget =
+      codexReconnectTarget?.takeIf { it.profile().id == updated.id }?.withProfile(updated) ?: codexReconnectTarget
+  }
+
+  fun applyCapabilityOutcome(profile: HostProfile, outcome: RemoteHostProbeOutcome) {
+    val report = outcome.report ?: return
+    val stored = profiles.firstOrNull { it.id == profile.id } ?: profile
+    val updated =
+      stored.copy(
+        trustedHostKeySha256 =
+          stored.trustedHostKeySha256
+            ?: outcome.observedHostKeySha256?.trim()?.takeIf { it.isNotEmpty() },
+        capabilityReport = report,
+      )
+    updateStoredProfile(updated)
+  }
+
+  suspend fun probeWithPassword(profile: HostProfile, password: String): RemoteHostProbeOutcome =
+    withContext(Dispatchers.IO) {
+      ShellowCoreSession().use { probeCore ->
+        RemoteHostCapabilityProbe.outcome(
+          probeCore.connectPasswordExec(profile, password, RemoteHostCapabilityProbe.command),
+        )
+      }
+    }
+
+  suspend fun probeWithPrivateKey(
+    profile: HostProfile,
+    privateKeyPem: String,
+    passphrase: String,
+  ): RemoteHostProbeOutcome =
+    withContext(Dispatchers.IO) {
+      ShellowCoreSession().use { probeCore ->
+        RemoteHostCapabilityProbe.outcome(
+          probeCore.connectPrivateKeyExec(
+            profile,
+            privateKeyPem,
+            passphrase,
+            RemoteHostCapabilityProbe.command,
+          ),
+        )
+      }
+    }
+
+  suspend fun probeWithStoredCredential(profile: HostProfile): RemoteHostProbeOutcome {
+    val savedPassword = withContext(Dispatchers.IO) { secretStore.loadSecret(profile, SSHSecretKind.Password) }
+    if (!savedPassword.isNullOrBlank()) {
+      return probeWithPassword(profile, savedPassword)
+    }
+
+    val savedKeys =
+      withContext(Dispatchers.IO) {
+        sshKeys.mapNotNull { credential ->
+          val privateKeyPem = secretStore.loadKeySecret(credential.id, SSHSecretKind.PrivateKey)
+          if (privateKeyPem.isNullOrBlank() || !privateKeyLooksUsable(privateKeyPem)) {
+            null
+          } else {
+            StoredPrivateKeyAuth(
+              credential,
+              privateKeyPem,
+              secretStore.loadKeySecret(credential.id, SSHSecretKind.Passphrase).orEmpty(),
+            )
+          }
+        }
+      }
+    if (savedKeys.isEmpty()) {
+      return RemoteHostProbeOutcome(errorMessage = "Connect once or save an SSH credential before detecting this host.")
+    }
+
+    var lastOutcome = RemoteHostProbeOutcome(errorMessage = "Saved SSH keys did not authenticate.")
+    savedKeys.forEach { key ->
+      val outcome = probeWithPrivateKey(profile, key.privateKeyPem, key.passphrase)
+      if (outcome.report != null) return outcome
+      lastOutcome = outcome
+    }
+    return lastOutcome
+  }
+
   fun captureObservedHostKeyIfNeeded(next: TerminalSession) {
     val observed = next.observedHostKeySha256?.trim().takeUnless { it.isNullOrEmpty() } ?: return
     val target = reconnectTarget ?: return
@@ -484,7 +573,14 @@ fun ShellowApp() {
       updateSession(withContext(Dispatchers.IO) { core.startPasswordShell(profile, password) })
       val command = startupCommand.trim()
       if (command.isNotEmpty() && session.state != ConnectionState.Disconnected) {
+        delay(450)
+        updateSession(withContext(Dispatchers.IO) { core.pollLiveShell() })
+      }
+      if (command.isNotEmpty() && session.state != ConnectionState.Disconnected) {
         updateSession(withContext(Dispatchers.IO) { core.sendTerminalInput("$command\r") })
+      }
+      if (profile.capabilityReport?.isStale != false) {
+        applyCapabilityOutcome(profile, probeWithPassword(profile, password))
       }
     }
   }
@@ -501,7 +597,14 @@ fun ShellowApp() {
       updateSession(withContext(Dispatchers.IO) { core.startPrivateKeyShell(profile, privateKeyPem, passphrase) })
       val command = startupCommand.trim()
       if (command.isNotEmpty() && session.state != ConnectionState.Disconnected) {
+        delay(450)
+        updateSession(withContext(Dispatchers.IO) { core.pollLiveShell() })
+      }
+      if (command.isNotEmpty() && session.state != ConnectionState.Disconnected) {
         updateSession(withContext(Dispatchers.IO) { core.sendTerminalInput("$command\r") })
+      }
+      if (profile.capabilityReport?.isStale != false) {
+        applyCapabilityOutcome(profile, probeWithPrivateKey(profile, privateKeyPem, passphrase))
       }
     }
   }
@@ -534,8 +637,8 @@ fun ShellowApp() {
   ) {
     when (mode) {
       HostConnectMode.Terminal -> {
-        reconnectTarget = ReconnectTarget.Password(profile, password, "")
-        connectPasswordShell(profile, password, "")
+        reconnectTarget = ReconnectTarget.Password(profile, password, profile.terminalStartupCommand)
+        connectPasswordShell(profile, password, profile.terminalStartupCommand)
       }
       HostConnectMode.Codex -> {
         codexReconnectTarget = CodexReconnectTarget.Password(profile, password, "")
@@ -628,7 +731,7 @@ fun ShellowApp() {
           profile = profile,
           privateKeyPem = key.privateKeyPem,
           passphrase = key.passphrase,
-          startupCommand = "",
+          startupCommand = profile.terminalStartupCommand,
         )
       updateSession(
         withContext(Dispatchers.IO) {
@@ -638,6 +741,14 @@ fun ShellowApp() {
 
       val result = waitForTerminalConnectionResult()
       if (result.state == ConnectionState.Connected) {
+        val command = profile.terminalStartupCommand.trim()
+        if (command.isNotEmpty()) {
+          delay(450)
+          updateSession(withContext(Dispatchers.IO) { core.sendTerminalInput("$command\r") })
+        }
+        if (profile.capabilityReport?.isStale != false) {
+          applyCapabilityOutcome(profile, probeWithPrivateKey(profile, key.privateKeyPem, key.passphrase))
+        }
         return true
       }
 
@@ -791,6 +902,7 @@ fun ShellowApp() {
           TerminalScreen(
             session = session,
             displaySettings = displaySettings,
+            persistentTerminal = reconnectTarget?.profile()?.persistentTerminal,
             onBackToHosts = { screen = AppScreen.Hosts },
             onInput = { input -> updateSession(core.sendTerminalInput(input)) },
             onReconnect = if (reconnectTarget == null) null else ::reconnect,
@@ -887,6 +999,12 @@ fun ShellowApp() {
             onAddProfile = { profile ->
               profiles.add(profile)
               saveHostProfiles(context, profiles)
+            },
+            onUpdateProfile = ::updateStoredProfile,
+            onProbeCapabilities = { profile ->
+              val outcome = probeWithStoredCredential(profile)
+              applyCapabilityOutcome(profile, outcome)
+              outcome
             },
             onAddKey = { credential ->
               sshKeys.add(credential)
@@ -3448,6 +3566,7 @@ private fun CodexApprovalCard(
 private fun TerminalScreen(
   session: TerminalSession,
   displaySettings: AppDisplaySettings,
+  persistentTerminal: PersistentTerminalConfiguration?,
   onBackToHosts: () -> Unit,
   onInput: (String) -> Unit,
   onReconnect: (() -> Unit)?,
@@ -3471,6 +3590,7 @@ private fun TerminalScreen(
   var handledClipboardSequence by remember { mutableStateOf(0L) }
   var searchVisible by remember { mutableStateOf(false) }
   var toolsExpanded by remember { mutableStateOf(false) }
+  var persistentToolsVisible by remember { mutableStateOf(false) }
   var pendingDestructiveAction by remember { mutableStateOf<TerminalDestructiveAction?>(null) }
   var searchQuery by remember { mutableStateOf("") }
   var searchIndex by remember { mutableStateOf(0) }
@@ -3911,6 +4031,16 @@ private fun TerminalScreen(
           expanded = toolsExpanded,
           onDismissRequest = { toolsExpanded = false },
         ) {
+          if (persistentTerminal != null) {
+            DropdownMenuItem(
+              text = { Text("${persistentTerminal.backend.displayTitle} Controls") },
+              onClick = {
+                toolsExpanded = false
+                persistentToolsVisible = true
+              },
+            )
+            PanelDivider()
+          }
           DropdownMenuItem(
             text = { Text("Clear Terminal") },
             onClick = {
@@ -4145,6 +4275,134 @@ private fun TerminalScreen(
       },
     )
   }
+
+  if (persistentToolsVisible && persistentTerminal != null) {
+    PersistentTerminalControlDialog(
+      configuration = persistentTerminal,
+      onDismiss = { persistentToolsVisible = false },
+      onSend = { sequence ->
+        persistentToolsVisible = false
+        terminalScope.launch {
+          delay(120)
+          sendTerminalInput(sequence)
+        }
+      },
+      onSwitchSession = { name ->
+        persistentToolsVisible = false
+        terminalScope.launch {
+          sendTerminalInput(persistentTerminal.backend.detachSequence)
+          delay(400)
+          sendTerminalInput("${persistentTerminal.backend.attachCommand(name)}\r")
+        }
+      },
+    )
+  }
+}
+
+private data class PersistentTerminalControl(
+  val title: String,
+  val sequence: String,
+)
+
+@Composable
+private fun PersistentTerminalControlDialog(
+  configuration: PersistentTerminalConfiguration,
+  onDismiss: () -> Unit,
+  onSend: (String) -> Unit,
+  onSwitchSession: (String) -> Unit,
+) {
+  var targetSession by remember(configuration.name) { mutableStateOf(configuration.name) }
+  val validatedTarget = PersistentTerminalConfiguration.validatedName(targetSession)
+  val controls =
+    when (configuration.backend) {
+      PersistentTerminalBackend.Tmux ->
+        listOf(
+          PersistentTerminalControl("Choose session", "\u0002s"),
+          PersistentTerminalControl("New window", "\u0002c"),
+          PersistentTerminalControl("Previous window", "\u0002p"),
+          PersistentTerminalControl("Next window", "\u0002n"),
+          PersistentTerminalControl("Split left / right", "\u0002%"),
+          PersistentTerminalControl("Split top / bottom", "\u0002\""),
+          PersistentTerminalControl("Command prompt", "\u0002:"),
+          PersistentTerminalControl("Detach", "\u0002d"),
+        )
+      PersistentTerminalBackend.Screen ->
+        listOf(
+          PersistentTerminalControl("Window list", "\u0001\""),
+          PersistentTerminalControl("New window", "\u0001c"),
+          PersistentTerminalControl("Previous window", "\u0001p"),
+          PersistentTerminalControl("Next window", "\u0001n"),
+          PersistentTerminalControl("Split top / bottom", "\u0001S"),
+          PersistentTerminalControl("Next region", "\u0001\t"),
+          PersistentTerminalControl("Command prompt", "\u0001:"),
+          PersistentTerminalControl("Detach", "\u0001d"),
+        )
+      PersistentTerminalBackend.Zellij ->
+        listOf(
+          PersistentTerminalControl("Session manager", "\u000Fw"),
+          PersistentTerminalControl("New tab", "\u0014n"),
+          PersistentTerminalControl("Previous tab", "\u0014h"),
+          PersistentTerminalControl("Next tab", "\u0014l"),
+          PersistentTerminalControl("Rename tab", "\u0014r"),
+          PersistentTerminalControl("Split right", "\u0010r"),
+          PersistentTerminalControl("Split down", "\u0010d"),
+          PersistentTerminalControl("Detach", "\u000Fd"),
+        )
+    }
+
+  AlertDialog(
+    onDismissRequest = onDismiss,
+    containerColor = ShellowColors.PanelBackground,
+    titleContentColor = ShellowColors.TerminalText,
+    textContentColor = ShellowColors.TerminalText,
+    title = { Text("${configuration.backend.displayTitle} · ${configuration.name}") },
+    text = {
+      Column(
+        modifier = Modifier.heightIn(max = 520.dp).verticalScroll(rememberScrollState()),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+      ) {
+        Text(
+          "Commands use ${configuration.backend.controlPrefixLabel}. The active process remains on the target host after detach.",
+          color = ShellowColors.TerminalMuted,
+          style = MaterialTheme.typography.labelSmall,
+        )
+        controls.chunked(2).forEach { rowControls ->
+          Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            rowControls.forEach { control ->
+              TextButton(
+                onClick = { onSend(control.sequence) },
+                modifier =
+                  Modifier
+                    .weight(1f)
+                    .background(ShellowColors.KeyBackground.copy(alpha = 0.42f), RoundedCornerShape(8.dp)),
+              ) {
+                Text(control.title, maxLines = 1, overflow = TextOverflow.Ellipsis)
+              }
+            }
+            if (rowControls.size == 1) Spacer(Modifier.weight(1f))
+          }
+        }
+        PanelDivider()
+        Text("Switch or create session", color = ShellowColors.TerminalText, fontWeight = FontWeight.SemiBold)
+        OutlinedTextField(
+          value = targetSession,
+          onValueChange = { targetSession = it },
+          modifier = Modifier.fillMaxWidth(),
+          label = { Text("Session name") },
+          isError = validatedTarget == null,
+          supportingText = { Text("Detaches the current session, then attaches or creates this name.") },
+          singleLine = true,
+        )
+        TextButton(
+          enabled = validatedTarget != null,
+          onClick = { validatedTarget?.let(onSwitchSession) },
+        ) {
+          Text("Switch / Create")
+        }
+      }
+    },
+    confirmButton = { TextButton(onClick = onDismiss) { Text("Done") } },
+  )
 }
 
 @Composable
@@ -4705,6 +4963,8 @@ private fun HostsScreen(
   secretStore: SSHSecretStore,
   onOpenSettings: () -> Unit,
   onAddProfile: (HostProfile) -> Unit,
+  onUpdateProfile: (HostProfile) -> Unit,
+  onProbeCapabilities: suspend (HostProfile) -> RemoteHostProbeOutcome,
   onAddKey: (SSHKeyCredential) -> Unit,
   onDeleteKey: (SSHKeyCredential) -> Unit,
   onConnectTerminal: (HostProfile) -> Unit,
@@ -4830,14 +5090,21 @@ private fun HostsScreen(
       profile = profile,
       hasSavedPassword = hasSavedPassword,
       hasSavedPrivateKey = hasSavedPrivateKey,
-      onDismiss = { selectedProfile = null },
-      onConnectTerminal = {
-        selectedProfile = null
-        onConnectTerminal(profile)
+      onSaveProfile = { updated ->
+        selectedProfile = updated
+        onUpdateProfile(updated)
       },
-      onConnectCodex = {
+      onProbeCapabilities = onProbeCapabilities,
+      onDismiss = { selectedProfile = null },
+      onConnectTerminal = { updated ->
+        onUpdateProfile(updated)
         selectedProfile = null
-        onConnectCodex(profile)
+        onConnectTerminal(updated)
+      },
+      onConnectCodex = { updated ->
+        onUpdateProfile(updated)
+        selectedProfile = null
+        onConnectCodex(updated)
       },
     )
   }
@@ -4901,10 +5168,56 @@ private fun HostConnectionDialog(
   profile: HostProfile,
   hasSavedPassword: Boolean,
   hasSavedPrivateKey: Boolean,
+  onSaveProfile: (HostProfile) -> Unit,
+  onProbeCapabilities: suspend (HostProfile) -> RemoteHostProbeOutcome,
   onDismiss: () -> Unit,
-  onConnectTerminal: () -> Unit,
-  onConnectCodex: () -> Unit,
+  onConnectTerminal: (HostProfile) -> Unit,
+  onConnectCodex: (HostProfile) -> Unit,
 ) {
+  var persistentEnabled by remember(profile.id) { mutableStateOf(profile.persistentTerminal != null) }
+  var persistentBackend by
+    remember(profile.id) { mutableStateOf(profile.persistentTerminal?.backend ?: PersistentTerminalBackend.Tmux) }
+  var persistentName by
+    remember(profile.id) {
+      mutableStateOf(
+        profile.persistentTerminal?.name
+          ?: PersistentTerminalConfiguration.suggestedName(profile.name, profile.host),
+      )
+    }
+  var detectedReport by remember(profile.id) { mutableStateOf(profile.capabilityReport) }
+  var probeInProgress by remember(profile.id) { mutableStateOf(false) }
+  var probeError by remember(profile.id) { mutableStateOf<String?>(null) }
+  val validatedPersistentName = PersistentTerminalConfiguration.validatedName(persistentName)
+  val workingProfile =
+    profile.copy(
+      persistentTerminal =
+        if (persistentEnabled && validatedPersistentName != null) {
+          PersistentTerminalConfiguration(validatedPersistentName, persistentBackend)
+        } else {
+          null
+        },
+      capabilityReport = detectedReport ?: profile.capabilityReport,
+    )
+  val persistentConfigurationValid = !persistentEnabled || validatedPersistentName != null
+
+  suspend fun refreshCapabilities() {
+    probeInProgress = true
+    probeError = null
+    val outcome = onProbeCapabilities(workingProfile)
+    probeInProgress = false
+    if (outcome.report != null) {
+      detectedReport = outcome.report
+    } else {
+      probeError = outcome.errorMessage ?: "Capability detection failed."
+    }
+  }
+
+  LaunchedEffect(profile.id) {
+    if (profile.capabilityReport == null || profile.capabilityReport.isStale) {
+      refreshCapabilities()
+    }
+  }
+
   AlertDialog(
     onDismissRequest = onDismiss,
     containerColor = ShellowColors.PanelBackground,
@@ -4912,7 +5225,10 @@ private fun HostConnectionDialog(
     textContentColor = ShellowColors.TerminalText,
     title = { Text(profile.name) },
     text = {
-      Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
+      Column(
+        modifier = Modifier.heightIn(max = 620.dp).verticalScroll(rememberScrollState()),
+        verticalArrangement = Arrangement.spacedBy(14.dp),
+      ) {
         Column(
           modifier =
             Modifier
@@ -4951,18 +5267,78 @@ private fun HostConnectionDialog(
           )
         }
 
+        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+          Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+          ) {
+            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+              Text("Persistent terminal", color = ShellowColors.TerminalText, fontWeight = FontWeight.SemiBold)
+              Text("Restore the same remote workspace after reconnecting", color = ShellowColors.TerminalMuted, style = MaterialTheme.typography.labelSmall)
+            }
+            Checkbox(
+              checked = persistentEnabled,
+              onCheckedChange = { persistentEnabled = it },
+            )
+          }
+          if (persistentEnabled) {
+            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+              PersistentTerminalBackend.entries.forEach { backend ->
+                AuthenticationChoice(
+                  title = backend.compactTitle,
+                  selected = persistentBackend == backend,
+                  modifier = Modifier.weight(1f),
+                ) { persistentBackend = backend }
+              }
+            }
+            OutlinedTextField(
+              value = persistentName,
+              onValueChange = { persistentName = it },
+              modifier = Modifier.fillMaxWidth(),
+              label = { Text("Session name") },
+              supportingText = {
+                Text(
+                  if (validatedPersistentName == null) "Use 1–48 ASCII letters, numbers, - or _."
+                  else persistentBackend.persistenceDetail,
+                )
+              },
+              isError = validatedPersistentName == null,
+              singleLine = true,
+            )
+            val capability = detectedReport?.capability(persistentBackend)
+            if (capability != null && capability.supportLevel != RemoteComponentSupportLevel.Supported) {
+              Text(capability.featureSummary, color = ShellowColors.Warning, style = MaterialTheme.typography.labelSmall)
+            }
+          }
+          TextButton(
+            enabled = persistentConfigurationValid,
+            onClick = { onSaveProfile(workingProfile) },
+          ) {
+            Text("Save terminal settings")
+          }
+        }
+
+        RemoteCapabilityCard(
+          report = detectedReport,
+          inProgress = probeInProgress,
+          errorMessage = probeError,
+          onRefresh = { refreshCapabilities() },
+        )
+
         Text("Choose a workspace", color = ShellowColors.TerminalText, fontWeight = FontWeight.SemiBold)
         ConnectionModeOption(
           title = "Terminal",
           subtitle = "Interactive shell with keyboard tools",
           detail = "Commands, processes, and remote files",
-          onClick = onConnectTerminal,
+          enabled = persistentConfigurationValid,
+          onClick = { onConnectTerminal(workingProfile) },
         )
         ConnectionModeOption(
           title = "Codex",
           subtitle = "Remote coding sessions and conversations",
           detail = "Projects, threads, and approvals",
-          onClick = onConnectCodex,
+          enabled = persistentConfigurationValid,
+          onClick = { onConnectCodex(workingProfile) },
         )
       }
     },
@@ -4996,6 +5372,7 @@ private fun ConnectionModeOption(
   title: String,
   subtitle: String,
   detail: String,
+  enabled: Boolean = true,
   onClick: () -> Unit,
 ) {
   Row(
@@ -5003,16 +5380,69 @@ private fun ConnectionModeOption(
       Modifier
         .fillMaxWidth()
         .background(ShellowColors.KeyBackground.copy(alpha = 0.38f), RoundedCornerShape(12.dp))
-        .clickable(onClick = onClick)
+        .clickable(enabled = enabled, onClick = onClick)
         .padding(horizontal = 14.dp, vertical = 13.dp),
     verticalAlignment = Alignment.CenterVertically,
   ) {
     Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-      Text(title, color = ShellowColors.TerminalText, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold)
+      Text(title, color = if (enabled) ShellowColors.TerminalText else ShellowColors.TerminalMuted, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold)
       Text(subtitle, color = ShellowColors.TerminalMuted, style = MaterialTheme.typography.labelSmall)
       Text(detail, color = ShellowColors.TerminalMuted.copy(alpha = 0.72f), style = MaterialTheme.typography.labelSmall)
     }
-    Text("Open", color = ShellowColors.Accent, style = MaterialTheme.typography.labelMedium)
+    Text("Open", color = if (enabled) ShellowColors.Accent else ShellowColors.TerminalMuted, style = MaterialTheme.typography.labelMedium)
+  }
+}
+
+@Composable
+private fun RemoteCapabilityCard(
+  report: xyz.zinglix.shellow.core.RemoteHostCapabilityReport?,
+  inProgress: Boolean,
+  errorMessage: String?,
+  onRefresh: suspend () -> Unit,
+) {
+  val scope = rememberCoroutineScope()
+  Column(
+    modifier =
+      Modifier
+        .fillMaxWidth()
+        .background(ShellowColors.KeyBackground.copy(alpha = 0.38f), RoundedCornerShape(8.dp))
+        .padding(12.dp),
+    verticalArrangement = Arrangement.spacedBy(8.dp),
+  ) {
+    Row(verticalAlignment = Alignment.CenterVertically) {
+      Text("Target capabilities", modifier = Modifier.weight(1f), color = ShellowColors.TerminalText, fontWeight = FontWeight.SemiBold)
+      if (inProgress) {
+        CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
+      } else {
+        TextButton(onClick = { scope.launch { onRefresh() } }) { Text("Refresh") }
+      }
+    }
+    if (report != null) {
+      Text(
+        "${report.system.displayTitle} · ${report.system.architecture} · ${report.system.shellName}",
+        color = ShellowColors.TerminalMuted,
+        style = MaterialTheme.typography.labelSmall,
+      )
+      report.components.forEach { component ->
+        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+          Text(component.backend.compactTitle, modifier = Modifier.weight(1f), color = ShellowColors.TerminalText, style = MaterialTheme.typography.bodySmall)
+          Text(
+            listOf(component.supportLevel.title, component.version).filter { it.isNotBlank() }.joinToString(" · "),
+            color =
+              if (component.supportLevel == RemoteComponentSupportLevel.Supported) ShellowColors.Success
+              else ShellowColors.Warning,
+            style = MaterialTheme.typography.labelSmall,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+          )
+        }
+      }
+      Text("Kernel ${report.system.kernelRelease}", color = ShellowColors.TerminalMuted, style = MaterialTheme.typography.labelSmall)
+    } else if (inProgress) {
+      Text("Detecting the target system and terminal components…", color = ShellowColors.TerminalMuted, style = MaterialTheme.typography.labelSmall)
+    } else {
+      Text(errorMessage ?: "No capability report yet.", color = ShellowColors.TerminalMuted, style = MaterialTheme.typography.labelSmall)
+    }
   }
 }
 
@@ -5026,13 +5456,18 @@ private fun AddHostDialog(
   var port by remember { mutableStateOf("22") }
   var username by remember { mutableStateOf("") }
   var authentication by remember { mutableStateOf(AuthenticationKind.Password) }
+  var persistentEnabled by remember { mutableStateOf(false) }
+  var persistentBackend by remember { mutableStateOf(PersistentTerminalBackend.Tmux) }
+  var persistentName by remember { mutableStateOf("shellow-session") }
   val parsedPort = port.toIntOrNull()
+  val validatedPersistentName = PersistentTerminalConfiguration.validatedName(persistentName)
   val addHostRequirement =
     when {
       name.isBlank() -> "Enter a name for this host."
       host.isBlank() -> "Enter a hostname or IP address."
       username.isBlank() -> "Enter the SSH username."
       parsedPort == null || parsedPort !in 1..65535 -> "Port must be a number from 1 to 65535."
+      persistentEnabled && validatedPersistentName == null -> "Session names use 1–48 ASCII letters, numbers, - or _."
       else -> null
     }
   val canAdd = addHostRequirement == null
@@ -5094,6 +5529,43 @@ private fun AddHostDialog(
             modifier = Modifier.weight(1f),
           ) { authentication = AuthenticationKind.PrivateKey }
         }
+        Row(
+          modifier = Modifier.fillMaxWidth(),
+          verticalAlignment = Alignment.CenterVertically,
+        ) {
+          Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+            Text("Persistent terminal", color = ShellowColors.TerminalText, style = MaterialTheme.typography.bodyMedium)
+            Text("Restore this workspace after reconnecting", color = ShellowColors.TerminalMuted, style = MaterialTheme.typography.labelSmall)
+          }
+          Checkbox(
+            checked = persistentEnabled,
+            onCheckedChange = { enabled ->
+              persistentEnabled = enabled
+              if (enabled && persistentName == "shellow-session") {
+                persistentName = PersistentTerminalConfiguration.suggestedName(name, host)
+              }
+            },
+          )
+        }
+        if (persistentEnabled) {
+          Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            PersistentTerminalBackend.entries.forEach { backend ->
+              AuthenticationChoice(
+                title = backend.compactTitle,
+                selected = persistentBackend == backend,
+                modifier = Modifier.weight(1f),
+              ) { persistentBackend = backend }
+            }
+          }
+          OutlinedTextField(
+            value = persistentName,
+            onValueChange = { persistentName = it },
+            modifier = Modifier.fillMaxWidth(),
+            label = { Text("Session name") },
+            isError = validatedPersistentName == null,
+            singleLine = true,
+          )
+        }
         addHostRequirement?.let {
           Text(it, color = ShellowColors.TerminalMuted, style = MaterialTheme.typography.labelSmall)
         }
@@ -5111,6 +5583,12 @@ private fun AddHostDialog(
               username = username.trim(),
               authentication = authentication,
               trustedHostKeySha256 = null,
+              persistentTerminal =
+                if (persistentEnabled && validatedPersistentName != null) {
+                  PersistentTerminalConfiguration(validatedPersistentName, persistentBackend)
+                } else {
+                  null
+                },
             ),
           )
         },
@@ -5595,15 +6073,15 @@ private fun defaultHostProfiles(): List<HostProfile> =
   listOf(
     HostProfile(
       "Staging",
-      "10.0.0.18",
+      "staging.example.com",
       22,
       "deploy",
       AuthenticationKind.PrivateKey,
       trustedHostKeySha256 = "SHA256:sample-staging-host-key",
       id = "sample-staging",
     ),
-    HostProfile("10.248.1.102", "10.248.1.102", 22, "zinglix", AuthenticationKind.Password, id = "lab-10-248-1-102"),
-    HostProfile("Home Lab", "192.168.1.42", 22, "zinglix", AuthenticationKind.Password, id = "sample-home-lab"),
+    HostProfile("Build Agent", "build.example.com", 2222, "runner", AuthenticationKind.Password, id = "sample-build-agent"),
+    HostProfile("Workshop", "shell.example.com", 22, "ops", AuthenticationKind.Password, id = "sample-workshop"),
   )
 
 private fun loadHostProfiles(context: Context): List<HostProfile> {

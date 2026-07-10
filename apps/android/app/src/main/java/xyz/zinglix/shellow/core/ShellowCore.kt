@@ -20,6 +20,8 @@ data class HostProfile(
   val username: String,
   val authentication: AuthenticationKind,
   val trustedHostKeySha256: String? = null,
+  val persistentTerminal: PersistentTerminalConfiguration? = null,
+  val capabilityReport: RemoteHostCapabilityReport? = null,
   val id: String = UUID.randomUUID().toString(),
 ) {
   val endpoint: String = "$username@$host:$port"
@@ -30,6 +32,13 @@ data class HostProfile(
       "Host key pinned"
     }
 
+  val terminalStartupCommand: String
+    get() {
+      val configuration = persistentTerminal ?: return ""
+      val backend = configuration.backend
+      return "if command -v ${backend.executable} >/dev/null 2>&1; then ${backend.attachCommand(configuration.name)}; else echo 'Shellow: ${backend.displayTitle} is not installed; continuing with the regular shell.'; fi"
+    }
+
   fun toJson() =
     JSONObject()
       .put("name", name)
@@ -38,6 +47,8 @@ data class HostProfile(
       .put("username", username)
       .put("authentication", authentication.wire)
       .put("trustedHostKeySha256", trustedHostKeySha256.orEmpty())
+      .put("persistentTerminal", persistentTerminal?.toJson())
+      .put("capabilityReport", capabilityReport?.toJson())
       .put("id", id)
 
   companion object {
@@ -60,6 +71,11 @@ data class HostProfile(
         username = username,
         authentication = authentication,
         trustedHostKeySha256 = json.optNullableString("trustedHostKeySha256"),
+        persistentTerminal =
+          PersistentTerminalConfiguration.fromJson(
+            json.optJSONObject("persistentTerminal") ?: json.optJSONObject("tmuxSession"),
+          ),
+        capabilityReport = RemoteHostCapabilityReport.fromJson(json.optJSONObject("capabilityReport")),
         id =
           json.optNullableString("id")
             ?: legacyProfileId(name, host, port, username, authentication),
@@ -1131,6 +1147,44 @@ class ShellowCoreSession : Closeable {
       )
     }
 
+  fun connectPasswordExec(
+    profile: HostProfile,
+    password: String,
+    command: String,
+  ) =
+    decode { current ->
+      ShellowNative.nativeConnectPasswordExecJson(
+        current,
+        profile.name,
+        profile.host,
+        profile.port,
+        profile.username,
+        profile.trustedHostKeySha256.orEmpty(),
+        password,
+        command,
+      )
+    }
+
+  fun connectPrivateKeyExec(
+    profile: HostProfile,
+    privateKeyPem: String,
+    passphrase: String,
+    command: String,
+  ) =
+    decode { current ->
+      ShellowNative.nativeConnectPrivateKeyExecJson(
+        current,
+        profile.name,
+        profile.host,
+        profile.port,
+        profile.username,
+        profile.trustedHostKeySha256.orEmpty(),
+        privateKeyPem,
+        passphrase,
+        command,
+      )
+    }
+
   fun pollLiveShell() = decode { current -> ShellowNative.nativePollLiveShellJson(current) }
 
   fun disconnectLiveShell() =
@@ -1341,6 +1395,29 @@ internal object ShellowNative {
     username: String,
     trustedHostKeySha256: String,
     password: String,
+  ): String
+
+  external fun nativeConnectPasswordExecJson(
+    handle: Long,
+    name: String,
+    host: String,
+    port: Int,
+    username: String,
+    trustedHostKeySha256: String,
+    password: String,
+    command: String,
+  ): String
+
+  external fun nativeConnectPrivateKeyExecJson(
+    handle: Long,
+    name: String,
+    host: String,
+    port: Int,
+    username: String,
+    trustedHostKeySha256: String,
+    privateKeyPem: String,
+    passphrase: String,
+    command: String,
   ): String
 
   external fun nativeStartPrivateKeyShellJson(

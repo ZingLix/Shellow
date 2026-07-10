@@ -1,5 +1,6 @@
 import Foundation
 import SwiftUI
+import UIKit
 
 private enum ReconnectTarget {
     case preview(HostProfile)
@@ -35,6 +36,11 @@ private struct StoredPrivateKeyAuth {
     var credential: SSHKeyCredential
     var privateKeyPEM: String
     var passphrase: String?
+}
+
+private enum HostProbeCredential {
+    case password(String)
+    case privateKey(privateKeyPEM: String, passphrase: String?)
 }
 
 private enum ShellowRoute: Hashable {
@@ -75,6 +81,9 @@ struct AppShell: View {
                     Task {
                         await connectHost(profile, mode: .codex)
                     }
+                },
+                probeCapabilities: { profile in
+                    await probeHostCapabilities(profile)
                 }
             )
             .navigationDestination(for: ShellowRoute.self) { route in
@@ -108,6 +117,9 @@ struct AppShell: View {
         .tint(ShellowTheme.accent)
         .preferredColorScheme(settings.colorScheme.preferredSwiftUIColorScheme)
         .task {
+#if DEBUG
+            await handleSimulatorLaunchRequestIfNeeded()
+#endif
             updateSession(coreSession.snapshot())
             var lastLiveRevision = coreSession.liveShellEventRevision()
             var lastCodexRevision = coreSession.codexEventRevision()
@@ -155,6 +167,7 @@ struct AppShell: View {
             session: $session,
             settings: settings,
             renderTick: terminalRenderTick,
+            persistentTerminal: reconnectTarget?.profile.persistentTerminal,
             onTerminalInput: { input in
                 updateSession(coreSession.sendTerminalInput(input))
             },
@@ -346,13 +359,29 @@ struct AppShell: View {
         password: String,
         mode: HostConnectMode
     ) {
+        Task {
+            await probeAndStoreCapabilities(
+                for: profile,
+                credential: .password(password)
+            )
+        }
+
         switch mode {
         case .terminal:
-            reconnectTarget = .password(profile: profile, password: password, startupCommand: "")
+            let startupCommand = profile.terminalStartupCommand
+            reconnectTarget = .password(
+                profile: profile,
+                password: password,
+                startupCommand: startupCommand
+            )
             session = .connecting(to: profile)
             showTerminal()
             Task {
-                await connectPasswordShell(profile: profile, password: password, startupCommand: "")
+                await connectPasswordShell(
+                    profile: profile,
+                    password: password,
+                    startupCommand: startupCommand
+                )
             }
         case .codex:
             codexReconnectTarget = .password(profile: profile, password: password, cwd: "", threadID: nil)
@@ -373,22 +402,31 @@ struct AppShell: View {
         showTerminal()
 
         for key in keys {
+            let startupCommand = profile.terminalStartupCommand
             reconnectTarget = .privateKey(
                 profile: profile,
                 privateKeyPEM: key.privateKeyPEM,
                 passphrase: key.passphrase,
-                startupCommand: ""
+                startupCommand: startupCommand
             )
-            updateSession(
-                await coreSession.startPrivateKeyShell(
-                    to: profile,
-                    privateKeyPEM: key.privateKeyPEM,
-                    passphrase: key.passphrase
-                )
+            await connectPrivateKeyShell(
+                profile: profile,
+                privateKeyPEM: key.privateKeyPEM,
+                passphrase: key.passphrase,
+                startupCommand: startupCommand
             )
 
             let result = await waitForTerminalConnectionResult()
             if result.state == .connected {
+                Task {
+                    await probeAndStoreCapabilities(
+                        for: profile,
+                        credential: .privateKey(
+                            privateKeyPEM: key.privateKeyPEM,
+                            passphrase: key.passphrase
+                        )
+                    )
+                }
                 return true
             }
 
@@ -425,6 +463,15 @@ struct AppShell: View {
 
             let result = await waitForCodexConnectionResult()
             if result.status == .connected {
+                Task {
+                    await probeAndStoreCapabilities(
+                        for: profile,
+                        credential: .privateKey(
+                            privateKeyPEM: key.privateKeyPEM,
+                            passphrase: key.passphrase
+                        )
+                    )
+                }
                 return true
             }
 
@@ -477,6 +524,82 @@ struct AppShell: View {
                 passphrase: secretStore.loadSecret(forKeyID: credential.id, kind: .passphrase)
             )
         }
+    }
+
+    @MainActor
+    private func probeHostCapabilities(_ profile: HostProfile) async -> RemoteHostProbeOutcome {
+        if let password = secretStore.loadSecret(for: profile, kind: .password) {
+            return await runHostCapabilityProbe(
+                profile: profile,
+                credential: .password(password)
+            )
+        }
+
+        let keys = storedPrivateKeyAuths()
+        guard !keys.isEmpty else {
+            return .failure("Save a password or private key before checking this host.")
+        }
+
+        var lastFailure = "No saved private key authenticated."
+        for key in keys {
+            let outcome = await runHostCapabilityProbe(
+                profile: profile,
+                credential: .privateKey(
+                    privateKeyPEM: key.privateKeyPEM,
+                    passphrase: key.passphrase
+                )
+            )
+            if outcome.report != nil {
+                return outcome
+            }
+            lastFailure = outcome.errorMessage ?? lastFailure
+        }
+        return .failure(lastFailure)
+    }
+
+    private func runHostCapabilityProbe(
+        profile: HostProfile,
+        credential: HostProbeCredential
+    ) async -> RemoteHostProbeOutcome {
+        let probeSession = ShellowCoreSession()
+        let result: TerminalSession
+        switch credential {
+        case .password(let password):
+            result = await probeSession.connectPasswordExec(
+                to: profile,
+                password: password,
+                command: RemoteHostCapabilityProbe.command
+            )
+        case .privateKey(let privateKeyPEM, let passphrase):
+            result = await probeSession.connectPrivateKeyExec(
+                to: profile,
+                privateKeyPEM: privateKeyPEM,
+                passphrase: passphrase,
+                command: RemoteHostCapabilityProbe.command
+            )
+        }
+
+        let output = result.rows.map(\.text).joined(separator: "\n")
+        if let report = RemoteHostCapabilityProbe.parse(output) {
+            return .success(report)
+        }
+
+        let detail = result.rows.reversed()
+            .map(\.text)
+            .first { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+        return .failure(detail ?? "The host returned an unreadable capability report.")
+    }
+
+    @MainActor
+    private func probeAndStoreCapabilities(
+        for profile: HostProfile,
+        credential: HostProbeCredential
+    ) async {
+        guard profile.capabilityReport == nil || profile.capabilityReport?.isStale == true else { return }
+        let outcome = await runHostCapabilityProbe(profile: profile, credential: credential)
+        guard let report = outcome.report,
+              let index = profiles.firstIndex(where: { $0.id == profile.id }) else { return }
+        profiles[index].capabilityReport = report
     }
 
     private func showTerminal() {
@@ -612,11 +735,7 @@ struct AppShell: View {
             to: profile,
             password: password
         ))
-
-        let command = startupCommand.trimmingCharacters(in: .whitespacesAndNewlines)
-        if session.state != .disconnected && !command.isEmpty {
-            updateSession(coreSession.sendTerminalInput(command + "\r"))
-        }
+        await sendTerminalStartupCommand(startupCommand)
     }
 
     @MainActor
@@ -631,11 +750,26 @@ struct AppShell: View {
             privateKeyPEM: privateKeyPEM,
             passphrase: passphrase
         ))
+        await sendTerminalStartupCommand(startupCommand)
+    }
 
+    @MainActor
+    private func sendTerminalStartupCommand(_ startupCommand: String) async {
         let command = startupCommand.trimmingCharacters(in: .whitespacesAndNewlines)
-        if session.state != .disconnected && !command.isEmpty {
-            updateSession(coreSession.sendTerminalInput(command + "\r"))
-        }
+        guard !command.isEmpty else { return }
+
+        let connected = await waitForTerminalConnectionResult()
+        guard connected.state == .connected else { return }
+
+        // The SSH channel can report connected just before the login banner and
+        // first prompt finish rendering. Let that initial output settle so the
+        // the multiplexer attach command is entered at a clean prompt.
+        try? await Task.sleep(nanoseconds: 450_000_000)
+        let settled = coreSession.pollLiveShell()
+        updateSession(settled)
+        guard settled.state == .connected else { return }
+
+        updateSession(coreSession.sendTerminalInput(command + "\r"))
     }
 
     @MainActor
@@ -711,6 +845,95 @@ struct AppShell: View {
             }
         }
     }
+
+#if DEBUG
+    @MainActor
+    private func handleSimulatorLaunchRequestIfNeeded() async {
+        let arguments = ProcessInfo.processInfo.arguments
+        let knownRequests = [
+            "--shellow-simulator-seed-local",
+            "--shellow-simulator-show-password",
+            "--shellow-simulator-show-settings",
+            "--shellow-simulator-connect-terminal",
+            "--shellow-simulator-connect-codex"
+        ]
+        guard arguments.contains(where: knownRequests.contains) else {
+            return
+        }
+
+        if arguments.contains("--shellow-simulator-show-settings") {
+            isSettingsPresented = true
+            return
+        }
+
+        let profileID = UUID(uuidString: "E30DB0E4-3931-4D48-9919-84CB6FFAF54A")!
+        var profile = profiles.first(where: { $0.id == profileID || $0.host == "10.248.1.102" }) ?? HostProfile(
+            id: profileID,
+            name: "Mac mini",
+            host: "10.248.1.102",
+            port: 22,
+            username: "zinglix",
+            authentication: .password,
+            trustedHostKeySHA256: nil,
+            lastConnected: nil
+        )
+        profile.name = "Mac mini"
+        profile.host = "10.248.1.102"
+        profile.port = 22
+        profile.username = "zinglix"
+        profile.authentication = .password
+
+        if let index = profiles.firstIndex(where: { $0.id == profile.id || $0.host == profile.host }) {
+            profiles[index] = profile
+        } else {
+            profiles.insert(profile, at: 0)
+        }
+
+        if arguments.contains("--shellow-simulator-seed-local") {
+            let password = ProcessInfo.processInfo.environment["SHELLOW_SIMULATOR_PASSWORD"]
+                ?? UIPasteboard.general.string
+            if let password, !password.isEmpty {
+                do {
+                    try secretStore.saveSecret(password, for: profile, kind: .password)
+                    UserDefaults.standard.set("saved", forKey: "shellow.simulatorCredentialStatus")
+                    print("[Shellow Simulator] credential saved=\(secretStore.hasSecret(for: profile, kind: .password))")
+                } catch {
+                    UserDefaults.standard.set("failed", forKey: "shellow.simulatorCredentialStatus")
+                    print("[Shellow Simulator] credential save failed: \(error)")
+                }
+                UIPasteboard.general.items = []
+            } else {
+                UserDefaults.standard.set("missing", forKey: "shellow.simulatorCredentialStatus")
+                print("[Shellow Simulator] no credential was supplied")
+            }
+            return
+        }
+
+        if arguments.contains("--shellow-simulator-show-password") {
+            passwordPrompt = PasswordPromptRequest(
+                profile: profile,
+                mode: .terminal,
+                reason: "Authentication is required before the first connection."
+            )
+            return
+        }
+
+        guard let password = secretStore.loadSecret(for: profile, kind: .password) else {
+            passwordPrompt = PasswordPromptRequest(
+                profile: profile,
+                mode: arguments.contains("--shellow-simulator-connect-codex") ? .codex : .terminal,
+                reason: "Enter the saved password to continue."
+            )
+            return
+        }
+
+        if arguments.contains("--shellow-simulator-connect-codex") {
+            startPasswordConnection(profile: profile, password: password, mode: .codex)
+        } else if arguments.contains("--shellow-simulator-connect-terminal") {
+            startPasswordConnection(profile: profile, password: password, mode: .terminal)
+        }
+    }
+#endif
 }
 
 private extension ReconnectTarget {

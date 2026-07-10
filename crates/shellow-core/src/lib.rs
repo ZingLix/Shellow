@@ -683,6 +683,80 @@ impl ShellowEngine {
         self.snapshot()
     }
 
+    pub fn connect_private_key_exec(
+        &mut self,
+        profile: HostProfile,
+        private_key_pem: String,
+        passphrase: Option<String>,
+        command: String,
+    ) -> TerminalSnapshot {
+        #[cfg(not(feature = "native-integrations"))]
+        let _ = (&private_key_pem, &passphrase);
+
+        self.disconnect_live_shell_handle();
+        self.title = profile.name.clone();
+        self.host = profile.endpoint();
+        self.state = ConnectionState::Connecting;
+        self.bell_count = 0;
+        self.observed_host_key_sha256 = None;
+        self.pending_clipboard_text = None;
+        self.rows.clear();
+        self.local_input.clear();
+        self.clear_reverse_search();
+        self.clear_demo_editor();
+        self.clear_demo_pager();
+        self.clear_demo_mouse();
+        self.clear_demo_tui();
+        self.clear_demo_grid();
+        self.rows
+            .push(TerminalRow::command(format!("ssh {}", self.host)));
+        self.rows.push(TerminalRow::muted("Connecting..."));
+        self.rows
+            .push(TerminalRow::command(format!("exec {}", command.trim())));
+
+        #[cfg(feature = "native-integrations")]
+        let result = ssh::exec_private_key_blocking(
+            ssh::RusshConnectOptions {
+                host: profile.host,
+                port: profile.port,
+                username: profile.username,
+                auth: ssh::RusshAuthMethod::PrivateKey {
+                    private_key_pem,
+                    passphrase,
+                },
+                expected_host_key_sha256: profile.trusted_host_key_sha256,
+                keepalive_interval_secs: None,
+                keepalive_max: ssh::DEFAULT_KEEPALIVE_MAX,
+                cols: self.terminal_cols,
+                rows: self.terminal_rows,
+                inactivity_timeout_secs: 12,
+            },
+            command.trim(),
+        );
+
+        #[cfg(not(feature = "native-integrations"))]
+        let result: Result<String, String> =
+            Err("russh native integration is not compiled into this build".to_string());
+
+        match result {
+            Ok(output) => {
+                self.rows.push(TerminalRow::success("Command completed"));
+                let output_rows = self.terminal_rows_from_remote_output(&output);
+                self.rows.extend(output_rows);
+                self.state = ConnectionState::Connected;
+            }
+            Err(error) => {
+                self.rows.push(TerminalRow::warning("Command failed"));
+                self.rows.push(TerminalRow::muted(error));
+                self.state = ConnectionState::Disconnected;
+            }
+        }
+
+        self.rows.push(TerminalRow::prompt());
+        self.cursor_column = 0;
+        self.snapshot()
+    }
+
     pub fn start_password_shell(
         &mut self,
         profile: HostProfile,
@@ -3292,6 +3366,40 @@ mod tests {
                 .any(|row| { row.text.contains("private key parse failed") })
         );
         assert!(snapshot.rows.iter().all(|row| row.text != "Connected"));
+    }
+
+    #[cfg(feature = "native-integrations")]
+    #[test]
+    fn private_key_exec_reports_parse_error_before_network() {
+        let mut engine = ShellowEngine::new();
+        let snapshot = engine.connect_private_key_exec(
+            HostProfile {
+                name: "Bad Probe Key".to_string(),
+                host: "192.0.2.1".to_string(),
+                port: 22,
+                username: "deploy".to_string(),
+                authentication: AuthenticationKind::PrivateKey,
+                trusted_host_key_sha256: None,
+            },
+            "BEGIN\nnot-a-real-key\nPRIVATE KEY".to_string(),
+            None,
+            "uname -s".to_string(),
+        );
+
+        assert_eq!(snapshot.state, ConnectionState::Disconnected);
+        assert!(snapshot.rows.iter().any(|row| row.text == "Command failed"));
+        assert!(
+            snapshot
+                .rows
+                .iter()
+                .any(|row| row.text.contains("private key parse failed"))
+        );
+        assert!(
+            snapshot
+                .rows
+                .iter()
+                .all(|row| row.text != "Command completed")
+        );
     }
 
     #[test]

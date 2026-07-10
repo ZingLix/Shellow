@@ -70,6 +70,19 @@ pub fn exec_password_blocking(
     options: RusshConnectOptions,
     command: &str,
 ) -> Result<String, String> {
+    exec_blocking(options, command)
+}
+
+#[cfg(feature = "native-integrations")]
+pub fn exec_private_key_blocking(
+    options: RusshConnectOptions,
+    command: &str,
+) -> Result<String, String> {
+    exec_blocking(options, command)
+}
+
+#[cfg(feature = "native-integrations")]
+fn exec_blocking(options: RusshConnectOptions, command: &str) -> Result<String, String> {
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .thread_name("shellow-russh")

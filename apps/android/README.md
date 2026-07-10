@@ -18,6 +18,8 @@ The debug APK is generated at:
 app/build/outputs/apk/debug/app-debug.apk
 ```
 
+Debug builds install as `xyz.zinglix.shellow.debug` with the label `Shellow Debug`, so they can coexist with a store-signed `xyz.zinglix.shellow` release. Release builds keep the production application id.
+
 ## Run
 
 Connect a device and launch the APK:

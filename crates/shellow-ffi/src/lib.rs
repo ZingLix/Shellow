@@ -239,6 +239,36 @@ pub extern "C" fn shellow_engine_connect_password_exec_json(
 }
 
 #[unsafe(no_mangle)]
+pub extern "C" fn shellow_engine_connect_private_key_exec_json(
+    engine: *mut ShellowEngine,
+    name: *const c_char,
+    host: *const c_char,
+    port: u16,
+    username: *const c_char,
+    trusted_host_key_sha256: *const c_char,
+    private_key_pem: *const c_char,
+    passphrase: *const c_char,
+    command: *const c_char,
+) -> *mut c_char {
+    with_engine_mut(engine, |engine| {
+        let profile = HostProfile {
+            name: read_c_string(name),
+            host: read_c_string(host),
+            port,
+            username: read_c_string(username),
+            authentication: AuthenticationKind::PrivateKey,
+            trusted_host_key_sha256: read_optional_c_string(trusted_host_key_sha256),
+        };
+        encode_json(&engine.connect_private_key_exec(
+            profile,
+            read_c_string(private_key_pem),
+            read_optional_c_string(passphrase),
+            read_c_string(command),
+        ))
+    })
+}
+
+#[unsafe(no_mangle)]
 pub extern "C" fn shellow_engine_start_password_shell_json(
     engine: *mut ShellowEngine,
     name: *const c_char,

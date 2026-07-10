@@ -7,12 +7,16 @@ struct HostsScreen: View {
     let onOpenSettings: () -> Void
     let connectTerminal: (HostProfile) -> Void
     let connectCodex: (HostProfile) -> Void
+    let probeCapabilities: (HostProfile) async -> RemoteHostProbeOutcome
 
     @State private var draftName = ""
     @State private var draftHost = ""
     @State private var draftPort = "22"
     @State private var draftUser = ""
     @State private var draftAuthentication: AuthenticationKind = .password
+    @State private var draftUsesPersistentTerminal = false
+    @State private var draftPersistentTerminalBackend: PersistentTerminalBackend = .tmux
+    @State private var draftPersistentSessionName = ""
     @State private var isAddingProfile = false
     @State private var isManagingKeys = false
     @State private var selectedProfile: HostProfile?
@@ -83,14 +87,16 @@ struct HostsScreen: View {
                 hasSavedPrivateKey: sshKeys.contains {
                     secretStore.hasSecret(forKeyID: $0.id, kind: .privateKey)
                 },
-                connectTerminal: {
+                updateProfile: updateProfile,
+                connectTerminal: { configuredProfile in
                     selectedProfile = nil
-                    connectTerminal(profile)
+                    connectTerminal(configuredProfile)
                 },
                 connectCodex: {
                     selectedProfile = nil
                     connectCodex(profile)
-                }
+                },
+                probeCapabilities: probeCapabilities
             )
             .presentationDetents([.fraction(0.72), .large])
             .presentationDragIndicator(.visible)
@@ -102,6 +108,9 @@ struct HostsScreen: View {
                 draftPort: $draftPort,
                 draftUser: $draftUser,
                 draftAuthentication: $draftAuthentication,
+                draftUsesPersistentTerminal: $draftUsesPersistentTerminal,
+                draftPersistentTerminalBackend: $draftPersistentTerminalBackend,
+                draftPersistentSessionName: $draftPersistentSessionName,
                 addProfile: addProfile
             )
             .presentationDetents([.large])
@@ -123,6 +132,8 @@ struct HostsScreen: View {
             && !draftHost.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             && !draftUser.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             && validDraftPort != nil
+            && (!draftUsesPersistentTerminal
+                || PersistentTerminalConfiguration.validatedName(draftPersistentSessionName) != nil)
     }
 
     private func addProfile() {
@@ -138,6 +149,12 @@ struct HostsScreen: View {
                 username: draftUser,
                 authentication: draftAuthentication,
                 trustedHostKeySHA256: nil,
+                tmuxSession: draftUsesPersistentTerminal
+                    ? PersistentTerminalConfiguration(
+                        name: draftPersistentSessionName,
+                        backend: draftPersistentTerminalBackend
+                    )
+                    : nil,
                 lastConnected: nil
             )
         )
@@ -147,6 +164,9 @@ struct HostsScreen: View {
         draftPort = "22"
         draftUser = ""
         draftAuthentication = .password
+        draftUsesPersistentTerminal = false
+        draftPersistentTerminalBackend = .tmux
+        draftPersistentSessionName = ""
     }
 
     private var validDraftPort: Int? {
@@ -156,16 +176,58 @@ struct HostsScreen: View {
         return port
     }
 
+    private func updateProfile(_ profile: HostProfile) {
+        guard let index = profiles.firstIndex(where: { $0.id == profile.id }) else { return }
+        profiles[index] = profile
+    }
+
 }
 
 private struct HostConnectionSheet: View {
     let profile: HostProfile
     let hasSavedPassword: Bool
     let hasSavedPrivateKey: Bool
-    let connectTerminal: () -> Void
+    let updateProfile: (HostProfile) -> Void
+    let connectTerminal: (HostProfile) -> Void
     let connectCodex: () -> Void
+    let probeCapabilities: (HostProfile) async -> RemoteHostProbeOutcome
 
     @Environment(\.dismiss) private var dismiss
+    @State private var usesPersistentTerminal: Bool
+    @State private var persistentTerminalBackend: PersistentTerminalBackend
+    @State private var persistentSessionName: String
+    @State private var capabilityReport: RemoteHostCapabilityReport?
+    @State private var isProbingCapabilities = false
+    @State private var capabilityProbeError: String?
+
+    init(
+        profile: HostProfile,
+        hasSavedPassword: Bool,
+        hasSavedPrivateKey: Bool,
+        updateProfile: @escaping (HostProfile) -> Void,
+        connectTerminal: @escaping (HostProfile) -> Void,
+        connectCodex: @escaping () -> Void,
+        probeCapabilities: @escaping (HostProfile) async -> RemoteHostProbeOutcome
+    ) {
+        self.profile = profile
+        self.hasSavedPassword = hasSavedPassword
+        self.hasSavedPrivateKey = hasSavedPrivateKey
+        self.updateProfile = updateProfile
+        self.connectTerminal = connectTerminal
+        self.connectCodex = connectCodex
+        self.probeCapabilities = probeCapabilities
+
+        let savedConfiguration = profile.persistentTerminal
+        _usesPersistentTerminal = State(initialValue: savedConfiguration != nil)
+        _persistentTerminalBackend = State(initialValue: savedConfiguration?.backend ?? .tmux)
+        _persistentSessionName = State(
+            initialValue: savedConfiguration?.name ?? PersistentTerminalConfiguration.suggestedName(
+                profileName: profile.name,
+                host: profile.host
+            )
+        )
+        _capabilityReport = State(initialValue: profile.capabilityReport)
+    }
 
     var body: some View {
         NavigationStack {
@@ -176,16 +238,39 @@ private struct HostConnectionSheet: View {
                         credentialStatus: credentialStatus
                     )
 
+                    HostCapabilityCard(
+                        report: capabilityReport,
+                        isLoading: isProbingCapabilities,
+                        errorMessage: capabilityProbeError,
+                        canProbe: canProbeCapabilities,
+                        refresh: {
+                            Task { await refreshCapabilities() }
+                        }
+                    )
+
+                    PersistentTerminalCard(
+                        isEnabled: $usesPersistentTerminal,
+                        backend: $persistentTerminalBackend,
+                        sessionName: $persistentSessionName,
+                        suggestedName: suggestedPersistentSessionName,
+                        capability: capabilityReport?.capability(for: persistentTerminalBackend)
+                    )
+
                     VStack(alignment: .leading, spacing: 10) {
                         Text("Choose a workspace")
                             .font(.headline)
 
                         ConnectionModeButton(
-                            title: "Terminal",
-                            subtitle: "Interactive shell with keyboard tools",
-                            detail: "Commands, processes, and remote files",
+                            title: usesPersistentTerminal ? "Resume Terminal" : "Terminal",
+                            subtitle: usesPersistentTerminal
+                                ? "Persistent \(persistentTerminalBackend.displayTitle) session"
+                                : "Interactive shell with keyboard tools",
+                            detail: usesPersistentTerminal
+                                ? "Restores or creates \(persistentSessionName)"
+                                : "Commands, processes, and remote files",
                             systemImage: "terminal",
-                            action: connect(using: connectTerminal)
+                            isEnabled: canConnectTerminal,
+                            action: connectTerminalProfile
                         )
 
                         ConnectionModeButton(
@@ -210,6 +295,12 @@ private struct HostConnectionSheet: View {
                         dismiss()
                     }
                 }
+            }
+        }
+        .task {
+            if canProbeCapabilities,
+               capabilityReport == nil || capabilityReport?.isStale == true {
+                await refreshCapabilities()
             }
         }
     }
@@ -242,10 +333,237 @@ private struct HostConnectionSheet: View {
         )
     }
 
+    private var suggestedPersistentSessionName: String {
+        PersistentTerminalConfiguration.suggestedName(profileName: profile.name, host: profile.host)
+    }
+
+    private var canConnectTerminal: Bool {
+        !usesPersistentTerminal
+            || PersistentTerminalConfiguration.validatedName(persistentSessionName) != nil
+    }
+
+    private var canProbeCapabilities: Bool {
+        hasSavedPassword || hasSavedPrivateKey
+    }
+
+    @MainActor
+    private func refreshCapabilities() async {
+        guard canProbeCapabilities, !isProbingCapabilities else { return }
+        isProbingCapabilities = true
+        capabilityProbeError = nil
+        let outcome = await probeCapabilities(profile)
+        isProbingCapabilities = false
+        guard !Task.isCancelled else { return }
+
+        if let report = outcome.report {
+            capabilityReport = report
+            var updatedProfile = profile
+            updatedProfile.capabilityReport = report
+            updateProfile(updatedProfile)
+        } else {
+            capabilityProbeError = outcome.errorMessage ?? "Capability detection failed."
+        }
+    }
+
+    private func connectTerminalProfile() {
+        guard canConnectTerminal else { return }
+        var configuredProfile = profile
+        configuredProfile.capabilityReport = capabilityReport
+        configuredProfile.persistentTerminal = usesPersistentTerminal
+            ? PersistentTerminalConfiguration(
+                name: persistentSessionName,
+                backend: persistentTerminalBackend
+            )
+            : nil
+        updateProfile(configuredProfile)
+        dismiss()
+        connectTerminal(configuredProfile)
+    }
+
     private func connect(using action: @escaping () -> Void) -> () -> Void {
         {
             dismiss()
             action()
+        }
+    }
+}
+
+private struct PersistentTerminalCard: View {
+    @Binding var isEnabled: Bool
+    @Binding var backend: PersistentTerminalBackend
+    @Binding var sessionName: String
+    let suggestedName: String
+    let capability: RemoteComponentCapability?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Toggle(isOn: $isEnabled) {
+                Label("Persistent Terminal", systemImage: "rectangle.3.group")
+                    .font(.subheadline.weight(.semibold))
+            }
+            .onChange(of: isEnabled) {
+                if isEnabled, PersistentTerminalConfiguration.validatedName(sessionName) == nil {
+                    sessionName = suggestedName
+                }
+            }
+
+            if isEnabled {
+                Picker("Multiplexer", selection: $backend) {
+                    ForEach(PersistentTerminalBackend.allCases) { option in
+                        Text(option.compactTitle).tag(option)
+                    }
+                }
+                .pickerStyle(.segmented)
+
+                if let capability {
+                    HStack(spacing: 7) {
+                        Circle()
+                            .fill(capability.supportLevel.statusColor)
+                            .frame(width: 7, height: 7)
+                        Text("Detected: \(capability.supportLevel.title)")
+                            .fontWeight(.semibold)
+                        if !capability.version.isEmpty {
+                            Text("· \(capability.version)")
+                                .foregroundStyle(.secondary)
+                                .lineLimit(1)
+                        }
+                    }
+                    .font(.caption)
+                }
+
+                TextField("Session name", text: $sessionName)
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled()
+                    .font(.system(.body, design: .monospaced))
+                    .padding(.horizontal, 12)
+                    .frame(height: 42)
+                    .background(Color(.tertiarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 10))
+
+                if PersistentTerminalConfiguration.validatedName(sessionName) == nil {
+                    Text("Use 1–48 ASCII letters, numbers, hyphens, or underscores; start with a letter or number.")
+                        .foregroundStyle(ShellowTheme.warning)
+                } else {
+                    Text("\(backend.persistenceDetail) Disconnecting Shellow leaves it running for reconnect.")
+                        .foregroundStyle(.secondary)
+                }
+            } else {
+                Text("Starts a regular SSH shell. Enable this to preserve remote programs across reconnects.")
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .font(.caption)
+        .padding(16)
+        .background(Color(.secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 16))
+    }
+}
+
+private struct HostCapabilityCard: View {
+    let report: RemoteHostCapabilityReport?
+    let isLoading: Bool
+    let errorMessage: String?
+    let canProbe: Bool
+    let refresh: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 10) {
+                Label("Target Capabilities", systemImage: "desktopcomputer")
+                    .font(.subheadline.weight(.semibold))
+
+                Spacer()
+
+                Button(action: refresh) {
+                    if isLoading {
+                        ProgressView()
+                            .controlSize(.small)
+                    } else {
+                        Image(systemName: "arrow.clockwise")
+                    }
+                }
+                .buttonStyle(.plain)
+                .disabled(!canProbe || isLoading)
+                .accessibilityLabel("Refresh target capabilities")
+            }
+
+            if let report {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(report.system.displayTitle)
+                        .font(.subheadline.weight(.semibold))
+                    Text("\(report.system.architecture) · \(report.system.shellName) · \(report.system.kernelName) \(report.system.kernelRelease)")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
+                }
+
+                Divider()
+
+                ForEach(report.components) { component in
+                    VStack(alignment: .leading, spacing: 5) {
+                        HStack(spacing: 8) {
+                            Circle()
+                                .fill(component.supportLevel.statusColor)
+                                .frame(width: 8, height: 8)
+                            Text(component.backend.displayTitle)
+                                .font(.subheadline.weight(.semibold))
+                            Spacer()
+                            Text(component.supportLevel.title)
+                                .font(.caption.weight(.semibold))
+                                .foregroundStyle(component.supportLevel.statusColor)
+                        }
+
+                        if !component.version.isEmpty {
+                            Text(component.version)
+                                .font(.caption.monospaced())
+                                .foregroundStyle(.secondary)
+                                .lineLimit(1)
+                        }
+
+                        Text(component.featureSummary)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+
+                Text(
+                    report.isStale
+                        ? "Detection is older than 24 hours. Refresh recommended."
+                        : "Checked \(report.detectedAt.formatted(date: .abbreviated, time: .shortened))"
+                )
+                .font(.caption2)
+                .foregroundStyle(report.isStale ? ShellowTheme.warning : ShellowTheme.muted)
+            } else if isLoading {
+                HStack(spacing: 10) {
+                    ProgressView()
+                        .controlSize(.small)
+                    Text("Detecting system and multiplexer support…")
+                        .foregroundStyle(.secondary)
+                }
+                .font(.caption)
+            } else if let errorMessage {
+                Label(errorMessage, systemImage: "exclamationmark.triangle")
+                    .font(.caption)
+                    .foregroundStyle(ShellowTheme.warning)
+            } else {
+                Text(
+                    canProbe
+                        ? "Tap refresh to inspect this host without opening an interactive terminal."
+                        : "Save a password or private key to enable read-only capability detection."
+                )
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            }
+        }
+        .padding(16)
+        .background(Color(.secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 16))
+    }
+}
+
+private extension RemoteComponentSupportLevel {
+    var statusColor: Color {
+        switch self {
+        case .supported: ShellowTheme.success
+        case .limited: ShellowTheme.warning
+        case .unavailable: ShellowTheme.muted
         }
     }
 }
@@ -343,6 +661,7 @@ private struct ConnectionModeButton: View {
     let subtitle: String
     let detail: String
     let systemImage: String
+    var isEnabled = true
     let action: () -> Void
 
     var body: some View {
@@ -381,6 +700,8 @@ private struct ConnectionModeButton: View {
             .contentShape(RoundedRectangle(cornerRadius: 16))
         }
         .buttonStyle(.plain)
+        .disabled(!isEnabled)
+        .opacity(isEnabled ? 1 : 0.55)
         .accessibilityElement(children: .combine)
         .accessibilityAddTraits(.isButton)
         .accessibilityHint("Connect to \(title)")
@@ -393,6 +714,9 @@ private struct NewHostProfileSheet: View {
     @Binding var draftPort: String
     @Binding var draftUser: String
     @Binding var draftAuthentication: AuthenticationKind
+    @Binding var draftUsesPersistentTerminal: Bool
+    @Binding var draftPersistentTerminalBackend: PersistentTerminalBackend
+    @Binding var draftPersistentSessionName: String
     let addProfile: () -> Void
 
     @Environment(\.dismiss) private var dismiss
@@ -422,6 +746,38 @@ private struct NewHostProfileSheet: View {
                         ForEach(AuthenticationKind.allCases) { kind in
                             Text(kind.title).tag(kind)
                         }
+                    }
+                }
+
+                Section("Persistent Terminal") {
+                    Toggle("Restore a named session", isOn: $draftUsesPersistentTerminal)
+                        .onChange(of: draftUsesPersistentTerminal) {
+                            if draftUsesPersistentTerminal,
+                               PersistentTerminalConfiguration.validatedName(draftPersistentSessionName) == nil {
+                                draftPersistentSessionName = suggestedPersistentSessionName
+                            }
+                        }
+
+                    if draftUsesPersistentTerminal {
+                        Picker("Multiplexer", selection: $draftPersistentTerminalBackend) {
+                            ForEach(PersistentTerminalBackend.allCases) { backend in
+                                Text(backend.compactTitle).tag(backend)
+                            }
+                        }
+
+                        TextField("Session name", text: $draftPersistentSessionName)
+                            .textInputAutocapitalization(.never)
+                            .autocorrectionDisabled()
+                            .font(.system(.body, design: .monospaced))
+
+                        Text(persistentTerminalRequirement
+                            ?? "\(draftPersistentTerminalBackend.persistenceDetail)")
+                            .font(.footnote)
+                            .foregroundStyle(persistentTerminalRequirement == nil ? .secondary : ShellowTheme.warning)
+                    } else {
+                        Text("Optional. tmux, GNU screen, or Zellij can keep remote programs alive when the app disconnects.")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
                     }
                 }
             }
@@ -461,6 +817,21 @@ private struct NewHostProfileSheet: View {
         }
         guard let port = Int(draftPort), (1...65535).contains(port) else {
             return "Port must be a number from 1 to 65535."
+        }
+        if let persistentTerminalRequirement {
+            return persistentTerminalRequirement
+        }
+        return nil
+    }
+
+    private var suggestedPersistentSessionName: String {
+        PersistentTerminalConfiguration.suggestedName(profileName: draftName, host: draftHost)
+    }
+
+    private var persistentTerminalRequirement: String? {
+        guard draftUsesPersistentTerminal else { return nil }
+        guard PersistentTerminalConfiguration.validatedName(draftPersistentSessionName) != nil else {
+            return "Use 1–48 ASCII letters, numbers, hyphens, or underscores; start with a letter or number."
         }
         return nil
     }
@@ -3076,6 +3447,22 @@ private struct HostProfileRow: View {
                     Text(profile.hostKeyTrustTitle)
                         .font(.caption2)
                         .foregroundStyle(.secondary)
+                    if let report = profile.capabilityReport {
+                        Label(
+                            "\(report.system.familyTitle) · \(report.system.architecture)",
+                            systemImage: "desktopcomputer"
+                        )
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                    }
+                    if let persistentTerminal = profile.persistentTerminal {
+                        Label(
+                            "\(persistentTerminal.backend.compactTitle) · \(persistentTerminal.name)",
+                            systemImage: "rectangle.3.group"
+                        )
+                            .font(.caption2)
+                            .foregroundStyle(ShellowTheme.accent)
+                    }
                 }
 
                 Spacer()
@@ -3097,6 +3484,9 @@ private struct HostProfileRow: View {
         sshKeys: .constant([]),
         onOpenSettings: {},
         connectTerminal: { _ in },
-        connectCodex: { _ in }
+        connectCodex: { _ in },
+        probeCapabilities: { _ in
+            .failure("Preview")
+        }
     )
 }

@@ -471,6 +471,77 @@ Java_xyz_zinglix_shellow_core_ShellowNative_nativeStartPasswordShellJson(
 }
 
 extern "C" JNIEXPORT jstring JNICALL
+Java_xyz_zinglix_shellow_core_ShellowNative_nativeConnectPasswordExecJson(
+    JNIEnv *env,
+    jobject,
+    jlong handle,
+    jstring name,
+    jstring host,
+    jint port,
+    jstring username,
+    jstring trustedHostKeySha256,
+    jstring password,
+    jstring command
+) {
+    std::string nameText = readString(env, name);
+    std::string hostText = readString(env, host);
+    std::string usernameText = readString(env, username);
+    std::string trustedHostKeySha256Text = readString(env, trustedHostKeySha256);
+    std::string passwordText = readString(env, password);
+    std::string commandText = readString(env, command);
+    return takeJson(
+        env,
+        shellow_engine_connect_password_exec_json(
+            engineFromHandle(handle),
+            nameText.c_str(),
+            hostText.c_str(),
+            static_cast<uint16_t>(port),
+            usernameText.c_str(),
+            trustedHostKeySha256Text.c_str(),
+            passwordText.c_str(),
+            commandText.c_str()
+        )
+    );
+}
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_xyz_zinglix_shellow_core_ShellowNative_nativeConnectPrivateKeyExecJson(
+    JNIEnv *env,
+    jobject,
+    jlong handle,
+    jstring name,
+    jstring host,
+    jint port,
+    jstring username,
+    jstring trustedHostKeySha256,
+    jstring privateKeyPem,
+    jstring passphrase,
+    jstring command
+) {
+    std::string nameText = readString(env, name);
+    std::string hostText = readString(env, host);
+    std::string usernameText = readString(env, username);
+    std::string trustedHostKeySha256Text = readString(env, trustedHostKeySha256);
+    std::string privateKeyPemText = readString(env, privateKeyPem);
+    std::string passphraseText = readString(env, passphrase);
+    std::string commandText = readString(env, command);
+    return takeJson(
+        env,
+        shellow_engine_connect_private_key_exec_json(
+            engineFromHandle(handle),
+            nameText.c_str(),
+            hostText.c_str(),
+            static_cast<uint16_t>(port),
+            usernameText.c_str(),
+            trustedHostKeySha256Text.c_str(),
+            privateKeyPemText.c_str(),
+            passphraseText.c_str(),
+            commandText.c_str()
+        )
+    );
+}
+
+extern "C" JNIEXPORT jstring JNICALL
 Java_xyz_zinglix_shellow_core_ShellowNative_nativeStartPrivateKeyShellJson(
     JNIEnv *env,
     jobject,

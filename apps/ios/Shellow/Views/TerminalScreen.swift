@@ -34,6 +34,69 @@ private struct PendingRemoteClipboard: Identifiable {
     }
 }
 
+private enum PersistentTerminalSheetDestination: Identifiable {
+    case controls(configuration: PersistentTerminalConfiguration)
+    case newSession(configuration: PersistentTerminalConfiguration, suggestedName: String)
+
+    var id: String {
+        switch self {
+        case .controls:
+            "controls"
+        case .newSession:
+            "new-session"
+        }
+    }
+}
+
+@MainActor
+private func sendMultiplexerKeySequence(
+    backend: PersistentTerminalBackend,
+    key: String,
+    using sendInput: @escaping (String) -> Void
+) {
+    sendInput(backend.controlPrefix)
+    DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+        sendInput(key)
+    }
+}
+
+@MainActor
+private func sendTmuxCommandSequence(
+    _ command: String,
+    using sendInput: @escaping (String) -> Void
+) {
+    // tmux changes input modes after the prefix command. Sending the command in
+    // the same SSH write can race that transition and leave an empty prompt.
+    DispatchQueue.main.asyncAfter(deadline: .now() + 0.20) {
+        sendInput("\u{2}")
+    }
+    DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
+        sendInput(":")
+    }
+    DispatchQueue.main.asyncAfter(deadline: .now() + 0.55) {
+        sendInput(command)
+    }
+    DispatchQueue.main.asyncAfter(deadline: .now() + 0.75) {
+        sendInput("\r")
+    }
+}
+
+@MainActor
+private func sendDetachAndAttachSequence(
+    configuration: PersistentTerminalConfiguration,
+    targetSessionName: String,
+    using sendInput: @escaping (String) -> Void
+) {
+    let backend = configuration.backend
+    sendMultiplexerKeySequence(backend: backend, key: "d", using: sendInput)
+    DispatchQueue.main.asyncAfter(deadline: .now() + 0.55) {
+        sendInput(backend.attachCommand(sessionName: targetSessionName))
+    }
+    DispatchQueue.main.asyncAfter(deadline: .now() + 0.75) {
+        sendInput("\r")
+    }
+}
+
 private struct TranscriptSaveResult: Identifiable {
     let id = UUID()
     let title: String
@@ -210,6 +273,7 @@ struct TerminalScreen: View {
     @Binding var session: TerminalSession
     let settings: ShellowSettings
     let renderTick: Int
+    let persistentTerminal: PersistentTerminalConfiguration?
     let onTerminalInput: (String) -> Void
     let onReconnect: (() -> Void)?
     let onDisconnect: () -> Void
@@ -234,6 +298,8 @@ struct TerminalScreen: View {
     @State private var keyboardAvoidance = TerminalKeyboardAvoidanceState.hidden
     @State private var keyboardLayoutAvoidance = TerminalKeyboardAvoidanceState.hidden
     @State private var keyboardLayoutCommitToken = 0
+    @State private var terminalInputRevision = 0
+    @State private var persistentTerminalSheetDestination: PersistentTerminalSheetDestination?
 
     var body: some View {
         let search = session.searchPresentation(query: searchQuery, focusedIndex: searchIndex)
@@ -278,6 +344,7 @@ struct TerminalScreen: View {
                     search: search,
                     selection: $selection,
                     renderTick: renderTick,
+                    inputRevision: terminalInputRevision,
                     contentTopInset: contentTopInset,
                     contentBottomInset: contentBottomInset,
                     reserveBottomScrollSpace: keyboardCursorOverlap > 0,
@@ -329,6 +396,7 @@ struct TerminalScreen: View {
                         isSearchVisible: $isSearchVisible,
                         selectedText: session.selectedText(for: selection),
                         selectedLink: session.selectedText(for: selection)?.firstTerminalURL,
+                        persistentTerminal: persistentTerminal,
                         showKeyboardToolbar: settings.showKeyboardToolbar,
                         isCtrlArmed: $isCtrlArmed,
                         isAltArmed: $isAltArmed,
@@ -342,6 +410,7 @@ struct TerminalScreen: View {
                         onCopyLink: copySelectedLink,
                         clearSelection: { selection = nil },
                         onPasteClipboard: pasteFromClipboard,
+                        onShowPersistentTerminalControls: presentPersistentTerminalControls,
                         sendInput: sendTerminalInput
                     )
                 }
@@ -402,6 +471,24 @@ struct TerminalScreen: View {
                 dismissButton: .default(Text("OK"))
             )
         }
+        .sheet(item: $persistentTerminalSheetDestination) { destination in
+            switch destination {
+            case .controls(let configuration):
+                PersistentTerminalControlSheet(
+                    configuration: configuration,
+                    onNewSession: presentNewPersistentSession,
+                    sendInput: sendTerminalInput
+                )
+                .presentationDetents([.large])
+            case .newSession(let configuration, let suggestedName):
+                PersistentTerminalNewSessionSheet(
+                    configuration: configuration,
+                    suggestedName: suggestedName,
+                    create: createPersistentSession
+                )
+                .presentationDetents([.medium])
+            }
+        }
         .confirmationDialog(
             pendingDestructiveAction?.title ?? "Terminal Action",
             isPresented: Binding(
@@ -446,6 +533,7 @@ struct TerminalScreen: View {
 
     private func sendTerminalInput(_ input: String) {
         selection = nil
+        terminalInputRevision &+= 1
         onTerminalInput(input)
     }
 
@@ -592,6 +680,40 @@ struct TerminalScreen: View {
         searchIndex = 0
     }
 
+    private func presentNewPersistentSession() {
+        guard let configuration = persistentTerminal else { return }
+        let suffix = "-2"
+        let base = String(configuration.name.prefix(
+            PersistentTerminalConfiguration.maximumNameLength - suffix.count
+        ))
+        persistentTerminalSheetDestination = .newSession(
+            configuration: configuration,
+            suggestedName: base + suffix
+        )
+    }
+
+    private func presentPersistentTerminalControls() {
+        guard let persistentTerminal else { return }
+        persistentTerminalSheetDestination = .controls(configuration: persistentTerminal)
+    }
+
+    private func createPersistentSession(
+        configuration: PersistentTerminalConfiguration,
+        name: String
+    ) {
+        guard let name = PersistentTerminalConfiguration.validatedName(name) else { return }
+        switch configuration.backend {
+        case .tmux:
+            sendTmuxCommandSequence("new-session -s \(name)", using: sendTerminalInput)
+        case .screen, .zellij:
+            sendDetachAndAttachSequence(
+                configuration: configuration,
+                targetSessionName: name,
+                using: sendTerminalInput
+            )
+        }
+    }
+
     private func presentRemoteClipboardIfNeeded() {
         let sequence = session.clipboardSequence
         guard
@@ -665,6 +787,25 @@ private struct TerminalFloatingHeader: View {
                     .stroke(ShellowTheme.keyBackground.opacity(0.7), lineWidth: 1)
             )
 
+            if session.bellCount > 0 {
+                HStack(spacing: 4) {
+                    Image(systemName: "bell.fill")
+                    Text("\(session.bellCount)")
+                        .contentTransition(.numericText())
+                }
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(ShellowTheme.warning)
+                .padding(.horizontal, 8)
+                .frame(height: 34)
+                .background(
+                    ShellowTheme.warning.opacity(0.16),
+                    in: RoundedRectangle(cornerRadius: 8)
+                )
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel("Terminal Bell")
+                .accessibilityValue("\(session.bellCount)")
+            }
+
             if session.state == .disconnected, let onReconnect {
                 Button(action: onReconnect) {
                     Image(systemName: "arrow.clockwise")
@@ -708,6 +849,7 @@ private struct TerminalViewport: View {
     let search: TerminalSearchPresentation
     @Binding var selection: TerminalSelection?
     let renderTick: Int
+    let inputRevision: Int
     let contentTopInset: CGFloat
     let contentBottomInset: CGFloat
     let reserveBottomScrollSpace: Bool
@@ -728,11 +870,21 @@ private struct TerminalViewport: View {
     @State private var inputFocusNonce = 0
     @State private var gridScrollOffsetY: CGFloat = 0
     @State private var gridUsesDirectScrollGeometry = false
+    @State private var historyScrollGeometry = TerminalScrollContentGeometry.zero
 
     var body: some View {
         GeometryReader { geometry in
             Group {
                 if let grid = session.grid, grid.hasVisibleContent || grid.activeScreen == .alternate {
+                    let rowHeight = TerminalMetrics.rowHeight(
+                        fontSize: fontSize,
+                        lineHeightScale: lineHeightScale
+                    )
+                    let isNearBottom = grid.isNearBottom(
+                        scrollOffset: gridScrollOffsetY,
+                        rowHeight: rowHeight
+                    )
+
                     ScrollViewReader { proxy in
                         ZStack(alignment: .bottomTrailing) {
                             ScrollView(.vertical) {
@@ -765,9 +917,18 @@ private struct TerminalViewport: View {
                                 gridUsesDirectScrollGeometry = true
                                 gridScrollOffsetY = offsetY
                             }
+                            .onPreferenceChange(TerminalGridContentMinYPreferenceKey.self) { minY in
+                                guard !gridUsesDirectScrollGeometry else { return }
+                                gridScrollOffsetY = max(
+                                    0,
+                                    TerminalMetrics.viewportVerticalPadding - minY
+                                )
+                            }
                             .id(grid.activeScreen)
 
-                            if !grid.lines.isEmpty, grid.activeScreen == .primary {
+                            if !grid.lines.isEmpty,
+                               grid.activeScreen == .primary,
+                               !isNearBottom {
                                 TerminalJumpToBottomButton {
                                     scrollGridToBottom(proxy, lineCount: grid.lines.count)
                                 }
@@ -792,9 +953,28 @@ private struct TerminalViewport: View {
                                 proxy.scrollTo(TerminalSearchHit.gridRowID(row), anchor: .center)
                             }
                         }
-                        .onChange(of: grid.lines.count) {
+                        .onChange(of: grid.lines.count) { previousCount, _ in
                             guard search.isEmpty, !grid.lines.isEmpty, grid.activeScreen == .primary else { return }
+                            guard grid.isNearBottom(
+                                scrollOffset: gridScrollOffsetY,
+                                rowHeight: rowHeight,
+                                lineCount: previousCount
+                            ) else {
+                                return
+                            }
                             scrollGridToBottom(proxy, lineCount: grid.lines.count)
+                        }
+                        .onChange(of: inputRevision) {
+                            guard search.isEmpty,
+                                  grid.activeScreen == .primary,
+                                  !isNearBottom else {
+                                return
+                            }
+                            scrollGridToBottom(
+                                proxy,
+                                lineCount: grid.lines.count,
+                                animated: false
+                            )
                         }
                         .onChange(of: reserveBottomScrollSpace) {
                             guard search.isEmpty, !grid.lines.isEmpty, grid.activeScreen == .primary else { return }
@@ -802,6 +982,14 @@ private struct TerminalViewport: View {
                         }
                     }
                 } else {
+                    let isNearBottom = historyScrollGeometry.isNearBottom(
+                        viewportHeight: geometry.size.height,
+                        threshold: TerminalMetrics.rowHeight(
+                            fontSize: fontSize,
+                            lineHeightScale: lineHeightScale
+                        ) * 1.5
+                    )
+
                     ScrollViewReader { proxy in
                         ZStack(alignment: .bottomTrailing) {
                             ScrollView {
@@ -830,10 +1018,25 @@ private struct TerminalViewport: View {
                                 .padding(.vertical, TerminalMetrics.viewportVerticalPadding)
                                 .frame(maxWidth: .infinity, alignment: .leading)
                                 .id(historyRenderKey)
+                                .background(
+                                    GeometryReader { proxy in
+                                        Color.clear.preference(
+                                            key: TerminalHistoryScrollGeometryPreferenceKey.self,
+                                            value: TerminalScrollContentGeometry(
+                                                minY: proxy.frame(in: .named(Self.historyScrollCoordinateSpaceName)).minY,
+                                                height: proxy.size.height
+                                            )
+                                        )
+                                    }
+                                )
                             }
                             .scrollIndicators(.hidden)
+                            .coordinateSpace(name: Self.historyScrollCoordinateSpaceName)
+                            .onPreferenceChange(TerminalHistoryScrollGeometryPreferenceKey.self) { value in
+                                historyScrollGeometry = value
+                            }
 
-                            if !session.rows.isEmpty {
+                            if !session.rows.isEmpty, !isNearBottom {
                                 TerminalJumpToBottomButton {
                                     scrollHistoryToBottom(proxy, rowCount: session.rows.count)
                                 }
@@ -845,8 +1048,16 @@ private struct TerminalViewport: View {
                             scrollHistoryToBottom(proxy, rowCount: session.rows.count, animated: false)
                         }
                         .onChange(of: session.rows.count) {
-                            guard search.isEmpty else { return }
+                            guard search.isEmpty, isNearBottom else { return }
                             scrollHistoryToBottom(proxy, rowCount: session.rows.count)
+                        }
+                        .onChange(of: inputRevision) {
+                            guard search.isEmpty, !isNearBottom else { return }
+                            scrollHistoryToBottom(
+                                proxy,
+                                rowCount: session.rows.count,
+                                animated: false
+                            )
                         }
                         .onChange(of: reserveBottomScrollSpace) {
                             guard search.isEmpty else { return }
@@ -903,6 +1114,7 @@ private struct TerminalViewport: View {
     }
 
     private static let bottomAnchorID = "terminal-bottom-anchor"
+    private static let historyScrollCoordinateSpaceName = "TerminalHistoryScroll"
 
     private func report(size: CGSize) {
         let grid = TerminalGridSize(size: size, fontSize: fontSize, lineHeightScale: lineHeightScale)
@@ -1304,12 +1516,49 @@ private struct TerminalGridSurface: View {
 }
 
 private extension TerminalGridSnapshot {
+    func isNearBottom(
+        scrollOffset: CGFloat,
+        rowHeight: CGFloat,
+        lineCount: Int? = nil
+    ) -> Bool {
+        guard activeScreen == .primary, rowHeight > 0 else { return true }
+        let visibleRows = max(1, rows)
+        let contentRows = lineCount ?? lines.count
+        let maximumOffset = CGFloat(max(0, contentRows - visibleRows)) * rowHeight
+        return maximumOffset - scrollOffset <= rowHeight * 1.5
+    }
+
     func viewportFirstRow(scrollOffset: CGFloat, rowHeight: CGFloat) -> Int {
         guard activeScreen == .primary, rowHeight > 0, lines.count > rows else { return 0 }
         let visibleRows = max(1, Int(rows))
         let maxFirstRow = max(0, lines.count - visibleRows)
         let requestedFirstRow = Int((scrollOffset / rowHeight).rounded(.down))
         return max(0, min(requestedFirstRow, maxFirstRow))
+    }
+}
+
+private struct TerminalScrollContentGeometry: Equatable {
+    static let zero = TerminalScrollContentGeometry(minY: 0, height: 0)
+
+    var minY: CGFloat
+    var height: CGFloat
+
+    func isNearBottom(viewportHeight: CGFloat, threshold: CGFloat) -> Bool {
+        guard height > 0, viewportHeight > 0 else { return true }
+        let scrollOffset = max(0, -minY)
+        let maximumOffset = max(0, height - viewportHeight)
+        return maximumOffset - scrollOffset <= threshold
+    }
+}
+
+private struct TerminalHistoryScrollGeometryPreferenceKey: PreferenceKey {
+    static let defaultValue = TerminalScrollContentGeometry.zero
+
+    static func reduce(
+        value: inout TerminalScrollContentGeometry,
+        nextValue: () -> TerminalScrollContentGeometry
+    ) {
+        value = nextValue()
     }
 }
 
@@ -1710,6 +1959,7 @@ private struct TerminalControlsPanel: View {
     @Binding var isSearchVisible: Bool
     let selectedText: String?
     let selectedLink: String?
+    let persistentTerminal: PersistentTerminalConfiguration?
     let showKeyboardToolbar: Bool
     @Binding var isCtrlArmed: Bool
     @Binding var isAltArmed: Bool
@@ -1723,6 +1973,7 @@ private struct TerminalControlsPanel: View {
     let onCopyLink: () -> Void
     let clearSelection: () -> Void
     let onPasteClipboard: () -> Void
+    let onShowPersistentTerminalControls: () -> Void
     let sendInput: (String) -> Void
 
     var body: some View {
@@ -1732,6 +1983,7 @@ private struct TerminalControlsPanel: View {
                 isAltArmed: $isAltArmed,
                 selectedText: selectedText,
                 selectedLink: selectedLink,
+                persistentTerminal: persistentTerminal,
                 applicationCursorKeys: applicationCursorKeys,
                 onEnter: onEnter,
                 onClearTerminal: onClearTerminal,
@@ -1742,6 +1994,7 @@ private struct TerminalControlsPanel: View {
                 onCopyLink: onCopyLink,
                 clearSelection: clearSelection,
                 onPasteClipboard: onPasteClipboard,
+                onShowPersistentTerminalControls: onShowPersistentTerminalControls,
                 sendInput: sendInput
             )
 
@@ -1770,6 +2023,7 @@ private struct TerminalInputBar: View {
     @Binding var isAltArmed: Bool
     let selectedText: String?
     let selectedLink: String?
+    let persistentTerminal: PersistentTerminalConfiguration?
     let applicationCursorKeys: Bool
     let onEnter: () -> Void
     let onClearTerminal: () -> Void
@@ -1781,6 +2035,7 @@ private struct TerminalInputBar: View {
     let onCopyLink: () -> Void
     let clearSelection: () -> Void
     let onPasteClipboard: () -> Void
+    let onShowPersistentTerminalControls: () -> Void
     let sendInput: (String) -> Void
 
     var body: some View {
@@ -1811,6 +2066,16 @@ private struct TerminalInputBar: View {
                 }
                 Button(action: onPasteClipboard) {
                     Label("Paste", systemImage: "doc.on.clipboard")
+                }
+
+                if let persistentTerminal {
+                    Divider()
+                    Button(action: onShowPersistentTerminalControls) {
+                        Label(
+                            "\(persistentTerminal.backend.compactTitle) · \(persistentTerminal.name)",
+                            systemImage: "rectangle.3.group"
+                        )
+                    }
                 }
 
                 if selectedText != nil {
@@ -1862,6 +2127,282 @@ private struct TerminalInputBar: View {
             isAltArmed = false
         } else {
             sendInput(input)
+        }
+    }
+}
+
+private struct PersistentTerminalControlSheet: View {
+    @Environment(\.dismiss) private var dismiss
+
+    let configuration: PersistentTerminalConfiguration
+    let onNewSession: () -> Void
+    let sendInput: (String) -> Void
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section("Sessions") {
+                    Button {
+                        performAfterDismiss(onNewSession)
+                    } label: {
+                        Label("New Session…", systemImage: "plus")
+                    }
+                    Button {
+                        returnToDefaultSession()
+                    } label: {
+                        Label("Return to \(configuration.name)", systemImage: "arrow.uturn.backward")
+                    }
+
+                    switch configuration.backend {
+                    case .tmux:
+                        Button {
+                            sendKey("s")
+                        } label: {
+                            Label("Choose Session", systemImage: "list.bullet")
+                        }
+                        Button {
+                            sendKey("(")
+                        } label: {
+                            Label("Previous Session", systemImage: "chevron.left")
+                        }
+                        Button {
+                            sendKey(")")
+                        } label: {
+                            Label("Next Session", systemImage: "chevron.right")
+                        }
+                        Button {
+                            sendKey("$")
+                        } label: {
+                            Label("Rename Session", systemImage: "pencil")
+                        }
+                    case .screen:
+                        EmptyView()
+                    case .zellij:
+                        Button {
+                            sendKey("w")
+                        } label: {
+                            Label("Session Manager", systemImage: "list.bullet.rectangle")
+                        }
+                    }
+                }
+
+                backendWorkspaceControls
+
+                Section {
+                    Button {
+                        sendKey("d")
+                    } label: {
+                        Label("Detach and Keep Running", systemImage: "rectangle.portrait.and.arrow.right")
+                    }
+
+                    Text("Uses \(configuration.backend.displayTitle)'s default \(configuration.backend.controlPrefixLabel) control prefix.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .navigationTitle("\(configuration.backend.compactTitle) · \(configuration.name)")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Done") { dismiss() }
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var backendWorkspaceControls: some View {
+        switch configuration.backend {
+        case .tmux:
+            Section("Windows") {
+                controlButton("New Window", systemImage: "plus.rectangle", key: "c")
+                controlButton("Choose Window", systemImage: "rectangle.stack", key: "w")
+                controlButton("Previous Window", systemImage: "chevron.left", key: "p")
+                controlButton("Next Window", systemImage: "chevron.right", key: "n")
+            }
+
+            Section("Panes") {
+                controlButton("Split Left / Right", systemImage: "rectangle.split.2x1", key: "%")
+                controlButton("Split Top / Bottom", systemImage: "rectangle.split.1x2", key: "\"")
+            }
+
+            Section("Command") {
+                controlButton("Command Prompt", systemImage: "command", key: ":")
+            }
+        case .screen:
+            Section("Windows") {
+                controlButton("New Window", systemImage: "plus.rectangle", key: "c")
+                controlButton("Choose Window", systemImage: "rectangle.stack", key: "\"")
+                controlButton("Previous Window", systemImage: "chevron.left", key: "p")
+                controlButton("Next Window", systemImage: "chevron.right", key: "n")
+                controlButton("Rename Window", systemImage: "pencil", key: "A")
+            }
+
+            Section("Regions") {
+                controlButton("Split Top / Bottom", systemImage: "rectangle.split.1x2", key: "S")
+                controlButton("Focus Next Region", systemImage: "rectangle.2.swap", key: "\t")
+                controlButton("Close Region", systemImage: "xmark.rectangle", key: "X")
+            }
+
+            Section("Command") {
+                controlButton("Command Prompt", systemImage: "command", key: ":")
+            }
+        case .zellij:
+            Section("Tabs") {
+                modeButton("New Tab", systemImage: "plus.rectangle.on.rectangle", mode: "\u{14}", key: "n")
+                modeButton("Previous Tab", systemImage: "chevron.left", mode: "\u{14}", key: "h")
+                modeButton("Next Tab", systemImage: "chevron.right", mode: "\u{14}", key: "l")
+                modeButton("Rename Tab", systemImage: "pencil", mode: "\u{14}", key: "r")
+            }
+
+            Section("Panes") {
+                modeButton("New Pane", systemImage: "plus.rectangle", mode: "\u{10}", key: "n")
+                modeButton("Split Below", systemImage: "rectangle.split.1x2", mode: "\u{10}", key: "d")
+                modeButton("Split Right", systemImage: "rectangle.split.2x1", mode: "\u{10}", key: "r")
+                modeButton("Switch Focus", systemImage: "rectangle.2.swap", mode: "\u{10}", key: "p")
+                modeButton("Toggle Fullscreen", systemImage: "arrow.up.left.and.arrow.down.right", mode: "\u{10}", key: "f")
+            }
+        }
+    }
+
+    private func controlButton(
+        _ title: String,
+        systemImage: String,
+        key: String
+    ) -> some View {
+        Button {
+            sendKey(key)
+        } label: {
+            Label(title, systemImage: systemImage)
+        }
+    }
+
+    private func modeButton(
+        _ title: String,
+        systemImage: String,
+        mode: String,
+        key: String
+    ) -> some View {
+        Button {
+            performAfterDismiss {
+                sendInput(mode)
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+                    sendInput(key)
+                }
+            }
+        } label: {
+            Label(title, systemImage: systemImage)
+        }
+    }
+
+    private func sendKey(_ key: String) {
+        performAfterDismiss {
+            sendMultiplexerKeySequence(
+                backend: configuration.backend,
+                key: key,
+                using: sendInput
+            )
+        }
+    }
+
+    private func returnToDefaultSession() {
+        performAfterDismiss {
+            switch configuration.backend {
+            case .tmux:
+                sendTmuxCommandSequence(
+                    "switch-client -t \(configuration.name)",
+                    using: sendInput
+                )
+            case .screen, .zellij:
+                sendDetachAndAttachSequence(
+                    configuration: configuration,
+                    targetSessionName: configuration.name,
+                    using: sendInput
+                )
+            }
+        }
+    }
+
+    private func performAfterDismiss(_ action: @escaping () -> Void) {
+        dismiss()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.45, execute: action)
+    }
+}
+
+private struct PersistentTerminalNewSessionSheet: View {
+    let configuration: PersistentTerminalConfiguration
+    let create: (PersistentTerminalConfiguration, String) -> Void
+
+    @Environment(\.dismiss) private var dismiss
+    @State private var sessionName: String
+    @FocusState private var isSessionNameFocused: Bool
+
+    init(
+        configuration: PersistentTerminalConfiguration,
+        suggestedName: String,
+        create: @escaping (PersistentTerminalConfiguration, String) -> Void
+    ) {
+        self.configuration = configuration
+        self.create = create
+        _sessionName = State(initialValue: suggestedName)
+    }
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section("\(configuration.backend.displayTitle) Session") {
+                    TextField("Session name", text: $sessionName)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                        .font(.system(.body, design: .monospaced))
+                        .focused($isSessionNameFocused)
+                        .submitLabel(.done)
+                        .onSubmit(createSession)
+
+                    Text(requirement ?? creationDetail)
+                        .font(.footnote)
+                        .foregroundStyle(requirement == nil ? .secondary : ShellowTheme.warning)
+                }
+            }
+            .navigationTitle("New \(configuration.backend.compactTitle) Session")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") { dismiss() }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Create", action: createSession)
+                        .disabled(requirement != nil)
+                }
+            }
+            .onAppear {
+                isSessionNameFocused = true
+            }
+        }
+    }
+
+    private var creationDetail: String {
+        switch configuration.backend {
+        case .tmux:
+            "Creates a new tmux session and switches the current client to it."
+        case .screen:
+            "Detaches the current screen session, then creates or attaches to the new name."
+        case .zellij:
+            "Detaches the current Zellij session, then creates or attaches to the new name."
+        }
+    }
+
+    private var requirement: String? {
+        PersistentTerminalConfiguration.validatedName(sessionName) == nil
+            ? "Use 1–48 ASCII letters, numbers, hyphens, or underscores; start with a letter or number."
+            : nil
+    }
+
+    private func createSession() {
+        guard let name = PersistentTerminalConfiguration.validatedName(sessionName) else { return }
+        dismiss()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) {
+            create(configuration, name)
         }
     }
 }
@@ -2713,6 +3254,10 @@ enum ShellowTheme {
         session: .constant(.preview),
         settings: ShellowSettings(),
         renderTick: 0,
+        persistentTerminal: PersistentTerminalConfiguration(
+            name: "shellow-preview",
+            backend: .tmux
+        ),
         onTerminalInput: { _ in },
         onReconnect: nil,
         onDisconnect: {},
