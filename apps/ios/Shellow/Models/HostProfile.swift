@@ -54,6 +54,38 @@ struct HostProfile: Identifiable, Hashable, Codable {
         let backend = configuration.backend
         return "if command -v \(backend.executable) >/dev/null 2>&1; then \(backend.attachCommand(sessionName: configuration.name)); else echo 'Shellow: \(backend.displayTitle) is not installed; continuing with the regular shell.'; fi"
     }
+
+    func duplicated(existingNames: [String]) -> HostProfile {
+        var duplicate = self
+        duplicate.id = UUID()
+        duplicate.name = duplicateProfileName(from: name, existingNames: existingNames)
+        duplicate.lastConnected = nil
+        return duplicate
+    }
+}
+
+func duplicateProfileName(from profileName: String, existingNames: [String]) -> String {
+    let trimmedName = profileName.trimmingCharacters(in: .whitespacesAndNewlines)
+    let fallbackName = trimmedName.isEmpty ? "Profile" : trimmedName
+    let suffixRange = fallbackName.range(
+        of: #" Copy(?: [0-9]+)?$"#,
+        options: .regularExpression
+    )
+    let baseName = suffixRange.map { String(fallbackName[..<$0.lowerBound]) } ?? fallbackName
+    let occupiedNames = Set(existingNames.map {
+        $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+    })
+
+    let firstCandidate = "\(baseName) Copy"
+    if !occupiedNames.contains(firstCandidate.lowercased()) {
+        return firstCandidate
+    }
+
+    var copyNumber = 2
+    while occupiedNames.contains("\(baseName) Copy \(copyNumber)".lowercased()) {
+        copyNumber += 1
+    }
+    return "\(baseName) Copy \(copyNumber)"
 }
 
 enum ProfileLaunchKind: String, CaseIterable, Identifiable, Codable {
@@ -126,6 +158,14 @@ enum PersistentTerminalBackend: String, CaseIterable, Identifiable, Codable {
         case .tmux: "Ctrl-B"
         case .screen: "Ctrl-A"
         case .zellij: "Ctrl-O"
+        }
+    }
+
+    var scrollModeSequence: String {
+        switch self {
+        case .tmux: "\u{2}["
+        case .screen: "\u{1}["
+        case .zellij: "\u{13}"
         }
     }
 

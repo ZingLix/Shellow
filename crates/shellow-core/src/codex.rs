@@ -26,36 +26,59 @@ SHELLOW_CODEX_SERVER_PID=""
 if [ -f "$SHELLOW_CODEX_PID_FILE" ]; then
     SHELLOW_CODEX_SERVER_PID="$(sed -n '1p' "$SHELLOW_CODEX_PID_FILE" 2>/dev/null)"
 fi
-if [ -z "$SHELLOW_CODEX_SERVER_PID" ] || ! kill -0 "$SHELLOW_CODEX_SERVER_PID" >/dev/null 2>&1 || [ ! -S "$SHELLOW_CODEX_SOCKET" ]; then
+
+shellow_codex_pid_is_server() {
+    case "$SHELLOW_CODEX_SERVER_PID" in
+        ''|*[!0-9]*) return 1 ;;
+    esac
+    kill -0 "$SHELLOW_CODEX_SERVER_PID" >/dev/null 2>&1 || return 1
+    SHELLOW_CODEX_SERVER_COMMAND="$(ps -p "$SHELLOW_CODEX_SERVER_PID" -o command= 2>/dev/null)"
+    case "$SHELLOW_CODEX_SERVER_COMMAND" in
+        *"codex app-server"*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+shellow_codex_start_server() {
+    if shellow_codex_pid_is_server; then
+        kill "$SHELLOW_CODEX_SERVER_PID" >/dev/null 2>&1 || true
+        SHELLOW_CODEX_STOP_WAIT=0
+        while kill -0 "$SHELLOW_CODEX_SERVER_PID" >/dev/null 2>&1 && [ "$SHELLOW_CODEX_STOP_WAIT" -lt 20 ]; do
+            SHELLOW_CODEX_STOP_WAIT=$((SHELLOW_CODEX_STOP_WAIT + 1))
+            sleep 0.1
+        done
+    fi
     rm -f "$SHELLOW_CODEX_SOCKET" "$SHELLOW_CODEX_PID_FILE"
     nohup codex app-server --listen "unix://$SHELLOW_CODEX_SOCKET" >"$SHELLOW_CODEX_LOG" 2>&1 </dev/null &
     SHELLOW_CODEX_SERVER_PID=$!
     printf '%s\n' "$SHELLOW_CODEX_SERVER_PID" >"$SHELLOW_CODEX_PID_FILE"
-fi
-SHELLOW_CODEX_WAIT=0
-while [ ! -S "$SHELLOW_CODEX_SOCKET" ] && [ "$SHELLOW_CODEX_WAIT" -lt 50 ]; do
-    if ! kill -0 "$SHELLOW_CODEX_SERVER_PID" >/dev/null 2>&1; then
-        break
+    SHELLOW_CODEX_WAIT=0
+    while [ ! -S "$SHELLOW_CODEX_SOCKET" ] && [ "$SHELLOW_CODEX_WAIT" -lt 50 ]; do
+        if ! kill -0 "$SHELLOW_CODEX_SERVER_PID" >/dev/null 2>&1; then
+            break
+        fi
+        SHELLOW_CODEX_WAIT=$((SHELLOW_CODEX_WAIT + 1))
+        sleep 0.1
+    done
+    if [ ! -S "$SHELLOW_CODEX_SOCKET" ]; then
+        echo "Unable to start the background Codex app-server." >&2
+        sed -n '1,12p' "$SHELLOW_CODEX_LOG" >&2
+        return 1
     fi
-    SHELLOW_CODEX_WAIT=$((SHELLOW_CODEX_WAIT + 1))
-    sleep 0.1
-done
-if [ ! -S "$SHELLOW_CODEX_SOCKET" ]; then
-    echo "Unable to start the background Codex app-server." >&2
-    sed -n '1,12p' "$SHELLOW_CODEX_LOG" >&2
-    exit 1
-fi
-printf 'SHELLOW_CODEX_CWD=%s\n' "$SHELLOW_CODEX_CWD" >&2
-if command -v nc >/dev/null 2>&1; then
-    exec nc -U "$SHELLOW_CODEX_SOCKET"
-fi
-if command -v socat >/dev/null 2>&1; then
-    exec socat - "UNIX-CONNECT:$SHELLOW_CODEX_SOCKET"
-fi
-if command -v python3 >/dev/null 2>&1; then
-    exec python3 -c 'import os,select,socket,sys
+}
+
+shellow_codex_python_bridge() {
+    python3 -c 'import os,select,socket,sys,time
 s=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM)
-s.connect(sys.argv[1])
+for attempt in range(20):
+    try:
+        s.connect(sys.argv[1])
+        break
+    except OSError as error:
+        if attempt == 19:
+            print("Unable to connect to the background Codex app-server: %s" % error, file=sys.stderr)
+            raise SystemExit(75)
+        time.sleep(0.1)
 while True:
     ready,_,_=select.select([s,0],[],[])
     if s in ready:
@@ -66,6 +89,28 @@ while True:
         data=os.read(0,65536)
         if not data: break
         s.sendall(data)' "$SHELLOW_CODEX_SOCKET"
+}
+
+if ! shellow_codex_pid_is_server || [ ! -S "$SHELLOW_CODEX_SOCKET" ]; then
+    shellow_codex_start_server || exit 1
+fi
+printf 'SHELLOW_CODEX_CWD=%s\n' "$SHELLOW_CODEX_CWD" >&2
+if command -v python3 >/dev/null 2>&1; then
+    shellow_codex_python_bridge
+    SHELLOW_CODEX_BRIDGE_STATUS=$?
+    if [ "$SHELLOW_CODEX_BRIDGE_STATUS" -eq 75 ]; then
+        echo "Restarting the unresponsive background Codex app-server." >&2
+        shellow_codex_start_server || exit 1
+        shellow_codex_python_bridge
+        exit $?
+    fi
+    exit "$SHELLOW_CODEX_BRIDGE_STATUS"
+fi
+if command -v nc >/dev/null 2>&1; then
+    exec nc -U "$SHELLOW_CODEX_SOCKET"
+fi
+if command -v socat >/dev/null 2>&1; then
+    exec socat - "UNIX-CONNECT:$SHELLOW_CODEX_SOCKET"
 fi
 echo "Shellow needs nc, socat, or python3 to connect to the background Codex app-server socket." >&2
 exit 127"#;
@@ -5387,6 +5432,10 @@ mod tests {
         assert!(
             command.contains("nohup codex app-server --listen \"unix://$SHELLOW_CODEX_SOCKET\"")
         );
+        assert!(command.contains("shellow_codex_pid_is_server"));
+        assert!(command.contains("shellow_codex_python_bridge"));
+        assert!(command.contains("raise SystemExit(75)"));
+        assert!(command.contains("Restarting the unresponsive background Codex app-server."));
         assert!(command.contains("exec nc -U \"$SHELLOW_CODEX_SOCKET\""));
         assert!(command.contains("exec socat - \"UNIX-CONNECT:$SHELLOW_CODEX_SOCKET\""));
         assert!(!command.contains("app-server daemon"));

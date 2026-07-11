@@ -85,6 +85,29 @@ data class HostProfile(
   }
 }
 
+fun HostProfile.duplicated(existingNames: Collection<String>): HostProfile =
+  copy(
+    id = UUID.randomUUID().toString(),
+    name = duplicateProfileName(name, existingNames),
+  )
+
+fun duplicateProfileName(
+  profileName: String,
+  existingNames: Collection<String>,
+): String {
+  val fallbackName = profileName.trim().ifEmpty { "Profile" }
+  val baseName = fallbackName.replace(Regex(""" Copy(?: [0-9]+)?$"""), "")
+  val occupiedNames = existingNames.mapTo(mutableSetOf()) { it.trim().lowercase() }
+  val firstCandidate = "$baseName Copy"
+  if (firstCandidate.lowercase() !in occupiedNames) return firstCandidate
+
+  var copyNumber = 2
+  while ("$baseName Copy $copyNumber".lowercase() in occupiedNames) {
+    copyNumber += 1
+  }
+  return "$baseName Copy $copyNumber"
+}
+
 enum class ProfileLaunchKind(
   val wire: String,
   val title: String,

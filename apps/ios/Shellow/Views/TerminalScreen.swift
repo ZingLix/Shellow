@@ -357,6 +357,7 @@ struct TerminalScreen: View {
                     contentTopInset: contentTopInset,
                     contentBottomInset: contentBottomInset,
                     reserveBottomScrollSpace: keyboardCursorOverlap > 0,
+                    persistentTerminalBackend: persistentTerminal?.backend,
                     onResizeTerminal: onResizeTerminal,
                     onAttachRendererSurface: onAttachRendererSurface,
                     onSetRendererOverlay: onSetRendererOverlay,
@@ -365,6 +366,7 @@ struct TerminalScreen: View {
                     applicationCursorKeys: session.isApplicationCursorKeysActive,
                     isInputEnabled: !isSearchVisible,
                     sendInput: sendTerminalInput,
+                    sendScrollInput: sendTerminalScrollInput,
                     sendTextInput: handleDirectTextInput,
                     sendBackspace: handleDirectBackspace,
                     handlePaste: handlePaste,
@@ -574,6 +576,11 @@ struct TerminalScreen: View {
     private func sendTerminalInput(_ input: String) {
         selection = nil
         terminalInputRevision &+= 1
+        onTerminalInput(input)
+    }
+
+    private func sendTerminalScrollInput(_ input: String) {
+        selection = nil
         onTerminalInput(input)
     }
 
@@ -978,6 +985,7 @@ private struct TerminalViewport: View {
     let contentTopInset: CGFloat
     let contentBottomInset: CGFloat
     let reserveBottomScrollSpace: Bool
+    let persistentTerminalBackend: PersistentTerminalBackend?
     let onResizeTerminal: (Int, Int) -> Void
     let onAttachRendererSurface: (UInt64, Int, Int) -> Void
     let onSetRendererOverlay: (String) -> Void
@@ -986,6 +994,7 @@ private struct TerminalViewport: View {
     let applicationCursorKeys: Bool
     let isInputEnabled: Bool
     let sendInput: (String) -> Void
+    let sendScrollInput: (String) -> Void
     let sendTextInput: (String) -> Void
     let sendBackspace: () -> Void
     let handlePaste: (String) -> Void
@@ -995,6 +1004,10 @@ private struct TerminalViewport: View {
     @State private var inputFocusNonce = 0
     @State private var gridScrollOffsetY: CGFloat = 0
     @State private var gridUsesDirectScrollGeometry = false
+    @State private var gridFollowsBottom = true
+    @State private var alternateScrollLastTranslationY: CGFloat = 0
+    @State private var alternateScrollRemainderY: CGFloat = 0
+    @State private var enteredMultiplexerScrollMode = false
     @State private var historyScrollGeometry = TerminalScrollContentGeometry.zero
 
     var body: some View {
@@ -1042,20 +1055,45 @@ private struct TerminalViewport: View {
                             .trackingGridScrollOffset { offsetY in
                                 gridUsesDirectScrollGeometry = true
                                 gridScrollOffsetY = offsetY
+                                if grid.isNearBottom(scrollOffset: offsetY, rowHeight: rowHeight) {
+                                    gridFollowsBottom = true
+                                }
                             }
                             .onPreferenceChange(TerminalGridContentMinYPreferenceKey.self) { minY in
                                 guard !gridUsesDirectScrollGeometry else { return }
-                                gridScrollOffsetY = max(
+                                let nextOffsetY = max(
                                     0,
                                     TerminalMetrics.viewportVerticalPadding - minY
                                 )
+                                gridScrollOffsetY = nextOffsetY
+                                if grid.isNearBottom(
+                                    scrollOffset: nextOffsetY,
+                                    rowHeight: rowHeight
+                                ) {
+                                    gridFollowsBottom = true
+                                }
                             }
+                            .simultaneousGesture(
+                                DragGesture(minimumDistance: 8)
+                                    .onChanged { value in
+                                        handleGridDrag(
+                                            value,
+                                            grid: grid,
+                                            rowHeight: rowHeight
+                                        )
+                                    }
+                                    .onEnded { _ in
+                                        resetAlternateScreenDragDistance()
+                                    }
+                            )
                             .id(grid.activeScreen)
 
                             if !grid.lines.isEmpty,
                                grid.activeScreen == .primary,
+                               !gridFollowsBottom,
                                !isNearBottom {
                                 TerminalJumpToBottomButton {
+                                    gridFollowsBottom = true
                                     scrollGridToBottom(proxy, lineCount: grid.lines.count)
                                 }
                                 .padding(14)
@@ -1066,10 +1104,12 @@ private struct TerminalViewport: View {
                             if grid.activeScreen == .alternate {
                                 scrollGridToTop(proxy, lineCount: grid.lines.count)
                             } else {
+                                gridFollowsBottom = true
                                 scrollGridToBottom(proxy, lineCount: grid.lines.count, animated: false)
                             }
                         }
                         .onChange(of: grid.activeScreen) {
+                            enteredMultiplexerScrollMode = false
                             guard search.isEmpty, grid.activeScreen == .alternate else { return }
                             scrollGridToTop(proxy, lineCount: grid.lines.count)
                         }
@@ -1079,21 +1119,24 @@ private struct TerminalViewport: View {
                                 proxy.scrollTo(TerminalSearchHit.gridRowID(row), anchor: .center)
                             }
                         }
-                        .onChange(of: grid.lines.count) { previousCount, _ in
+                        .onChange(of: grid.lines.count) { _, _ in
                             guard search.isEmpty, !grid.lines.isEmpty, grid.activeScreen == .primary else { return }
-                            guard grid.isNearBottom(
-                                scrollOffset: gridScrollOffsetY,
-                                rowHeight: rowHeight,
-                                lineCount: previousCount
-                            ) else {
-                                return
-                            }
-                            scrollGridToBottom(proxy, lineCount: grid.lines.count)
+                            guard gridFollowsBottom else { return }
+                            scrollGridToBottom(
+                                proxy,
+                                lineCount: grid.lines.count,
+                                animated: false
+                            )
                         }
-                        .onChange(of: inputRevision) {
+                        .onChange(of: renderTick) {
                             guard search.isEmpty,
+                                  !grid.lines.isEmpty,
                                   grid.activeScreen == .primary,
-                                  !isNearBottom else {
+                                  gridFollowsBottom,
+                                  !grid.isNearBottom(
+                                      scrollOffset: gridScrollOffsetY,
+                                      rowHeight: rowHeight
+                                  ) else {
                                 return
                             }
                             scrollGridToBottom(
@@ -1102,9 +1145,26 @@ private struct TerminalViewport: View {
                                 animated: false
                             )
                         }
+                        .onChange(of: inputRevision) {
+                            enteredMultiplexerScrollMode = false
+                            guard search.isEmpty,
+                                  grid.activeScreen == .primary else { return }
+                            gridFollowsBottom = true
+                            guard !isNearBottom else { return }
+                            scrollGridToBottom(
+                                proxy,
+                                lineCount: grid.lines.count,
+                                animated: false
+                            )
+                        }
                         .onChange(of: reserveBottomScrollSpace) {
                             guard search.isEmpty, !grid.lines.isEmpty, grid.activeScreen == .primary else { return }
-                            scrollGridToBottom(proxy, lineCount: grid.lines.count)
+                            gridFollowsBottom = true
+                            scrollGridToBottom(
+                                proxy,
+                                lineCount: grid.lines.count,
+                                animated: false
+                            )
                         }
                     }
                 } else {
@@ -1251,13 +1311,65 @@ private struct TerminalViewport: View {
 
     private func scrollGridToBottom(_ proxy: ScrollViewProxy, lineCount: Int, animated: Bool = true) {
         guard lineCount > 0 else { return }
-        if animated {
-            withAnimation(.snappy(duration: 0.18)) {
+        // A terminal burst can append more than a viewport in one snapshot. The
+        // grid count changes before SwiftUI has laid out the new bottom anchor,
+        // so scrolling synchronously can resolve against the previous content
+        // height and leave the viewport pinned to the start of scrollback.
+        DispatchQueue.main.async {
+            if animated {
+                withAnimation(.snappy(duration: 0.18)) {
+                    proxy.scrollTo(Self.bottomAnchorID, anchor: .bottomLeading)
+                }
+            } else {
                 proxy.scrollTo(Self.bottomAnchorID, anchor: .bottomLeading)
             }
-        } else {
-            proxy.scrollTo(Self.bottomAnchorID, anchor: .bottomLeading)
         }
+    }
+
+    private func handleGridDrag(
+        _ value: DragGesture.Value,
+        grid: TerminalGridSnapshot,
+        rowHeight: CGFloat
+    ) {
+        guard grid.activeScreen == .alternate else {
+            gridFollowsBottom = false
+            return
+        }
+        guard selection == nil else {
+            resetAlternateScreenDragDistance()
+            return
+        }
+
+        let translationY = value.translation.height
+        let deltaY = translationY - alternateScrollLastTranslationY
+        alternateScrollLastTranslationY = translationY
+        alternateScrollRemainderY += deltaY
+
+        let threshold = max(1, rowHeight)
+        let tickCount = min(6, Int(abs(alternateScrollRemainderY) / threshold))
+        guard tickCount > 0 else { return }
+
+        let direction: TerminalScrollDirection = alternateScrollRemainderY > 0 ? .up : .down
+        alternateScrollRemainderY -= direction.translationSign * CGFloat(tickCount) * threshold
+        let usesMouseWheel = grid.mouseReporting && grid.sgrMouse
+        let payload = grid.scrollInputSequence(
+            direction: direction,
+            count: tickCount,
+            backend: persistentTerminalBackend,
+            enterScrollMode: !enteredMultiplexerScrollMode
+        )
+        guard !payload.isEmpty else { return }
+
+        selection = nil
+        sendScrollInput(payload)
+        if !usesMouseWheel, persistentTerminalBackend != nil {
+            enteredMultiplexerScrollMode = true
+        }
+    }
+
+    private func resetAlternateScreenDragDistance() {
+        alternateScrollLastTranslationY = 0
+        alternateScrollRemainderY = 0
     }
 
     private func scrollGridToTop(_ proxy: ScrollViewProxy, lineCount: Int) {
@@ -2050,11 +2162,11 @@ enum TerminalMetrics {
     static let viewportVerticalPadding: CGFloat = 8
 
     static func cellWidth(fontSize: Double) -> CGFloat {
-        max(6.5, CGFloat(fontSize) * 0.56)
+        max(5.0, CGFloat(fontSize) * 0.56)
     }
 
     static func rowHeight(fontSize: Double, lineHeightScale: Double) -> CGFloat {
-        (max(14.0, CGFloat(fontSize) * 1.25) + 3.0) * CGFloat(lineHeightScale)
+        (max(11.0, CGFloat(fontSize) * 1.25) + 3.0) * CGFloat(lineHeightScale)
     }
 }
 
@@ -3413,6 +3525,32 @@ private enum TerminalMouseEvent: Equatable {
     }
 }
 
+private enum TerminalScrollDirection {
+    case up
+    case down
+
+    var translationSign: CGFloat {
+        switch self {
+        case .up: 1
+        case .down: -1
+        }
+    }
+
+    var wheelButtonCode: Int {
+        switch self {
+        case .up: 64
+        case .down: 65
+        }
+    }
+
+    var arrowSequence: String {
+        switch self {
+        case .up: "\u{1B}[A"
+        case .down: "\u{1B}[B"
+        }
+    }
+}
+
 private extension TerminalGridSnapshot {
     func mousePressSequence(row: Int, column: Int) -> String? {
         mouseEventSequence(row: row, column: column, event: .press)
@@ -3434,6 +3572,24 @@ private extension TerminalGridSnapshot {
         guard terminalRow >= 1, terminalRow <= rows else { return nil }
         let terminalColumn = max(1, min(column + 1, cols))
         return "\u{1B}[<\(event.buttonCode);\(terminalColumn);\(terminalRow)\(event.terminator)"
+    }
+
+    func scrollInputSequence(
+        direction: TerminalScrollDirection,
+        count: Int,
+        backend: PersistentTerminalBackend?,
+        enterScrollMode: Bool
+    ) -> String {
+        let count = max(1, count)
+        if mouseReporting, sgrMouse {
+            let column = max(1, cols / 2)
+            let row = max(1, rows / 2)
+            let event = "\u{1B}[<\(direction.wheelButtonCode);\(column);\(row)M"
+            return String(repeating: event, count: count)
+        }
+
+        let modePrefix = enterScrollMode ? backend?.scrollModeSequence ?? "" : ""
+        return modePrefix + String(repeating: direction.arrowSequence, count: count)
     }
 }
 

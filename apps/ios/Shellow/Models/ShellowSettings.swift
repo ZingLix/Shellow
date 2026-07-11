@@ -2,7 +2,7 @@ import Foundation
 import SwiftUI
 
 struct ShellowSettings: Equatable, Codable {
-    static let fontSizeRange: ClosedRange<Double> = 11...18
+    static let fontSizeRange: ClosedRange<Double> = 9...18
     static let lineHeightScaleRange: ClosedRange<Double> = 0.9...1.25
     static let keepAliveRange: ClosedRange<Double> = 10...120
 

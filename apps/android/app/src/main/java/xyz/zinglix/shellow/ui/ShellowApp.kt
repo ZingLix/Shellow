@@ -85,6 +85,7 @@ import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color as ComposeColor
+import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.drawscope.drawIntoCanvas
 import androidx.compose.ui.graphics.nativeCanvas
@@ -100,6 +101,9 @@ import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
 import androidx.compose.ui.input.key.utf16CodePoint
+import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
+import androidx.compose.ui.input.nestedscroll.NestedScrollSource
+import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
@@ -125,6 +129,8 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.unit.Velocity
+import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.zIndex
 import xyz.zinglix.shellow.core.AuthenticationKind
 import xyz.zinglix.shellow.core.CodexApproval
@@ -165,7 +171,10 @@ import xyz.zinglix.shellow.core.TerminalGridStyle
 import xyz.zinglix.shellow.core.TerminalRow
 import xyz.zinglix.shellow.core.TerminalRowStyle
 import xyz.zinglix.shellow.core.TerminalScreenKind
+import xyz.zinglix.shellow.core.TerminalScrollDirection
 import xyz.zinglix.shellow.core.TerminalSession
+import xyz.zinglix.shellow.core.duplicated
+import xyz.zinglix.shellow.core.scrollInputSequence
 import xyz.zinglix.shellow.theme.ShellowColorScheme
 import xyz.zinglix.shellow.theme.ShellowColors
 import xyz.zinglix.shellow.theme.ShellowTheme
@@ -1407,7 +1416,7 @@ private fun CodexScreen(
   var draft by remember { mutableStateOf("") }
   var selectedPath by remember { mutableStateOf("") }
   var historySearch by remember { mutableStateOf("") }
-  var homeRoute by remember { mutableStateOf(CodexHomeRoute.Draft) }
+  var homeRoute by remember { mutableStateOf(CodexHomeRoute.Overview) }
   var draftReturnRoute by remember { mutableStateOf(CodexHomeRoute.Overview) }
   var threadReturnRoute by remember { mutableStateOf(CodexHomeRoute.Overview) }
   var threadReturnScope by remember { mutableStateOf(CodexHistoryScope.AllProjects) }
@@ -1431,6 +1440,8 @@ private fun CodexScreen(
   var codexActionsExpanded by remember { mutableStateOf(false) }
   var chatAutoFollow by remember { mutableStateOf(true) }
   val listState = rememberLazyListState()
+  val density = LocalDensity.current
+  val imeBottomInset = WindowInsets.ime.getBottom(density)
   val scope = rememberCoroutineScope()
   val selectedProjectPath = selectedPath.trim()
   val historyCwd = if (historyScope == CodexHistoryScope.CurrentProject) selectedProjectPath else ""
@@ -1491,7 +1502,7 @@ private fun CodexScreen(
     }
   }
 
-  LaunchedEffect(snapshot.threadId, chatScrollSignature, chatAutoFollow) {
+  LaunchedEffect(snapshot.threadId, chatScrollSignature, chatAutoFollow, imeBottomInset) {
     if (snapshot.threadId != null && chatAutoFollow) {
       delay(80)
       listState.scrollToItem(chatItemCount - 1)
@@ -1541,7 +1552,10 @@ private fun CodexScreen(
       }
       onListThreads("", historySearch, "", showArchivedThreads, false)
     }
-    if (snapshot.threadId != null) {
+    if (
+      snapshot.threadId != null &&
+        (homeRoute == CodexHomeRoute.Draft || isShowingThread)
+    ) {
       isShowingThread = true
     } else if (snapshot.status == CodexStatus.Connected) {
       isShowingThread = false
@@ -1757,7 +1771,7 @@ private fun CodexScreen(
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(8.dp),
       ) {
-        CodexBackButton(contentDescription = "Back", onClick = handleCodexBack)
+        NavigationBackButton(onClick = handleCodexBack)
         Column(
           Modifier
             .weight(1f)
@@ -2226,7 +2240,7 @@ private fun CodexProjectHistoryPanel(
         CodexSearchBarRow(
           searchValue = historySearch,
           onSearchValueChange = onHistorySearchChange,
-          searchPlaceholder = "Search projects or conversations",
+          searchPlaceholder = "Search projects or sessions",
           onSearch = onRefreshHistory,
           newConversationEnabled = snapshot.status == CodexStatus.Connected,
           onNewConversation = onStartThread,
@@ -2589,14 +2603,14 @@ private fun CodexRecentConversationsSection(
       verticalAlignment = Alignment.CenterVertically,
     ) {
       CodexSectionHeader(
-        title = if (showArchivedThreads) "Archived Conversations" else "Recent Conversations",
+        title = if (showArchivedThreads) "Archived Sessions" else "Recent Sessions",
         detail = if (historyScope == CodexHistoryScope.CurrentProject) "Current project" else null,
         modifier = Modifier.weight(1f),
       )
 
       Box {
         OverflowMenuButton(
-          contentDescription = "Conversation Actions",
+          contentDescription = "Session Actions",
           onClick = { recentActionsExpanded = true },
         )
         DropdownMenu(
@@ -2668,13 +2682,13 @@ private fun CodexRecentConversationsSection(
       CodexEmptyState(
         title =
           if (homeSearchTerm.isBlank()) {
-            if (showArchivedThreads) "No Archived Conversations" else "No Recent Conversations"
+            if (showArchivedThreads) "No Archived Sessions" else "No Recent Sessions"
           } else {
             "No Matches"
           },
         detail =
           if (homeSearchTerm.isBlank()) {
-            if (showArchivedThreads) "Archived conversations will appear here." else "Start a chat from a workspace to see it here."
+            if (showArchivedThreads) "Archived sessions will appear here." else "Start a chat from a project to see it here."
           } else {
             "Try a different search."
           },
@@ -3047,23 +3061,44 @@ private fun CodexSessionSwitcherDialog(
 }
 
 @Composable
-private fun CodexBackButton(
-  contentDescription: String,
-  onClick: () -> Unit,
-) {
+private fun NavigationBackButton(onClick: () -> Unit) {
   IconButton(
     onClick = onClick,
     modifier =
       Modifier
-        .size(36.dp)
-        .semantics { this.contentDescription = contentDescription },
+        .size(48.dp)
+        .semantics { contentDescription = "Navigate back" },
   ) {
-    Text(
-      "<",
-      color = ShellowColors.TerminalMuted,
-      style = MaterialTheme.typography.titleMedium,
-      fontWeight = FontWeight.SemiBold,
-    )
+    Canvas(Modifier.size(24.dp)) {
+      val direction = if (layoutDirection == LayoutDirection.Ltr) 1f else -1f
+      val tipX = center.x - direction * 7.dp.toPx()
+      val tailX = center.x + direction * 7.dp.toPx()
+      val shoulderX = tipX + direction * 6.dp.toPx()
+      val headOffset = 6.dp.toPx()
+      val strokeWidth = 2.dp.toPx()
+
+      drawLine(
+        color = ShellowColors.TerminalText,
+        start = Offset(tipX, center.y),
+        end = Offset(tailX, center.y),
+        strokeWidth = strokeWidth,
+        cap = StrokeCap.Round,
+      )
+      drawLine(
+        color = ShellowColors.TerminalText,
+        start = Offset(tipX, center.y),
+        end = Offset(shoulderX, center.y - headOffset),
+        strokeWidth = strokeWidth,
+        cap = StrokeCap.Round,
+      )
+      drawLine(
+        color = ShellowColors.TerminalText,
+        start = Offset(tipX, center.y),
+        end = Offset(shoulderX, center.y + headOffset),
+        strokeWidth = strokeWidth,
+        cap = StrokeCap.Round,
+      )
+    }
   }
 }
 
@@ -4421,6 +4456,7 @@ private fun TerminalScreen(
   var viewportWidthPx by remember { mutableStateOf(0) }
   var viewportHeightPx by remember { mutableStateOf(0) }
   var rendererSurfaceReady by remember { mutableStateOf(false) }
+  var terminalInputRevision by remember { mutableStateOf(0) }
   var directInputValue by remember {
     mutableStateOf(TextFieldValue(TerminalDirectInputSentinel, selection = TextRange(TerminalDirectInputSentinel.length)))
   }
@@ -4447,7 +4483,7 @@ private fun TerminalScreen(
   val terminalTopInsetPx = with(density) { terminalTopInsetDp.toPx() }
   val terminalBottomInsetPx = with(density) { terminalBottomInsetDp.toPx() }
   val terminalTextSizePx = with(density) { displaySettings.fontSizeSp.sp.toPx() }
-  val gridCellWidthPx = (terminalTextSizePx * 0.62f).coerceAtLeast(with(density) { 7.dp.toPx() })
+  val gridCellWidthPx = (terminalTextSizePx * 0.62f).coerceAtLeast(with(density) { 5.5.dp.toPx() })
   val terminalRowHeightPx =
     ((terminalTextSizePx * 1.45f).coerceAtLeast(with(density) { 13.dp.toPx() }) + with(density) { 4.dp.toPx() }) *
       displaySettings.lineHeightScale
@@ -4472,6 +4508,12 @@ private fun TerminalScreen(
   }
 
   fun sendTerminalInput(value: String) {
+    selection = null
+    terminalInputRevision += 1
+    onInput(value)
+  }
+
+  fun sendTerminalScrollInput(value: String) {
     selection = null
     onInput(value)
   }
@@ -4665,6 +4707,70 @@ private fun TerminalScreen(
     resetDirectInputValue()
   }
 
+  BackHandler {
+    when (terminalBackAction(searchVisible = searchVisible, hasSelection = selection != null)) {
+      TerminalBackAction.CloseSearch -> {
+        searchVisible = false
+        searchQuery = ""
+        searchIndex = 0
+      }
+      TerminalBackAction.ClearSelection -> selection = null
+      TerminalBackAction.NavigateBack -> onBackToHosts()
+    }
+  }
+
+  val alternateScreenScrollConnection =
+    remember(
+      visibleGrid?.activeScreen,
+      visibleGrid?.mouseReporting,
+      visibleGrid?.sgrMouse,
+      visibleGrid?.cols,
+      visibleGrid?.rows,
+      persistentTerminal?.backend,
+      terminalRowHeightPx,
+      terminalInputRevision,
+    ) {
+      val scrollGrid = visibleGrid
+      object : NestedScrollConnection {
+        var remainderY = 0f
+        var enteredMultiplexerScrollMode = false
+
+        override fun onPreScroll(available: Offset, source: NestedScrollSource): Offset {
+          if (scrollGrid?.activeScreen != TerminalScreenKind.Alternate || available.y == 0f) {
+            return Offset.Zero
+          }
+
+          remainderY += available.y
+          val threshold = terminalRowHeightPx.coerceAtLeast(1f)
+          val tickCount = (abs(remainderY) / threshold).toInt().coerceAtMost(6)
+          if (tickCount > 0) {
+            val direction = if (remainderY > 0) TerminalScrollDirection.Up else TerminalScrollDirection.Down
+            val translationSign = if (direction == TerminalScrollDirection.Up) 1f else -1f
+            remainderY -= translationSign * tickCount * threshold
+            val usesMouseWheel = scrollGrid.mouseReporting && scrollGrid.sgrMouse
+            sendTerminalScrollInput(
+              scrollGrid.scrollInputSequence(
+                direction = direction,
+                count = tickCount,
+                backend = persistentTerminal?.backend,
+                enterScrollMode = !enteredMultiplexerScrollMode,
+              ),
+            )
+            if (!usesMouseWheel && persistentTerminal != null) {
+              enteredMultiplexerScrollMode = true
+            }
+          }
+
+          return Offset(x = 0f, y = available.y)
+        }
+
+        override suspend fun onPreFling(available: Velocity): Velocity {
+          remainderY = 0f
+          return Velocity(x = 0f, y = available.y)
+        }
+      }
+    }
+
   Column(
     Modifier
       .fillMaxSize()
@@ -4776,6 +4882,7 @@ private fun TerminalScreen(
         modifier =
           Modifier
             .fillMaxSize()
+            .nestedScroll(alternateScreenScrollConnection)
             .onSizeChanged { size ->
               viewportWidthPx = size.width
               viewportHeightPx = size.height
@@ -5523,7 +5630,7 @@ private fun TerminalFloatingHeader(
     verticalAlignment = Alignment.CenterVertically,
     horizontalArrangement = Arrangement.spacedBy(9.dp),
   ) {
-    TerminalCompactButton("Back", width = 48.dp, onClick = onBackToHosts)
+    NavigationBackButton(onClick = onBackToHosts)
     Box(
       modifier =
         Modifier
@@ -5975,6 +6082,57 @@ private fun terminalSelectionPointFromOffset(
   return TerminalSelectionPoint(row, column)
 }
 
+private enum class HostsHeaderActionIcon {
+  Add,
+  More,
+}
+
+@Composable
+private fun HostsHeaderActionButton(
+  icon: HostsHeaderActionIcon,
+  contentDescription: String,
+  onClick: () -> Unit,
+) {
+  IconButton(
+    onClick = onClick,
+    modifier =
+      Modifier
+        .size(40.dp)
+        .semantics { this.contentDescription = contentDescription },
+  ) {
+    Canvas(Modifier.size(18.dp)) {
+      val color = ShellowColors.Accent
+      val strokeWidth = 1.8.dp.toPx()
+      when (icon) {
+        HostsHeaderActionIcon.Add -> {
+          val arm = 5.dp.toPx()
+          drawLine(
+            color = color,
+            start = Offset(center.x - arm, center.y),
+            end = Offset(center.x + arm, center.y),
+            strokeWidth = strokeWidth,
+            cap = StrokeCap.Round,
+          )
+          drawLine(
+            color = color,
+            start = Offset(center.x, center.y - arm),
+            end = Offset(center.x, center.y + arm),
+            strokeWidth = strokeWidth,
+            cap = StrokeCap.Round,
+          )
+        }
+        HostsHeaderActionIcon.More -> {
+          val spacing = 5.dp.toPx()
+          val radius = 1.4.dp.toPx()
+          drawCircle(color = color, radius = radius, center = Offset(center.x - spacing, center.y))
+          drawCircle(color = color, radius = radius, center = center)
+          drawCircle(color = color, radius = radius, center = Offset(center.x + spacing, center.y))
+        }
+      }
+    }
+  }
+}
+
 @Composable
 private fun HostsScreen(
   profiles: List<HostProfile>,
@@ -6014,19 +6172,17 @@ private fun HostsScreen(
           color = ShellowColors.TerminalText,
           style = MaterialTheme.typography.titleLarge,
         )
-        IconButton(
+        HostsHeaderActionButton(
+          icon = HostsHeaderActionIcon.Add,
+          contentDescription = "Add Profile",
           onClick = { addingProfile = true },
-          modifier = Modifier.semantics { contentDescription = "Add Profile" },
-        ) {
-          Text("+", color = ShellowColors.Accent, style = MaterialTheme.typography.titleLarge)
-        }
+        )
         Box {
-          IconButton(
+          HostsHeaderActionButton(
+            icon = HostsHeaderActionIcon.More,
+            contentDescription = "Manage",
             onClick = { manageMenuExpanded = true },
-            modifier = Modifier.semantics { contentDescription = "Manage" },
-          ) {
-            Text("...", color = ShellowColors.TerminalText, style = MaterialTheme.typography.titleMedium)
-          }
+          )
           DropdownMenu(
             expanded = manageMenuExpanded,
             onDismissRequest = { manageMenuExpanded = false },
@@ -6071,6 +6227,9 @@ private fun HostsScreen(
                 }
               },
               onEdit = { selectedProfile = profile },
+              onDuplicate = {
+                onAddProfile(profile.duplicated(profiles.map { it.name }))
+              },
             )
             if (index < profiles.lastIndex) {
               PanelDivider()
@@ -6146,7 +6305,10 @@ private fun HostProfileRow(
   profile: HostProfile,
   onOpen: () -> Unit,
   onEdit: () -> Unit,
+  onDuplicate: () -> Unit,
 ) {
+  var actionsExpanded by remember(profile.id) { mutableStateOf(false) }
+
   Row(
     modifier =
       Modifier
@@ -6189,8 +6351,32 @@ private fun HostProfileRow(
       }
       Text("Open", color = ShellowColors.Accent, style = MaterialTheme.typography.labelMedium)
     }
-    TextButton(onClick = onEdit, modifier = Modifier.semantics { contentDescription = "Edit ${profile.name}" }) {
-      Text("Edit", color = ShellowColors.TerminalMuted, style = MaterialTheme.typography.labelMedium)
+    Box {
+      TextButton(
+        onClick = { actionsExpanded = true },
+        modifier = Modifier.semantics { contentDescription = "Actions for ${profile.name}" },
+      ) {
+        Text("...", color = ShellowColors.TerminalMuted, style = MaterialTheme.typography.labelMedium)
+      }
+      DropdownMenu(
+        expanded = actionsExpanded,
+        onDismissRequest = { actionsExpanded = false },
+      ) {
+        DropdownMenuItem(
+          text = { Text("Edit") },
+          onClick = {
+            actionsExpanded = false
+            onEdit()
+          },
+        )
+        DropdownMenuItem(
+          text = { Text("Duplicate") },
+          onClick = {
+            actionsExpanded = false
+            onDuplicate()
+          },
+        )
+      }
     }
   }
 }
@@ -6893,6 +7079,8 @@ private fun SettingsScreen(
   onBack: () -> Unit,
   onDisplaySettingsChange: (AppDisplaySettings) -> Unit,
 ) {
+  BackHandler(onBack = onBack)
+
   Column(
     Modifier
       .fillMaxSize()
@@ -6905,7 +7093,7 @@ private fun SettingsScreen(
       verticalAlignment = Alignment.CenterVertically,
       horizontalArrangement = Arrangement.spacedBy(8.dp),
     ) {
-      TextButton(onClick = onBack) { Text("Back") }
+      NavigationBackButton(onClick = onBack)
       Text("Settings", color = ShellowColors.TerminalText, style = MaterialTheme.typography.titleLarge)
     }
     SettingsSectionLabel("Display")
@@ -6924,7 +7112,7 @@ private fun SettingsScreen(
         title = "Font Size",
         valueLabel = "${displaySettings.fontSizeSp.roundToInt()} sp",
         value = displaySettings.fontSizeSp,
-        valueRange = 11f..22f,
+        valueRange = DisplayFontSizeMin..DisplayFontSizeMax,
         onValueChange = { onDisplaySettingsChange(displaySettings.copy(fontSizeSp = it.roundToInt().toFloat())) },
       )
       PanelDivider()
@@ -7119,6 +7307,8 @@ private fun statusColor(state: ConnectionState) =
 
 private const val DisplaySettingsPrefs = "shellow.displaySettings"
 private const val DisplayFontSizeKey = "fontSizeSp.v1"
+private const val DisplayFontSizeMin = 9f
+private const val DisplayFontSizeMax = 22f
 private const val DisplayLineHeightKey = "lineHeightScale.v1"
 private const val DisplayColorSchemeKey = "colorScheme.v1"
 private const val DisplayTerminalThemeKey = "terminalTheme.v1"
@@ -7126,7 +7316,7 @@ private const val DisplayTerminalThemeKey = "terminalTheme.v1"
 private fun loadDisplaySettings(context: Context): AppDisplaySettings {
   val preferences = context.getSharedPreferences(DisplaySettingsPrefs, Context.MODE_PRIVATE)
   return AppDisplaySettings(
-    fontSizeSp = preferences.getFloat(DisplayFontSizeKey, 14f).coerceIn(11f, 22f),
+    fontSizeSp = preferences.getFloat(DisplayFontSizeKey, 14f).coerceIn(DisplayFontSizeMin, DisplayFontSizeMax),
     lineHeightScale = preferences.getFloat(DisplayLineHeightKey, 1f).coerceIn(0.9f, 1.35f),
     colorScheme = ShellowColorScheme.fromWire(preferences.getString(DisplayColorSchemeKey, ShellowColorScheme.System.wire)),
     terminalTheme = TerminalThemeSelection.fromWire(preferences.getString(DisplayTerminalThemeKey, TerminalThemeSelection.ShellowDark.wire)),
@@ -7140,7 +7330,7 @@ private fun saveDisplaySettings(
   context
     .getSharedPreferences(DisplaySettingsPrefs, Context.MODE_PRIVATE)
     .edit()
-    .putFloat(DisplayFontSizeKey, settings.fontSizeSp.coerceIn(11f, 22f))
+    .putFloat(DisplayFontSizeKey, settings.fontSizeSp.coerceIn(DisplayFontSizeMin, DisplayFontSizeMax))
     .putFloat(DisplayLineHeightKey, settings.lineHeightScale.coerceIn(0.9f, 1.35f))
     .putString(DisplayColorSchemeKey, settings.colorScheme.wire)
     .putString(DisplayTerminalThemeKey, settings.terminalTheme.wire)

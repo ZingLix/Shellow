@@ -24,6 +24,14 @@ enum class PersistentTerminalBackend(
         Zellij -> "\u000Fd"
       }
 
+  val scrollModeSequence: String
+    get() =
+      when (this) {
+        Tmux -> "\u0002["
+        Screen -> "\u0001["
+        Zellij -> "\u0013"
+      }
+
   val persistenceDetail: String
     get() =
       when (this) {

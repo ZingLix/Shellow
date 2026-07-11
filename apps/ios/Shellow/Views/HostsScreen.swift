@@ -39,6 +39,9 @@ struct HostsScreen: View {
                             },
                             edit: {
                                 selectedProfile = profile
+                            },
+                            duplicate: {
+                                duplicateProfile(profile)
                             }
                         )
                     }
@@ -157,6 +160,10 @@ struct HostsScreen: View {
     private func updateProfile(_ profile: HostProfile) {
         guard let index = profiles.firstIndex(where: { $0.id == profile.id }) else { return }
         profiles[index] = profile
+    }
+
+    private func duplicateProfile(_ profile: HostProfile) {
+        profiles.append(profile.duplicated(existingNames: profiles.map(\.name)))
     }
 
     private func openProfile(_ profile: HostProfile) {
@@ -1184,7 +1191,7 @@ struct CodexScreen: View {
     @State private var draft = ""
     @State private var selectedPath = ""
     @State private var historySearch = ""
-    @State private var homeRoute = CodexHomeRoute.draft
+    @State private var homeRoute = CodexHomeRoute.overview
     @State private var draftReturnRoute = CodexHomeRoute.overview
     @State private var threadReturnRoute = CodexHomeRoute.overview
     @State private var threadReturnScope = CodexHistoryScope.allProjects
@@ -1221,11 +1228,6 @@ struct CodexScreen: View {
             }
         }
         .background(Color(.systemBackground))
-        .onAppear {
-            if snapshot.threadId != nil {
-                isShowingThread = true
-            }
-        }
         .task(id: snapshot.status) {
             if snapshot.status != .connected {
                 didLoadProjectState = false
@@ -1254,7 +1256,8 @@ struct CodexScreen: View {
         .onChange(of: snapshot.threadId) {
             draft = ""
             isChatAutoFollowEnabled = true
-            if snapshot.threadId != nil {
+            if snapshot.threadId != nil,
+               homeRoute == .draft || isShowingThread {
                 isShowingThread = true
             } else if snapshot.status == .connected {
                 isShowingThread = false
@@ -1826,7 +1829,7 @@ struct CodexScreen: View {
     private var recentConversationsSection: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 8) {
-                CodexSectionHeader(title: showArchivedThreads ? "Archived Conversations" : "Recent Conversations", detail: historyScopeDetail)
+                CodexSectionHeader(title: showArchivedThreads ? "Archived Sessions" : "Recent Sessions", detail: historyScopeDetail)
 
                 Spacer()
 
@@ -1878,8 +1881,8 @@ struct CodexScreen: View {
                !snapshot.threads.isLoading,
                snapshot.threads.error == nil {
                 CodexEmptyState(
-                    title: homeSearchTerm.isEmpty ? (showArchivedThreads ? "No Archived Conversations" : "No Recent Conversations") : "No Matches",
-                    detail: homeSearchTerm.isEmpty ? (showArchivedThreads ? "Archived conversations will appear here." : "Start a chat from a workspace to see it here.") : "Try a different search.",
+                    title: homeSearchTerm.isEmpty ? (showArchivedThreads ? "No Archived Sessions" : "No Recent Sessions") : "No Matches",
+                    detail: homeSearchTerm.isEmpty ? (showArchivedThreads ? "Archived sessions will appear here." : "Start a chat from a project to see it here.") : "Try a different search.",
                     systemImage: homeSearchTerm.isEmpty ? (showArchivedThreads ? "archivebox" : "clock") : "magnifyingglass"
                 )
             }
@@ -1910,13 +1913,13 @@ struct CodexScreen: View {
             CodexOverflowMenuLabel()
         }
         .buttonStyle(.plain)
-        .accessibilityLabel("Conversation Actions")
+        .accessibilityLabel("Session Actions")
     }
 
     private var codexHomeSearchBar: some View {
         HStack(alignment: .center, spacing: 10) {
             CodexSearchField(
-                placeholder: "Search projects or conversations",
+                placeholder: "Search projects or sessions",
                 text: $historySearch
             ) {
                 Task { await refreshHistory() }
@@ -4052,6 +4055,7 @@ private struct HostProfileRow: View {
     let profile: HostProfile
     let open: () -> Void
     let edit: () -> Void
+    let duplicate: () -> Void
 
     var body: some View {
         HStack(spacing: 10) {
@@ -4098,7 +4102,15 @@ private struct HostProfileRow: View {
             }
             .buttonStyle(.plain)
 
-            Button(action: edit) {
+            Menu {
+                Button(action: edit) {
+                    Label("Edit", systemImage: "pencil")
+                }
+
+                Button(action: duplicate) {
+                    Label("Duplicate", systemImage: "square.on.square")
+                }
+            } label: {
                 Image(systemName: "ellipsis")
                     .font(.system(size: 14, weight: .semibold))
                     .frame(width: 34, height: 34)
@@ -4106,7 +4118,7 @@ private struct HostProfileRow: View {
             }
             .buttonStyle(.plain)
             .foregroundStyle(.secondary)
-            .accessibilityLabel("Edit \(profile.name)")
+            .accessibilityLabel("Actions for \(profile.name)")
         }
     }
 }
