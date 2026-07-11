@@ -288,12 +288,11 @@ jobs:
           ls -lh "$apk_path"
           echo "apk_path=$apk_path" >> "$GITHUB_OUTPUT"
 
-      - name: Publish nightly GitHub release
+      - name: Prepare nightly GitHub release
         if: ${{ github.event_name == 'workflow_dispatch' }}
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
-          APK_PATH: ${{ steps.play-signed-apk.outputs.apk_path }}
           BUILD_DATE: ${{ steps.android-version.outputs.build_date }}
           VERSION_CODE: ${{ steps.android-version.outputs.version_code }}
           VERSION_NAME: ${{ steps.android-version.outputs.version_name }}
@@ -340,22 +339,21 @@ jobs:
               -f ref="refs/tags/nightly" \
               -f sha="$GITHUB_SHA" >/dev/null
           fi
+          echo "NIGHTLY_RELEASE_NOTES=$notes_path" >> "$GITHUB_ENV"
 
-          if gh release view nightly >/dev/null 2>&1; then
-            gh release edit nightly \
-              --title "Nightly Android" \
-              --notes-file "$notes_path" \
-              --prerelease \
-              --target "$GITHUB_SHA"
-          else
-            gh release create nightly \
-              --title "Nightly Android" \
-              --notes-file "$notes_path" \
-              --prerelease \
-              --latest=false \
-              --target "$GITHUB_SHA"
-          fi
-          gh release upload nightly "$APK_PATH#shellow-android-play-signed-nightly.apk" --clobber
+      - name: Publish nightly GitHub release
+        if: ${{ github.event_name == 'workflow_dispatch' }}
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: nightly
+          target_commitish: ${{ github.sha }}
+          name: Nightly Android
+          body_path: ${{ env.NIGHTLY_RELEASE_NOTES }}
+          prerelease: true
+          make_latest: false
+          files: ${{ steps.play-signed-apk.outputs.apk_path }}
+          overwrite_files: true
+          fail_on_unmatched_files: true
 
   ios-app-store-connect:
     name: iOS to App Store Connect
