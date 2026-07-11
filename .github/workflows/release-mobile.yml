@@ -254,7 +254,8 @@ jobs:
           fi
           echo "::add-mask::$access_token"
 
-          for attempt in $(seq 1 30); do
+          download_id=""
+          for attempt in $(seq 1 90); do
             http_code="$(
               curl -sS \
                 -H "Authorization: Bearer $access_token" \
@@ -263,28 +264,32 @@ jobs:
                 "$api_base"
             )"
             if [ "$http_code" = "200" ]; then
-              break
+              download_id="$(jq -r '[.generatedApks[]?.generatedUniversalApk?.downloadId // empty][0] // empty' "$metadata_path")"
+              if [ -n "$download_id" ]; then
+                break
+              fi
             fi
-            if [ "$attempt" = "30" ]; then
-              echo "::error::Google Play generated APK metadata was not available for versionCode $VERSION_CODE (HTTP $http_code)"
+            if [ "$attempt" = "90" ]; then
+              echo "::error::Google Play universal APK was not ready for versionCode $VERSION_CODE after 30 minutes (HTTP $http_code)"
               cat "$metadata_path" || true
               exit 1
             fi
+            echo "Universal APK is not ready yet (attempt $attempt/90); retrying in 20 seconds"
             sleep 20
           done
 
-          download_id="$(jq -r '[.generatedApks[]?.generatedUniversalApk?.downloadId // empty][0] // empty' "$metadata_path")"
-          if [ -z "$download_id" ]; then
-            echo "::error::Google Play did not return a universal APK for versionCode $VERSION_CODE"
-            jq '.' "$metadata_path"
-            exit 1
-          fi
-
           curl -sS -L -f \
+            --retry 5 \
+            --retry-all-errors \
             -H "Authorization: Bearer $access_token" \
-            "$api_base/downloads/$download_id:download" \
+            "$api_base/downloads/$download_id:download?alt=media" \
             -o "$apk_path"
 
+          if [ ! -s "$apk_path" ]; then
+            echo "::error::Google Play returned an empty universal APK"
+            exit 1
+          fi
+          unzip -tq "$apk_path"
           ls -lh "$apk_path"
           echo "apk_path=$apk_path" >> "$GITHUB_OUTPUT"
 
