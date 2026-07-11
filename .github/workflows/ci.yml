@@ -14,6 +14,7 @@ concurrency:
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+  ZIG_VERSION: 0.15.2
 
 jobs:
   web:
@@ -38,6 +39,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt,clippy
+      - uses: mlugg/setup-zig@v2.2.1
+        with:
+          version: ${{ env.ZIG_VERSION }}
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
@@ -57,9 +61,26 @@ jobs:
           targets: aarch64-linux-android,x86_64-linux-android
       - uses: mlugg/setup-zig@v2.2.1
         with:
-          version: 0.15.2
+          version: ${{ env.ZIG_VERSION }}
       - name: Install native build tools
-        run: sdkmanager "ndk;27.1.12297006" "cmake;3.22.1"
+        shell: bash
+        run: |
+          set -euo pipefail
+          sdkmanager_bin="$(command -v sdkmanager || true)"
+          if [ -z "$sdkmanager_bin" ]; then
+            for sdk_root in "${ANDROID_HOME:-}" "${ANDROID_SDK_ROOT:-}"; do
+              if [ -x "$sdk_root/cmdline-tools/latest/bin/sdkmanager" ]; then
+                sdkmanager_bin="$sdk_root/cmdline-tools/latest/bin/sdkmanager"
+                break
+              fi
+            done
+          fi
+          if [ -z "$sdkmanager_bin" ]; then
+            echo "::error::sdkmanager was not found in PATH, ANDROID_HOME, or ANDROID_SDK_ROOT"
+            exit 127
+          fi
+          yes | "$sdkmanager_bin" --licenses >/dev/null || true
+          "$sdkmanager_bin" "ndk;27.1.12297006" "cmake;3.22.1"
       - run: ./scripts/build-android-rust.sh
       - working-directory: apps/android
         run: ./gradlew :app:testDebugUnitTest :app:assembleDebug :app:lintDebug --no-daemon

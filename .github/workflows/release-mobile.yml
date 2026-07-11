@@ -66,6 +66,10 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt,clippy
+      - name: Set up Zig
+        uses: mlugg/setup-zig@v2.2.1
+        with:
+          version: ${{ env.ZIG_VERSION }}
       - name: Rust formatting
         run: cargo fmt --all --check
       - name: Rust lint
