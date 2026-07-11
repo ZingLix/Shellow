@@ -7,8 +7,12 @@ apply(plugin = "org.jetbrains.kotlin.plugin.compose")
 
 fun nonBlankEnv(name: String): String? = System.getenv(name)?.takeIf { it.isNotBlank() }
 
+fun buildConfigString(value: String): String =
+    "\"${value.replace("\\", "\\\\").replace("\"", "\\\"")}\""
+
 val ciVersionCode = nonBlankEnv("ANDROID_VERSION_CODE")?.toIntOrNull() ?: 1
 val ciVersionName = nonBlankEnv("ANDROID_VERSION_NAME") ?: "0.1.0"
+val ciGitCommit = nonBlankEnv("SHELLOW_GIT_COMMIT") ?: nonBlankEnv("GITHUB_SHA")?.take(12) ?: "dev"
 val releaseKeystoreFile = nonBlankEnv("ANDROID_KEYSTORE_FILE")?.let { file(it) }
 val releaseKeystorePassword = nonBlankEnv("ANDROID_KEYSTORE_PASSWORD")
 val releaseKeyAlias = nonBlankEnv("ANDROID_KEY_ALIAS")
@@ -30,6 +34,7 @@ android {
         targetSdk = 36
         versionCode = ciVersionCode
         versionName = ciVersionName
+        buildConfigField("String", "GIT_COMMIT", buildConfigString(ciGitCommit))
 
         externalNativeBuild {
             cmake {
@@ -71,7 +76,7 @@ android {
     buildFeatures {
       compose = true
       aidl = false
-      buildConfig = false
+      buildConfig = true
       shaders = false
     }
 

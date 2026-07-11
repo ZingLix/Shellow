@@ -9,7 +9,7 @@ use serde_json::{Value, json};
 
 use crate::{HostProfile, ssh};
 
-const CODEX_APP_SERVER_COMMAND_BODY: &str = r#"SHELLOW_CODEX_CWD="$(pwd -P 2>/dev/null || pwd)"; printf 'SHELLOW_CODEX_CWD=%s\n' "$SHELLOW_CODEX_CWD" >&2; PATH="$PATH:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$HOME/.local/bin:$HOME/.cargo/bin:$HOME/.bun/bin:$HOME/.npm-global/bin:/home/linuxbrew/.linuxbrew/bin"; export PATH; if ! command -v codex >/dev/null 2>&1; then echo "codex executable not found in non-interactive SSH PATH. Install Codex CLI or expose it via PATH." >&2; exit 127; fi; if ! codex app-server daemon start >/dev/null; then echo "Unable to start the persistent Codex app-server daemon. Run 'codex app-server daemon bootstrap --remote-control' once on this host, then retry." >&2; exit 1; fi; exec codex app-server proxy"#;
+const CODEX_APP_SERVER_COMMAND_BODY: &str = r#"SHELLOW_CODEX_CWD="$(pwd -P 2>/dev/null || pwd)"; printf 'SHELLOW_CODEX_CWD=%s\n' "$SHELLOW_CODEX_CWD" >&2; PATH="$PATH:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$HOME/.local/bin:$HOME/.cargo/bin:$HOME/.bun/bin:$HOME/.npm-global/bin:/home/linuxbrew/.linuxbrew/bin"; export PATH; if ! command -v codex >/dev/null 2>&1; then echo "codex executable not found in non-interactive SSH PATH. Install Codex CLI or expose it via PATH." >&2; exit 127; fi; if ! codex app-server daemon start >/dev/null; then echo "Unable to start the persistent Codex app-server daemon. Confirm 'codex app-server daemon bootstrap --remote-control' in Shellow, then retry." >&2; exit 1; fi; exec codex app-server proxy"#;
 const REMOTE_CWD_PREFIX: &str = "SHELLOW_CODEX_CWD=";
 const APP_SERVER_REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
 const APP_SERVER_PROXY_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(8);
@@ -1001,7 +1001,7 @@ impl CodexSession {
                 self.transport.disconnect();
                 self.status = CodexStatus::Failed;
                 self.report_error(
-                    "Codex daemon proxy handshake timed out. Run 'codex app-server daemon bootstrap --remote-control' once on this host, then retry.",
+                    "Codex daemon proxy handshake timed out. Confirm 'codex app-server daemon bootstrap --remote-control' in Shellow, then retry.",
                 );
             }
         }

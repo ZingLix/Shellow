@@ -43,7 +43,7 @@ on:
       - "v*"
 
 permissions:
-  contents: read
+  contents: write
 
 concurrency:
   group: mobile-release-${{ github.ref }}
@@ -89,19 +89,29 @@ jobs:
           exit "$missing"
 
       - name: Resolve release version
+        id: android-version
         shell: bash
         env:
           INPUT_VERSION_NAME: ${{ github.event.inputs.version_name }}
         run: |
           set -euo pipefail
+          build_date="$(date -u +'%y%m%d')"
+          run_suffix=$((10#$GITHUB_RUN_NUMBER % 1000))
+          version_code=$((10#$build_date * 1000 + run_suffix))
+          short_sha="${GITHUB_SHA::12}"
           version_name="$INPUT_VERSION_NAME"
           if [ -z "$version_name" ] && [ "$GITHUB_REF_TYPE" = "tag" ]; then
             version_name="${GITHUB_REF_NAME#v}"
           fi
-          echo "ANDROID_VERSION_CODE=$GITHUB_RUN_NUMBER" >> "$GITHUB_ENV"
-          if [ -n "$version_name" ]; then
-            echo "ANDROID_VERSION_NAME=$version_name" >> "$GITHUB_ENV"
-          fi
+          version_name="${version_name:-0.1.0-nightly.$build_date}"
+          echo "ANDROID_BUILD_DATE=$build_date" >> "$GITHUB_ENV"
+          echo "ANDROID_VERSION_CODE=$version_code" >> "$GITHUB_ENV"
+          echo "ANDROID_VERSION_NAME=$version_name" >> "$GITHUB_ENV"
+          echo "SHELLOW_GIT_COMMIT=$short_sha" >> "$GITHUB_ENV"
+          echo "build_date=$build_date" >> "$GITHUB_OUTPUT"
+          echo "short_sha=$short_sha" >> "$GITHUB_OUTPUT"
+          echo "version_code=$version_code" >> "$GITHUB_OUTPUT"
+          echo "version_name=$version_name" >> "$GITHUB_OUTPUT"
 
       - name: Set up Java
         uses: actions/setup-java@v4
@@ -182,7 +192,168 @@ jobs:
           releaseFiles: apps/android/app/build/outputs/bundle/release/app-release.aab
           tracks: ${{ github.event.inputs.android_track || 'alpha' }}
           status: ${{ github.event.inputs.release_status || 'completed' }}
-          releaseName: ${{ github.ref_type == 'tag' && github.ref_name || format('run-{0}', github.run_number) }}
+          releaseName: ${{ github.ref_type == 'tag' && github.ref_name || format('nightly-{0}', steps.android-version.outputs.build_date) }}
+
+      - name: Download Play-signed universal APK
+        id: play-signed-apk
+        if: ${{ github.event_name == 'workflow_dispatch' }}
+        shell: bash
+        env:
+          GOOGLE_PLAY_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_PLAY_SERVICE_ACCOUNT_JSON }}
+          PACKAGE_NAME: xyz.zinglix.shellow
+          VERSION_CODE: ${{ steps.android-version.outputs.version_code }}
+        run: |
+          set -euo pipefail
+          output_dir="$RUNNER_TEMP/play-signed-apk"
+          metadata_path="$output_dir/generated-apks.json"
+          apk_path="$output_dir/shellow-android-play-signed-nightly.apk"
+          api_base="https://androidpublisher.googleapis.com/androidpublisher/v3/applications/$PACKAGE_NAME/generatedApks/$VERSION_CODE"
+          mkdir -p "$output_dir"
+
+          credentials_path="$output_dir/google-play-service-account.json"
+          private_key_path="$output_dir/google-play-service-account.key"
+          token_response_path="$output_dir/google-play-token.json"
+          printf '%s' "$GOOGLE_PLAY_SERVICE_ACCOUNT_JSON" > "$credentials_path"
+          jq -r '.private_key' "$credentials_path" > "$private_key_path"
+          client_email="$(jq -r '.client_email' "$credentials_path")"
+
+          base64_urlencode() {
+            openssl base64 -A | tr '+/' '-_' | tr -d '='
+          }
+
+          now="$(date +%s)"
+          expires_at="$((now + 3600))"
+          header="$(printf '%s' '{"alg":"RS256","typ":"JWT"}' | base64_urlencode)"
+          claim="$(
+            jq -cn \
+              --arg iss "$client_email" \
+              --arg scope "https://www.googleapis.com/auth/androidpublisher" \
+              --arg aud "https://oauth2.googleapis.com/token" \
+              --argjson iat "$now" \
+              --argjson exp "$expires_at" \
+              '{iss:$iss,scope:$scope,aud:$aud,iat:$iat,exp:$exp}'
+          )"
+          claim_segment="$(printf '%s' "$claim" | base64_urlencode)"
+          unsigned_jwt="$header.$claim_segment"
+          signature="$(printf '%s' "$unsigned_jwt" | openssl dgst -binary -sha256 -sign "$private_key_path" | base64_urlencode)"
+          assertion="$unsigned_jwt.$signature"
+
+          curl -sS -f \
+            -X POST "https://oauth2.googleapis.com/token" \
+            -H "Content-Type: application/x-www-form-urlencoded" \
+            --data-urlencode "grant_type=urn:ietf:params:oauth:grant-type:jwt-bearer" \
+            --data-urlencode "assertion=$assertion" \
+            -o "$token_response_path"
+          access_token="$(jq -r '.access_token // empty' "$token_response_path")"
+          if [ -z "$access_token" ]; then
+            echo "::error::Could not obtain a Google Play access token"
+            jq '.' "$token_response_path"
+            exit 1
+          fi
+          echo "::add-mask::$access_token"
+
+          for attempt in $(seq 1 30); do
+            http_code="$(
+              curl -sS \
+                -H "Authorization: Bearer $access_token" \
+                -w '%{http_code}' \
+                -o "$metadata_path" \
+                "$api_base"
+            )"
+            if [ "$http_code" = "200" ]; then
+              break
+            fi
+            if [ "$attempt" = "30" ]; then
+              echo "::error::Google Play generated APK metadata was not available for versionCode $VERSION_CODE (HTTP $http_code)"
+              cat "$metadata_path" || true
+              exit 1
+            fi
+            sleep 20
+          done
+
+          download_id="$(jq -r '[.generatedApks[]?.generatedUniversalApk?.downloadId // empty][0] // empty' "$metadata_path")"
+          if [ -z "$download_id" ]; then
+            echo "::error::Google Play did not return a universal APK for versionCode $VERSION_CODE"
+            jq '.' "$metadata_path"
+            exit 1
+          fi
+
+          curl -sS -L -f \
+            -H "Authorization: Bearer $access_token" \
+            "$api_base/downloads/$download_id:download" \
+            -o "$apk_path"
+
+          ls -lh "$apk_path"
+          echo "apk_path=$apk_path" >> "$GITHUB_OUTPUT"
+
+      - name: Publish nightly GitHub release
+        if: ${{ github.event_name == 'workflow_dispatch' }}
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          APK_PATH: ${{ steps.play-signed-apk.outputs.apk_path }}
+          BUILD_DATE: ${{ steps.android-version.outputs.build_date }}
+          VERSION_CODE: ${{ steps.android-version.outputs.version_code }}
+          VERSION_NAME: ${{ steps.android-version.outputs.version_name }}
+        run: |
+          set -euo pipefail
+          notes_path="$RUNNER_TEMP/nightly-release-notes.md"
+          {
+            echo "Nightly Android build updated from $GITHUB_SHA."
+            echo
+            echo "- Version: $VERSION_NAME ($VERSION_CODE)"
+            echo "- Build date: $BUILD_DATE"
+            echo "- Commit: $GITHUB_SHA"
+            echo "- Workflow run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+            echo
+            echo "## Install"
+            echo
+            echo "### Android APK"
+            echo
+            echo "Download **\`shellow-android-play-signed-nightly.apk\`** from the **Assets** section below, then open it on your Android device. Android may ask you to allow installation from your browser or file manager."
+            echo
+            echo "### Google Play beta"
+            echo
+            echo "1. Join the [Shellow test group](https://groups.google.com/g/shellow-test) with the Google account used by Google Play."
+            echo "2. Open the [Google Play testing page](https://play.google.com/apps/testing/xyz.zinglix.shellow) with the same account and opt in."
+            echo "3. Install Shellow from Google Play. Access may take a few minutes after joining the group."
+            echo
+            echo "> **Note:** Google Play may show a price or payment warning. This is part of the test setup—you will not be charged and do not need to make a real payment."
+            echo
+            echo "### iOS"
+            echo
+            echo "Install the latest beta through [TestFlight](https://testflight.apple.com/join/EFnQTH4T). Apple may report that the beta is full or unavailable when all tester slots are occupied."
+          } > "$notes_path"
+
+          if gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/nightly" >/dev/null 2>&1; then
+            gh api \
+              --method PATCH \
+              "repos/$GITHUB_REPOSITORY/git/refs/tags/nightly" \
+              -f sha="$GITHUB_SHA" \
+              -F force=true >/dev/null
+          else
+            gh api \
+              --method POST \
+              "repos/$GITHUB_REPOSITORY/git/refs" \
+              -f ref="refs/tags/nightly" \
+              -f sha="$GITHUB_SHA" >/dev/null
+          fi
+
+          if gh release view nightly >/dev/null 2>&1; then
+            gh release edit nightly \
+              --title "Nightly Android" \
+              --notes-file "$notes_path" \
+              --prerelease \
+              --target "$GITHUB_SHA"
+          else
+            gh release create nightly \
+              --title "Nightly Android" \
+              --notes-file "$notes_path" \
+              --prerelease \
+              --latest=false \
+              --target "$GITHUB_SHA"
+          fi
+          gh release upload nightly "$APK_PATH#shellow-android-play-signed-nightly.apk" --clobber
 
   ios-app-store-connect:
     name: iOS to App Store Connect

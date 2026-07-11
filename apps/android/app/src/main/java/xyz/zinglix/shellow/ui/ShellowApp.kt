@@ -11,6 +11,7 @@ import android.util.Log
 import android.view.Surface
 import android.view.SurfaceHolder
 import android.view.SurfaceView
+import xyz.zinglix.shellow.BuildConfig
 import androidx.activity.compose.BackHandler
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.foundation.Canvas
@@ -346,6 +347,14 @@ private sealed class CodexReconnectTarget {
   ) : CodexReconnectTarget()
 }
 
+private const val CODEX_BOOTSTRAP_SUCCESS_MARKER = "__SHELLOW_CODEX_BOOTSTRAP_OK__"
+private val CODEX_REMOTE_CONTROL_BOOTSTRAP_COMMAND =
+  """
+  PATH="${'$'}PATH:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:${'$'}HOME/.local/bin:${'$'}HOME/.cargo/bin:${'$'}HOME/.bun/bin:${'$'}HOME/.npm-global/bin:/home/linuxbrew/.linuxbrew/bin"
+  export PATH
+  codex app-server daemon bootstrap --remote-control && printf '\n$CODEX_BOOTSTRAP_SUCCESS_MARKER\n'
+  """.trimIndent()
+
 private fun ReconnectTarget.profile(): HostProfile =
   when (this) {
     is ReconnectTarget.Preview -> profile
@@ -420,6 +429,8 @@ fun ShellowApp() {
   var reconnectTarget by remember { mutableStateOf<ReconnectTarget?>(null) }
   var codexReconnectTarget by remember { mutableStateOf<CodexReconnectTarget?>(null) }
   var passwordPrompt by remember { mutableStateOf<PasswordPromptRequest?>(null) }
+  var codexBootstrapPromptEndpoint by remember { mutableStateOf<String?>(null) }
+  var codexBootstrapError by remember { mutableStateOf<String?>(null) }
 
   fun updateStoredProfile(updated: HostProfile) {
     val index = profiles.indexOfFirst { it.id == updated.id }
@@ -596,6 +607,11 @@ fun ShellowApp() {
     codexSnapshot = next
     rememberCodexResumePoint(next)
     captureObservedHostKeyIfNeeded(next)
+    if (next.lastError?.contains("daemon bootstrap --remote-control") == true &&
+      codexBootstrapPromptEndpoint == null && codexBootstrapError == null
+    ) {
+      codexBootstrapPromptEndpoint = codexReconnectTarget?.profile()?.endpoint ?: next.endpoint
+    }
   }
 
   LaunchedEffect(core) {
@@ -953,6 +969,42 @@ fun ShellowApp() {
     }
   }
 
+  fun bootstrapRemoteCodexAndReconnect() {
+    val target = codexReconnectTarget ?: return
+    codexBootstrapPromptEndpoint = null
+    scope.launch {
+      withContext(Dispatchers.IO) { core.disconnectCodex() }
+      val result =
+        withContext(Dispatchers.IO) {
+          ShellowCoreSession().use { setupCore ->
+            when (target) {
+              is CodexReconnectTarget.Password ->
+                setupCore.connectPasswordExec(
+                  target.profile,
+                  target.password,
+                  CODEX_REMOTE_CONTROL_BOOTSTRAP_COMMAND,
+                )
+              is CodexReconnectTarget.PrivateKey ->
+                setupCore.connectPrivateKeyExec(
+                  target.profile,
+                  target.privateKeyPem,
+                  target.passphrase,
+                  CODEX_REMOTE_CONTROL_BOOTSTRAP_COMMAND,
+                )
+            }
+          }
+        }
+      val output = result.rows.joinToString("\n") { it.text }
+      if (!output.contains(CODEX_BOOTSTRAP_SUCCESS_MARKER)) {
+        codexBootstrapError =
+          result.rows.asReversed().firstOrNull { it.text.isNotBlank() }?.text
+            ?: "The remote setup command did not complete successfully."
+        return@launch
+      }
+      reconnectCodex()
+    }
+  }
+
   val activeTerminalProfile = reconnectTarget?.profile()
 
   ShellowTheme(colorScheme = displaySettings.colorScheme) {
@@ -1129,6 +1181,39 @@ fun ShellowApp() {
           onConnect = { password ->
             passwordPrompt = null
             startPasswordConnection(request.profile, password, request.mode)
+          },
+        )
+      }
+
+      codexBootstrapPromptEndpoint?.let { endpoint ->
+        AlertDialog(
+          onDismissRequest = { codexBootstrapPromptEndpoint = null },
+          title = { Text("Enable remote Codex?") },
+          text = {
+            Text(
+              "Shellow needs to enable the persistent Codex remote-control daemon on $endpoint. " +
+                "This runs `codex app-server daemon bootstrap --remote-control` once over SSH. " +
+                "Only continue on a host you trust.",
+            )
+          },
+          confirmButton = {
+            TextButton(onClick = ::bootstrapRemoteCodexAndReconnect) {
+              Text("Enable and reconnect")
+            }
+          },
+          dismissButton = {
+            TextButton(onClick = { codexBootstrapPromptEndpoint = null }) { Text("Cancel") }
+          },
+        )
+      }
+
+      codexBootstrapError?.let { error ->
+        AlertDialog(
+          onDismissRequest = { codexBootstrapError = null },
+          title = { Text("Could not enable remote Codex") },
+          text = { Text(error) },
+          confirmButton = {
+            TextButton(onClick = { codexBootstrapError = null }) { Text("OK") }
           },
         )
       }
@@ -6655,6 +6740,12 @@ private fun SettingsScreen(
       SettingsRow("SSH", report.sshBackend)
       PanelDivider()
       SettingsRow("GPU", report.rendererBackend)
+    }
+    SettingsSectionLabel("Build")
+    SettingsGroup {
+      SettingsRow("Version", "${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE})")
+      PanelDivider()
+      SettingsRow("Commit", BuildConfig.GIT_COMMIT)
     }
   }
 }

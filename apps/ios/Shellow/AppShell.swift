@@ -48,6 +48,12 @@ private enum ShellowRoute: Hashable {
     case codex
 }
 
+private let codexRemoteControlBootstrapCommand = """
+PATH="$PATH:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$HOME/.local/bin:$HOME/.cargo/bin:$HOME/.bun/bin:$HOME/.npm-global/bin:/home/linuxbrew/.linuxbrew/bin"
+export PATH
+codex app-server daemon bootstrap --remote-control && printf '\n__SHELLOW_CODEX_BOOTSTRAP_OK__\n'
+"""
+
 struct AppShell: View {
     @State private var path: [ShellowRoute] = []
     @State private var coreSession = ShellowCoreSession()
@@ -59,6 +65,8 @@ struct AppShell: View {
     @State private var reconnectTarget: ReconnectTarget?
     @State private var codexReconnectTarget: CodexReconnectTarget?
     @State private var passwordPrompt: PasswordPromptRequest?
+    @State private var codexBootstrapPromptEndpoint: String?
+    @State private var codexBootstrapError: String?
     @State private var isSettingsPresented = false
     @State private var terminalRenderTick = 0
 
@@ -116,6 +124,28 @@ struct AppShell: View {
         }
         .tint(ShellowTheme.accent)
         .preferredColorScheme(settings.colorScheme.preferredSwiftUIColorScheme)
+        .alert("Enable remote Codex?", isPresented: Binding(
+            get: { codexBootstrapPromptEndpoint != nil },
+            set: { if !$0 { codexBootstrapPromptEndpoint = nil } }
+        )) {
+            Button("Cancel", role: .cancel) {
+                codexBootstrapPromptEndpoint = nil
+            }
+            Button("Enable and reconnect") {
+                codexBootstrapPromptEndpoint = nil
+                Task { await bootstrapRemoteCodexAndReconnect() }
+            }
+        } message: {
+            Text("Shellow needs to enable the persistent Codex remote-control daemon on \(codexBootstrapPromptEndpoint ?? "this host"). This runs `codex app-server daemon bootstrap --remote-control` once over SSH. Only continue on a host you trust.")
+        }
+        .alert("Could not enable remote Codex", isPresented: Binding(
+            get: { codexBootstrapError != nil },
+            set: { if !$0 { codexBootstrapError = nil } }
+        )) {
+            Button("OK", role: .cancel) { codexBootstrapError = nil }
+        } message: {
+            Text(codexBootstrapError ?? "The remote setup command failed.")
+        }
         .task {
 #if DEBUG
             await handleSimulatorLaunchRequestIfNeeded()
@@ -745,6 +775,43 @@ struct AppShell: View {
         codexSession = next
         rememberCodexResumePoint(from: next)
         captureObservedHostKeyIfNeeded(from: next)
+        if next.lastError?.contains("daemon bootstrap --remote-control") == true,
+           codexBootstrapPromptEndpoint == nil,
+           codexBootstrapError == nil {
+            codexBootstrapPromptEndpoint = codexReconnectTarget?.profile.endpoint ?? next.endpoint
+        }
+    }
+
+    @MainActor
+    private func bootstrapRemoteCodexAndReconnect() async {
+        guard let target = codexReconnectTarget else { return }
+        _ = coreSession.disconnectCodex()
+        let setupSession = ShellowCoreSession()
+        let result: TerminalSession
+        switch target {
+        case .password(let profile, let password, _, _):
+            result = await setupSession.connectPasswordExec(
+                to: profile,
+                password: password,
+                command: codexRemoteControlBootstrapCommand
+            )
+        case .privateKey(let profile, let privateKeyPEM, let passphrase, _, _):
+            result = await setupSession.connectPrivateKeyExec(
+                to: profile,
+                privateKeyPEM: privateKeyPEM,
+                passphrase: passphrase,
+                command: codexRemoteControlBootstrapCommand
+            )
+        }
+        let output = result.rows.map(\.text).joined(separator: "\n")
+        guard output.contains("__SHELLOW_CODEX_BOOTSTRAP_OK__") else {
+            codexBootstrapError = result.rows.reversed()
+                .map(\.text)
+                .first { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+                ?? "The remote setup command did not complete successfully."
+            return
+        }
+        reconnectCodex()
     }
 
     private func advanceTerminalRenderTick() {

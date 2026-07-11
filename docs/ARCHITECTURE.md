@@ -1,69 +1,115 @@
 # Shellow Architecture
 
-## Product Goal
+Shellow is a native mobile SSH terminal and remote Codex client for iOS and
+Android. The platform applications own the user experience and device
+integration, while a shared Rust core owns network sessions, terminal state,
+and rendering.
 
-Shellow is a mobile SSH terminal client. The app ships as native iOS and Android shells around a shared Rust runtime.
+## Repository layout
 
-## Foundation Requirements
+```text
+apps/ios                 SwiftUI application and C ABI bridge
+apps/android             Jetpack Compose application and JNI bridge
+crates/shellow-core      SSH, terminal, renderer, and Codex session logic
+crates/shellow-ffi       C ABI and Android JNI exports
+crates/libghostty-vt-sys Mobile build patch for libghostty-vt
+scripts                  Native Rust build scripts
+```
 
-- Native iOS shell: SwiftUI for navigation, UIKit bridge for the future terminal surface.
-- Native Android shell: Jetpack Compose for navigation and JNI for the Rust bridge.
-- Secure host profiles: iOS Keychain and Android Keystore for private key material and secrets.
-- SSH core: Rust `russh`, wrapped in a session actor owned by the Rust core.
-- Terminal engine: Shellow's `TerminalEngine` boundary now uses the official `libghostty-vt` Rust crate directly. The crate builds and links Ghostty's VT library through `libghostty-vt-sys` and Zig 0.15.2, and `ghostty_adapter` translates Ghostty terminal state, modes, styled cells, cursor state, scrollback, title, bell, and OSC 52 effects into Shellow's shared terminal snapshot model. Shellow carries a small local `libghostty-vt-sys` patch for mobile vendored builds until those target mappings are upstreamed.
-- Renderer: custom terminal-grid renderer over `wgpu`, with a glyph-atlas raster backend boundary, a glyph layout/shaping backend boundary, dirty-row updates, renderer-owned selection/search overlays, and a native surface attach boundary. The shared Rust core now owns a persistent terminal renderer runtime that consumes the current grid snapshot plus overlay cell ranges, reports dirty rows/cell metrics/frame signatures/overlay counts/glyph-atlas backend status/glyph-layout backend status, initializes one native `wgpu` device/queue on first frame, uploads a glyph atlas texture plus dirty-row buffer data, reuses the device on later frames, accepts iOS `CoreAnimationLayer` and Android native-window surface descriptors through FFI/JNI, creates/configures real `wgpu::Surface` targets for supported native builds, and presents visible terminal grid frames through the Rust-owned surface while SwiftUI/Compose remain responsible for hit testing and accessibility. Native builds now prefer a real `fontdue-system-font-rasterizer` atlas from `SHELLOW_RENDERER_FONT_PATH` or platform monospace system fonts, with procedural cells retained only as a no-font fallback. Native builds shape terminal text with `rustybuzz-terminal-shaper`, map HarfBuzz clusters back to terminal cell ranges, store `FontGlyph(u16)` atlas keys, and rasterize shaped glyph IDs with `fontdue::rasterize_indexed`; non-native or no-font builds keep `terminal-cell-cluster-layout` as the fallback.
-- FFI: thin C ABI for the current shared bridge; Swift consumes it directly, Android consumes it through JNI. UniFFI remains an option for broader control-plane APIs later.
+Generated XCFrameworks and Android shared libraries are build artifacts and are
+not committed.
 
-## iOS v1 Scope
+## System boundaries
 
-- Run as a native SwiftUI app on iPhone simulator.
-- Show a terminal-first app shell with profiles and settings.
-- Use a Rust-built `ShellowCore.xcframework` for session snapshots and demo commands.
-- Compile `russh`, `libghostty-vt`, and `wgpu` into the iOS Rust slice.
-- Avoid committing to platform-only rendering paths that would be thrown away later.
+### Native applications
 
-## Android v1 Scope
+SwiftUI and Jetpack Compose own navigation, profile editing, settings,
+accessibility, clipboard interaction, keyboard and pointer input, and platform
+lifecycle events. Secrets remain on the device: iOS uses Keychain and Android
+uses Keystore-backed encrypted storage.
 
-- Run as a native Jetpack Compose app from `apps/android`.
-- Reuse the same Rust `shellow-ffi` ABI through a small `shellow_jni` wrapper.
-- Package Android Rust slices as `libshellow_ffi.so` for `arm64-v8a` and `x86_64`.
-- Use `wgpu` with the Vulkan backend for Android renderer probes.
-- Keep the app shell behavior aligned with the iOS prototype: terminal, hosts, settings, demo commands, and password-shell connection flow.
+The native applications do not parse terminal escape sequences or implement
+SSH. They send user actions to Rust and render state returned in snapshots.
 
-## Rust Boundary
+### Native bridge
 
-The Rust side will eventually expose:
+`shellow-ffi` exposes a narrow C ABI. Swift calls it directly through the
+generated iOS framework; Android calls the same operations through JNI. Values
+that cross this boundary are handles, primitive values, byte buffers, or JSON
+snapshots.
 
-- Session lifecycle: create, connect, disconnect, resize, send input, clear visible terminal output, and reset local terminal display state.
-- Profile-safe inputs: host, port, username, auth reference, known-host policy.
-- Terminal events: dirty rows, cursor state, title changes, bell, connection state.
-- Renderer lifecycle: create persistent renderer, inspect renderer info, produce frames, attach native surface, resize, draw frame, detach.
+The bridge is intentionally thin. Session behavior and state transitions belong
+in `shellow-core` so both platforms receive the same semantics.
 
-Swift/Kotlin own presentation, platform credential storage, and lifecycle. Rust owns SSH, terminal correctness, and terminal rendering.
+### Shared Rust core
 
-## Current Integration State
+`shellow-core` owns:
 
-- `shellow-core`: owns the terminal snapshot model, integration report, `ghostty_adapter` VT backend boundary, persistent terminal renderer runtime, terminal render-frame model, demo command handling, and `RusshSessionActor`. Codex sessions use a separate SSH exec channel that runs `codex app-server daemon start` idempotently and then replaces the remote shell with `codex app-server proxy`; the proxy lifetime follows the mobile SSH connection while the bootstrapped daemon and active turns remain owned by the remote host. Daemon notifications, turn responses, and approval requests are scoped by `threadId`, so concurrently running threads cannot write into the selected thread's transcript or turn state; background approvals remain stored until that thread is selected. Each remote account must explicitly run `codex app-server daemon bootstrap --remote-control` once before its first Shellow Codex connection. Shellow does not enable that persistent remote-control setting automatically, and reports an actionable handshake timeout when it is missing.
-- `shellow-ffi`: exposes a C ABI consumed by Swift through `ShellowCore.xcframework` and by Android through `shellow_jni`, including password/private-key one-shot SSH exec, live-shell startup/polling, `shellow_engine_render_frame_viewport_json`, `shellow_engine_renderer_info_json`, `shellow_engine_set_renderer_overlay_json`, `shellow_engine_attach_core_animation_layer_json`, `shellow_engine_attach_android_native_window_json`, and `shellow_engine_detach_renderer_surface_json` for the shared renderer lifecycle boundary.
-- `russh`: compiled into the native iOS slice; `RusshSessionActor` supports one-shot PTY exec plus a long-lived password shell actor for interactive input/output.
-- `libghostty-vt`: first-class terminal backend in the integration report, Cargo feature surface, and Shellow VT adapter boundary. `official-libghostty-vt-rs` is enabled by default and by `native-integrations`; the older `ghostty-vt`, `libghostty-vt`, and `libghostty-vt-link` feature names are aliases to the same official Rust crate path for command compatibility. The integration report now identifies the contract as `libghostty-vt-rs-0.2.0` and reports the vendored Zig sys build state. The local sys patch adds iOS target mapping, the arm64 iOS simulator `apple_a17` CPU selection needed by Zig 0.15's simdutf build, and an Android lib-vt-only font backend setting so Android does not pull Ghostty's unrelated fontconfig/harfbuzz discovery stack.
-- `wgpu`: compiled into native Apple and Android slices; `shellow renderer` now routes through the shared Rust renderer lifecycle API, creates one native GPU device/queue on the first frame, uploads a glyph atlas texture with `write_texture`, packs dirty terminal rows into a GPU buffer with `write_buffer`, reuses the device on later frames, consumes renderer overlay cell ranges for selection/search/active-search highlights, reports the active glyph atlas backend (`fontdue-system-font-rasterizer` when a platform font is parseable, otherwise `procedural-cell-rasterizer`) separately from the target backend (`font-shaping-glyph-atlas`), reports the active glyph layout backend (`rustybuzz-terminal-shaper` when shaping is available, otherwise `terminal-cell-cluster-layout`) separately from the same shaping target, creates/configures an iOS `wgpu::Surface` from the `CoreAnimationLayer`, creates/configures an Android Vulkan `wgpu::Surface` from an `ANativeWindow` on Android native builds, presents attach probes, renders visible terminal cell/glyph/overlay vertices into the Rust-owned native surface, and keeps offscreen terminal-frame render passes available on Metal/Vulkan.
-- iOS terminal viewport: hosts an `MTKView`/`CAMetalLayer` surface as the primary grid drawing layer, passes the layer pointer and drawable size into Rust's renderer surface attach ABI, sends viewport-relative selection/search ranges into Rust through `shellow_engine_set_renderer_overlay_json`, and asks Rust to present the current terminal viewport through `shellow_engine_render_frame_viewport_json`. The transparent SwiftUI layer remains responsible for row selection, drag selection, mouse-reporting hit targets, accessibility, and a hidden `UIKeyInput` responder for terminal-area direct soft/hardware keyboard input.
-- iOS terminal controls: SwiftUI exposes terminal-viewport direct input, copy/search/paste, clear terminal, reset terminal, jump-to-bottom, reader-aware auto-follow, shared readline-style local prompt editing including cursor movement, middle insertion/deletion, `Ctrl-A`/`Ctrl-E`/`Ctrl-K`/`Ctrl-U`/`Ctrl-W`, `Ctrl-R` reverse history search, and the special-key toolbar including nano/multiplexer control keys `^B`, `^O`, and `^X`. Host profiles can opt into a validated named tmux, GNU screen, or Zellij session. The persisted configuration keeps the legacy `tmuxSession` storage key for migration, adds an explicit backend discriminator that defaults to tmux when absent, and derives a shell-safe backend-specific attach command. AppShell waits for the SSH prompt to settle and preserves that startup command for reconnect. Terminal tools route one item-driven sheet into backend-specific session/workspace controls; delayed raw prefix dispatch keeps SwiftUI presentation transitions from swallowing tmux `Ctrl-B`, screen `Ctrl-A`, or Zellij mode sequences. GNU screen attach resolves an exact `pid.session-name` before reattaching so names such as `shellow-screen` and `shellow-screen-2` do not collide under screen's prefix matching. The former visible staging input field has been removed from the primary terminal path, and clear/reset call the same Rust C ABI as Android rather than mutating Swift-only state.
-- iOS host capability detection: `AppShell` creates a separate `ShellowCoreSession` for each probe and authenticates it with the saved password or each saved private key, leaving the primary terminal engine untouched. A portable shell probe emits a versioned, sanitized record stream for OS, kernel, architecture, shell, executable versions, and required command flags. Swift parses the report into Codable host-profile state, caches it for 24 hours, and renders system metadata plus backend-specific Full/Limited/Unavailable status in the host connection sheet. Auto-probes follow SwiftUI task cancellation and manual refresh coalesces while a request is already running.
-- iOS transcript export: SwiftUI writes the current visible terminal text to UTF-8 `.txt` files in the app Documents `Shellow-Transcripts` directory using the same snapshot-derived text as Copy Terminal.
-- iOS display settings: stored in `UserDefaults` as JSON and applied to SwiftUI history rows, VT grid rows, Rust surface sizing, and terminal resize calculations.
-- Android terminal viewport: hosts a `SurfaceView` behind the terminal grid, converts the platform `Surface` into a retained `ANativeWindow` in JNI, attaches it to Rust's Android native-window renderer ABI, sends viewport-relative selection/search ranges into Rust through `shellow_engine_set_renderer_overlay_json`, asks Rust to present terminal frames through `shellow_engine_render_frame_viewport_json`, and keeps Compose grid rows transparent for interaction/accessibility hit targets rather than terminal text drawing. The Compose layer applies persisted display settings to font size, line height, and terminal resize calculations, preserves pointer input and selection controls, and hosts a hidden focused `BasicTextField` sentinel for IME text/backspace direct input into the terminal stream.
-- Android terminal controls: Compose exposes terminal-viewport direct input, copy/search/paste, clear terminal, reset terminal, a Bottom jump control, auto-follow for new output while search is inactive, shared readline-style local prompt editing including cursor movement, middle insertion/deletion, `Ctrl-A`/`Ctrl-E`/`Ctrl-K`/`Ctrl-U`/`Ctrl-W`, `Ctrl-R` reverse history search, hardware-keyboard native key events, and the special-key toolbar including multiplexer keys `^A`, `^B`, and `^O` through JNI calls into the shared Rust session. Host profiles persist an optional validated tmux, GNU screen, or Zellij session; SSH connect/reconnect runs the backend-specific attach-or-create command after a prompt-settle delay. The terminal tools dialog dispatches backend-specific session, window/tab, pane/region, switch/create, and detach controls after Compose menu dismissal so prefix input is not lost.
-- Android host capability detection: Compose uses a short-lived `ShellowCoreSession` and dedicated JNI password/private-key one-shot exec calls, keeping the active terminal session untouched. The same versioned portable probe as iOS detects OS/version, kernel, architecture, login shell, and tmux/screen/Zellij versions and attach/create support. Reports persist in host-profile JSON for 24 hours, refresh automatically when a saved credential is available, and support manual refresh from the host connection dialog.
-- Android packaging: release keeps `xyz.zinglix.shellow`; debug adds the `.debug` application-id suffix and `Shellow Debug` label so local/ADB builds can coexist with a store-signed production installation without signature conflicts or production-data removal.
-- Android transcript export: Compose writes the current visible terminal text to UTF-8 `.txt` files in app-specific Documents storage using the same snapshot-derived text as Copy Terminal.
-- iOS Profiles UI: each saved profile chooses Terminal or Codex as its default workspace and opens directly from the list; the edit sheet owns SSH, capability, and persistent-terminal configuration. Connected Terminal profiles discover tmux/screen/Zellij sessions through a short-lived authenticated exec and switch them from the floating header, while Codex profiles expose the current thread catalog from the Codex header. Keychain secrets remain keyed by the stable profile UUID.
-- Android Profiles UI: Compose mirrors the same direct-open and host-scoped session-switching flow. Password/private-key material remains encrypted with Android Keystore AES-GCM, Terminal session discovery uses the selected multiplexer, and Codex session switching resumes threads over the existing proxy connection.
+- SSH connection and interactive shell lifecycle through `russh`.
+- Terminal emulation and persistent VT state through `libghostty-vt`.
+- Terminal snapshots, dirty rows, cursor and mode state, scrollback, title,
+  bell, and OSC 52 effects.
+- Selection and search overlay ranges consumed by the renderer.
+- Codex proxy sessions, JSON-RPC messages, threads, turns, and approvals.
+- Platform-independent session state and error reporting.
 
-## Remaining Demo Work
+Host profiles and secrets remain native concerns; authenticated connection
+parameters are passed into the core when a session starts.
 
-- Keep tightening the `libghostty-vt` adapter around persistent terminal state and renderer-driven incremental snapshots. The vendored Zig build now produces the iOS XCFramework and Android `arm64-v8a`/`x86_64` JNI slices; Android runtime device proof still needs a reachable ADB device.
-- Extend the `rustybuzz-terminal-shaper` path with fallback font chains, emoji/color glyph handling, RTL/bidi terminal policies, and tighter terminal-cell positioning; `terminal-cell-cluster-layout` remains the no-shaper fallback rather than the normal native renderer path.
-- Verify the Android `SurfaceView`/`ANativeWindow`/Vulkan `wgpu::Surface` path on a reachable device, then tune z-order and frame pacing for the Rust-owned viewport renderer.
-- Verify end-to-end TOFU and saved-secret reconnect behavior against a reachable live SSH server.
+### Terminal renderer
+
+The Rust renderer consumes terminal snapshots and draws the visible grid with
+`wgpu`. It owns the GPU device, queue, glyph atlas, shaped glyph layout, dirty
+row uploads, and selection/search overlays. Native applications retain an
+interaction and accessibility layer over the rendered grid.
+
+On iOS, an `MTKView` supplies a `CAMetalLayer`. On Android, a `SurfaceView`
+supplies an `ANativeWindow`. These platform surfaces are attached to the shared
+renderer through the native bridge. Metal and Vulkan are selected by `wgpu` on
+their respective platforms.
+
+Text shaping uses `rustybuzz` and glyph rasterization uses `fontdue` when a
+platform monospace font is available. A simpler cell layout and procedural
+rasterizer remain fallbacks for environments without a usable font.
+
+## Session flows
+
+### Terminal
+
+```text
+keyboard / pointer / clipboard
+        -> native application
+        -> C ABI or JNI
+        -> Rust SSH session
+        -> libghostty-vt state
+        -> terminal snapshot
+        -> wgpu renderer and native accessibility layer
+```
+
+The Rust session receives remote bytes, updates the VT state, and exposes a new
+snapshot. Input follows the reverse path and is written to the SSH channel.
+Resize events originate from native layout and update both the remote PTY and
+renderer viewport.
+
+### Codex
+
+Codex workspaces use a separate SSH exec channel. The remote command starts the
+persistent `codex app-server` daemon when needed and connects through
+`codex app-server proxy`. Shellow exchanges JSON-RPC messages with that proxy
+and models threads, messages, active turns, settings, and approval requests in
+the shared core.
+
+The proxy connection follows the mobile SSH session. The daemon and its turns
+can continue on the remote host after the phone disconnects, allowing a later
+connection to resume a thread.
+
+## Design rules
+
+- Keep platform-specific UI and secure storage in the native applications.
+- Keep SSH, terminal semantics, Codex protocol handling, and rendering behavior
+  shared in Rust.
+- Add cross-platform operations to `shellow-core` before exposing them through
+  the bridge.
+- Treat JSON snapshots as a compatibility boundary and evolve them deliberately.
+- Keep verification history in tests and issue tracking, not in architecture
+  documentation.

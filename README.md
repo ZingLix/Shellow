@@ -1,97 +1,115 @@
-# Shellow
+<p align="center">
+  <img src="apps/ios/Shellow/Assets.xcassets/AppIcon.appiconset/Icon-ios-marketing-1024.png" width="160" alt="Shellow app icon" />
+</p>
 
-Shellow is a native mobile SSH terminal client prototype. The product direction is iOS and Android apps with a shared Rust core for SSH sessions, terminal state, and GPU-backed terminal rendering.
+<h1 align="center">Shellow</h1>
 
-## Current Milestone
+<p align="center">
+  A high-performance mobile terminal and native Codex client,<br />
+  connecting directly to your machines over SSH.
+</p>
 
-- Native iOS SwiftUI shell in `apps/ios`.
-- Native Android Jetpack Compose shell in `apps/android`.
-- Shared Rust core in `crates/shellow-core`, exported through `shellow-ffi`.
-- `russh`, `libghostty-vt`, and `wgpu` compile into the Apple and Android Rust slices. VT parsing/state is now routed directly through the official `libghostty-vt` Rust crate (`libghostty-vt-sys` vendored Zig build) instead of the previous compatibility layer.
-- `libghostty-vt-sys` is patched locally in `crates/libghostty-vt-sys` for mobile vendored builds: iOS device/simulator target mapping, arm64 simulator CPU selection, and Android lib-vt font-stack pruning.
-- Profiles combine a saved host with a default Terminal or Codex workspace, open directly from the Profiles screen, and expose host-scoped session switching after connection.
-- Codex profiles connect over SSH to a durable remote `codex app-server` daemon: Shellow starts the already-bootstrapped daemon idempotently and proxies JSON-RPC over the current SSH channel, so closing the mobile transport no longer owns the daemon lifetime. Run `codex app-server daemon bootstrap --remote-control` once on each remote host before the first Codex connection; Shellow does not silently change that persistent security setting.
-- `shellow renderer` routes through the shared Rust renderer lifecycle API, reports terminal frame metrics/dirty rows/signatures, initializes a persistent wgpu device/queue on first frame, uploads a glyph atlas texture plus dirty-row buffer data, reuses the device on later frames, and submits native terminal-frame passes: Metal on iOS, Vulkan on Android. The atlas now has an explicit raster backend boundary: native builds prefer `fontdue-system-font-rasterizer` by loading `SHELLOW_RENDERER_FONT_PATH` or a platform monospace system font, fall back to `procedural-cell-rasterizer` when no parseable font is available, and keep `font-shaping-glyph-atlas` as the target backend. Native builds now shape text with `rustybuzz-terminal-shaper`, store shaped font glyph IDs in the shared atlas, rasterize those IDs with `fontdue::rasterize_indexed`, and fall back to `terminal-cell-cluster-layout` only when shaping is unavailable. iOS passes the `MTKView` `CAMetalLayer` handle into Rust, which creates/configures a `wgpu::Surface`, presents the attach probe, sends selection/search ranges through `shellow_engine_set_renderer_overlay_json`, and presents visible terminal grid frames plus renderer-owned overlays through the Rust-owned surface. Android hosts a `SurfaceView`, converts its `Surface` to an `ANativeWindow` in JNI, holds that native window for Rust, drives the same viewport render-frame and renderer-overlay APIs, and keeps Compose terminal rows as transparent interaction/accessibility hit targets while visible terminal content comes from Rust/wgpu.
-- Android debug APK packages both `arm64-v8a` and `x86_64` JNI/native Rust libraries.
-- iOS simulator live SSH has been verified against a reachable password-auth host: `russh` opens the PTY shell, remote output is parsed by `libghostty-vt`, the native `wgpu` surface presents terminal frames, and first-use host-key pinning persists back to the profile.
-- Architecture boundaries documented for the native GPU terminal surface path and remaining runtime proof work.
-- Terminal capability checklist lives in `docs/TERMINAL_CAPABILITIES.md`.
+<p align="center">
+  <a href="https://testflight.apple.com/join/EFnQTH4T">
+    <img src="https://img.shields.io/badge/TestFlight-0D96F6?logo=app-store&logoColor=white&style=for-the-badge" alt="Download on TestFlight" />
+  </a>
+  <a href="https://play.google.com/apps/testing/xyz.zinglix.shellow">
+    <img src="https://img.shields.io/badge/Google_Play_Beta-414141?logo=google-play&logoColor=white&style=for-the-badge" alt="Get the Google Play beta" />
+  </a>
+  <a href="https://github.com/ZingLix/Shellow/releases">
+    <img src="https://img.shields.io/badge/GitHub_Releases-000000?logo=github&logoColor=white&style=for-the-badge" alt="Download from GitHub Releases" />
+  </a>
+</p>
 
-## Target Architecture
+> [!IMPORTANT]
+> Shellow is currently in beta. Features and stored data formats may change, and
+> you may encounter incomplete behavior. Please avoid relying on it as your only
+> way to access a critical server.
 
-```text
-iOS SwiftUI / Android Compose app shell
-  -> native terminal surface host
-  -> C ABI bridge / JNI bridge
-  -> russh session actor
-  -> libghostty-vt VT state
-  -> shared persistent wgpu terminal renderer lifecycle API
-  -> fontdue/system-font glyph atlas / font-shaping atlas target
-  -> rustybuzz terminal shaper / terminal-cell fallback layout
-  -> shared renderer overlay cell-range API
-  -> native wgpu terminal surface
-```
-
-## Build
-
-The native build products are intentionally git-ignored: iOS regenerates
-`apps/ios/Frameworks/ShellowCore.xcframework`, and Android regenerates
-`apps/android/app/src/main/jniLibs/`. Run the Rust build script for the platform
-before opening/building the mobile shell from a clean clone.
+## Install
 
 ### iOS
 
-Open `apps/ios/Shellow.xcodeproj`, or build from this folder with:
-
-```sh
-./scripts/build-ios-rust.sh
-xcodebuild -project apps/ios/Shellow.xcodeproj -scheme Shellow -destination 'platform=iOS Simulator,name=iPhone 17' build
-```
+Install the latest beta through [TestFlight](https://testflight.apple.com/join/EFnQTH4T).
+Apple may report that the beta is full or unavailable when all tester slots are
+occupied.
 
 ### Android
 
-Build the Android Rust shared libraries, then build the debug APK:
+Google Play access is limited to members of the Shellow test group:
 
-```sh
-./scripts/build-android-rust.sh
-cd apps/android
-./gradlew :app:assembleDebug
-```
+1. Join the [Shellow test group](https://groups.google.com/g/shellow-test) with
+   the Google account you use on Google Play.
+2. Open the [Google Play testing page](https://play.google.com/apps/testing/xyz.zinglix.shellow)
+   with the same account and opt in.
+3. Install Shellow from Google Play. Access may take a few minutes to become
+   available after joining the group.
 
-Ghostty's vendored build requires Zig 0.15.2. The Rust build scripts automatically prefer Homebrew's `zig@0.15` when available, reuse `work/zig-global-cache`, reuse any already-fetched Ghostty source through `GHOSTTY_SOURCE_DIR`, and use `ReleaseFast` for the vendored `libghostty-vt` build. If Zig is missing:
+   **Note**: Google Play may show a price or payment warning. This is part of the
+   test setup—you will not be charged and do not need to make a real payment.
 
-```sh
-brew install zig@0.15
-```
+Alternatively, download an Android build directly from
+[GitHub Releases](https://github.com/ZingLix/Shellow/releases). Installing an APK
+outside Google Play may require enabling installation from your browser or file
+manager.
 
-The APK is written to:
+## Why Shellow
 
-```text
-apps/android/app/build/outputs/apk/debug/app-debug.apk
-```
+### High-performance terminal
 
-Store release CI setup lives in `docs/STORE_RELEASE_SETUP.md`; Chinese setup
-notes live in `docs/STORE_RELEASE_SETUP.zh-CN.md`.
+- **Ghostty terminal engine**: `libghostty-vt` provides standards-aware terminal
+  parsing and state management.
+- **GPU-native rendering**: A shared Rust `wgpu` renderer draws through Metal on
+  iOS and Vulkan on Android.
+- **Built for sustained sessions**: Text shaping, glyph caching, and dirty-row
+  updates keep terminal interaction responsive.
+- **Native surface end to end**: Terminal frames render directly into platform
+  surfaces instead of an embedded web terminal.
 
-Run on a connected ADB device:
+### Native Codex client
 
-```sh
-adb connect <host>:<port>
-android run --device=<host>:<port> --apks=apps/android/app/build/outputs/apk/debug/app-debug.apk --activity=xyz.zinglix.shellow.MainActivity
-```
+- **First-class Codex UI**: Browse projects and threads, send messages, review
+  tool activity, handle approvals, and adjust settings from mobile.
+- **SSH only**: Shellow connects directly to Codex on your own machine, without a
+  Shellow relay, hosted backend, browser session, or extra agent.
+- **Persistent remote tasks**: Codex work continues on the remote host when the
+  phone disconnects, and can be resumed later.
+- **Setup stays in the app**: Shellow explains and runs the one-time remote setup
+  only after explicit confirmation.
 
-Inside the demo terminal, try:
+### Native on both platforms
 
-```sh
-shellow integrations
-shellow ghostty
-shellow ssh
-shellow renderer
-```
+- **Platform-native UI**: SwiftUI on iOS and Jetpack Compose on Android.
+- **Shared Rust core**: Both apps use the same SSH, terminal, Codex, and rendering
+  implementation without sharing a web view.
 
-For live SSH, add or tap a password-based host profile, enter a password, optionally provide a startup command, then connect. Terminal input is routed through the live `russh` PTY and remote bytes are rendered through `libghostty-vt` before the native viewport displays them.
+For implementation details, see [Architecture](docs/ARCHITECTURE.md) and the
+[terminal capability checklist](docs/TERMINAL_CAPABILITIES.md).
+
+## Build from source
+
+Shellow combines native iOS and Android apps with a shared Rust core. See the
+[building guide](docs/BUILDING.md) for setup, builds, tests, and releases.
+
+## Project status
+
+Shellow is under active development and currently distributed as a beta.
+Platform behavior and feature parity may change between releases.
+
+## More from me
+
+I also make [Sillage](https://github.com/ZingLix/Sillage/),
+an app that turns your trips into a personal timeline by automatically bringing
+together visited places, flights, trains, hotels, and photos. It can also connect
+to Immich for photo management. If you love traveling, take a look.
+
+<p align="center">
+  <a href="https://github.com/ZingLix/Sillage/">
+    <img src="https://github.com/ZingLix/Sillage/blob/main/imgs/hero.png?raw=true" alt="Sillage travel timeline" width="640" />
+  </a>
+</p>
 
 ## License
 
-Shellow is licensed under the Apache License, Version 2.0. Third-party
-dependencies and bundled assets retain their own licenses.
+Shellow is licensed under the [Apache License 2.0](LICENSE). Third-party
+dependencies and bundled assets retain their respective licenses.
