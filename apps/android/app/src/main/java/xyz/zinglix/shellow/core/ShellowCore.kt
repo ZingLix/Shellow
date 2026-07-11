@@ -92,7 +92,8 @@ enum class ProfileLaunchKind(
   val title: String,
 ) {
   Terminal("terminal", "Terminal"),
-  Codex("codex", "Codex");
+  Codex("codex", "Codex"),
+  Claude("claude", "Claude Code");
 
   companion object {
     fun fromWire(value: String?): ProfileLaunchKind =
@@ -795,6 +796,7 @@ data class CodexApproval(
   val command: String?,
   val cwd: String?,
   val reason: String?,
+  val questions: List<CodexUserQuestion>,
 ) {
   companion object {
     fun fromJson(json: JSONObject) =
@@ -806,6 +808,39 @@ data class CodexApproval(
         command = json.optNullableString("command"),
         cwd = json.optNullableString("cwd"),
         reason = json.optNullableString("reason"),
+        questions = json.optJSONArray("questions")?.mapObjects(CodexUserQuestion::fromJson).orEmpty(),
+      )
+  }
+}
+
+data class CodexUserQuestion(
+  val question: String,
+  val header: String,
+  val options: List<CodexUserQuestionOption>,
+  val multiSelect: Boolean,
+) {
+  companion object {
+    fun fromJson(json: JSONObject) =
+      CodexUserQuestion(
+        question = json.optString("question"),
+        header = json.optString("header", "Question"),
+        options = json.optJSONArray("options")?.mapObjects(CodexUserQuestionOption::fromJson).orEmpty(),
+        multiSelect = json.optBoolean("multi_select"),
+      )
+  }
+}
+
+data class CodexUserQuestionOption(
+  val label: String,
+  val description: String,
+  val preview: String?,
+) {
+  companion object {
+    fun fromJson(json: JSONObject) =
+      CodexUserQuestionOption(
+        label = json.optString("label"),
+        description = json.optString("description"),
+        preview = json.optNullableString("preview"),
       )
   }
 }
@@ -1141,6 +1176,12 @@ class ShellowCoreSession : Closeable {
       if (current == 0L) 0L else ShellowNative.nativeCodexEventRevision(current)
     }
 
+  fun claudeEventRevision(): Long =
+    lock.withLock {
+      val current = handle
+      if (current == 0L) 0L else ShellowNative.nativeClaudeEventRevision(current)
+    }
+
   fun detachRendererSurface(): String =
     nativeJson { current -> ShellowNative.nativeDetachRendererSurfaceJson(current) }
 
@@ -1377,6 +1418,69 @@ class ShellowCoreSession : Closeable {
   fun disconnectCodex() =
     decodeCodex { current -> ShellowNative.nativeDisconnectCodexJson(current) }
 
+  fun claudeSnapshot() =
+    decodeCodex { current -> ShellowNative.nativeClaudeSnapshotJson(current) }
+
+  fun startClaudePassword(
+    profile: HostProfile,
+    password: String,
+    cwd: String,
+    sessionId: String = "",
+  ) =
+    decodeCodex { current ->
+      ShellowNative.nativeStartClaudePasswordJson(
+        current,
+        profile.name,
+        profile.host,
+        profile.port,
+        profile.username,
+        profile.trustedHostKeySha256.orEmpty(),
+        password,
+        cwd,
+        sessionId,
+      )
+    }
+
+  fun startClaudePrivateKey(
+    profile: HostProfile,
+    privateKeyPem: String,
+    passphrase: String,
+    cwd: String,
+    sessionId: String = "",
+  ) =
+    decodeCodex { current ->
+      ShellowNative.nativeStartClaudePrivateKeyJson(
+        current,
+        profile.name,
+        profile.host,
+        profile.port,
+        profile.username,
+        profile.trustedHostKeySha256.orEmpty(),
+        privateKeyPem,
+        passphrase,
+        cwd,
+        sessionId,
+      )
+    }
+
+  fun pollClaude() =
+    decodeCodex { current -> ShellowNative.nativePollClaudeJson(current) }
+
+  fun sendClaudeMessage(message: String) =
+    decodeCodex { current -> ShellowNative.nativeSendClaudeMessageJson(current, message) }
+
+  fun updateClaudeSettings(model: String, permissionMode: String) =
+    decodeCodex { current -> ShellowNative.nativeUpdateClaudeSettingsJson(current, model, permissionMode) }
+
+  fun interruptClaudeTurn() =
+    decodeCodex { current -> ShellowNative.nativeInterruptClaudeTurnJson(current) }
+
+  fun answerClaudeApproval(requestId: String, decision: String) =
+    decodeCodex { current -> ShellowNative.nativeAnswerClaudeApprovalJson(current, requestId, decision) }
+
+  fun disconnectClaude() =
+    decodeCodex { current -> ShellowNative.nativeDisconnectClaudeJson(current) }
+
   override fun close() {
     lock.withLock {
       val current = handle
@@ -1433,6 +1537,7 @@ internal object ShellowNative {
   external fun nativeRendererInfoJson(handle: Long): String
   external fun nativeLiveShellEventRevision(handle: Long): Long
   external fun nativeCodexEventRevision(handle: Long): Long
+  external fun nativeClaudeEventRevision(handle: Long): Long
   external fun nativeSetRendererOverlayJson(handle: Long, overlayJson: String): String
   external fun nativeSetTerminalThemeJson(handle: Long, themeId: String): String
   external fun nativeAttachAndroidNativeWindowJson(handle: Long, rawHandle: Long, widthPx: Int, heightPx: Int): String
@@ -1549,6 +1654,15 @@ internal object ShellowNative {
   external fun nativeInterruptCodexTurnJson(handle: Long): String
   external fun nativeAnswerCodexApprovalJson(handle: Long, requestId: String, decision: String): String
   external fun nativeDisconnectCodexJson(handle: Long): String
+  external fun nativeClaudeSnapshotJson(handle: Long): String
+  external fun nativeStartClaudePasswordJson(handle: Long, name: String, host: String, port: Int, username: String, trustedHostKeySha256: String, password: String, cwd: String, sessionId: String): String
+  external fun nativeStartClaudePrivateKeyJson(handle: Long, name: String, host: String, port: Int, username: String, trustedHostKeySha256: String, privateKeyPem: String, passphrase: String, cwd: String, sessionId: String): String
+  external fun nativePollClaudeJson(handle: Long): String
+  external fun nativeSendClaudeMessageJson(handle: Long, message: String): String
+  external fun nativeUpdateClaudeSettingsJson(handle: Long, model: String, permissionMode: String): String
+  external fun nativeInterruptClaudeTurnJson(handle: Long): String
+  external fun nativeAnswerClaudeApprovalJson(handle: Long, requestId: String, decision: String): String
+  external fun nativeDisconnectClaudeJson(handle: Long): String
 }
 
 private fun <T> JSONArray.mapObjects(transform: (JSONObject) -> T): List<T> =

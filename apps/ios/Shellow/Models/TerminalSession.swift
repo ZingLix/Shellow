@@ -864,8 +864,22 @@ struct CodexApproval: Identifiable, Equatable, Decodable {
     var command: String?
     var cwd: String?
     var reason: String?
+    var questions: [CodexUserQuestion]
 
     var id: String { requestId }
+}
+
+struct CodexUserQuestion: Equatable, Decodable {
+    var question: String
+    var header: String
+    var options: [CodexUserQuestionOption]
+    var multiSelect: Bool
+}
+
+struct CodexUserQuestionOption: Equatable, Decodable {
+    var label: String
+    var description: String
+    var preview: String?
 }
 
 enum CodexApprovalKind: String, Equatable, Decodable {

@@ -1,6 +1,6 @@
 use std::{
     collections::HashMap,
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use pulldown_cmark::{CodeBlockKind, CowStr, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
@@ -9,10 +9,71 @@ use serde_json::{Value, json};
 
 use crate::{HostProfile, ssh};
 
-const CODEX_APP_SERVER_COMMAND_BODY: &str = r#"SHELLOW_CODEX_CWD="$(pwd -P 2>/dev/null || pwd)"; printf 'SHELLOW_CODEX_CWD=%s\n' "$SHELLOW_CODEX_CWD" >&2; PATH="$PATH:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$HOME/.local/bin:$HOME/.cargo/bin:$HOME/.bun/bin:$HOME/.npm-global/bin:/home/linuxbrew/.linuxbrew/bin"; export PATH; if ! command -v codex >/dev/null 2>&1; then echo "codex executable not found in non-interactive SSH PATH. Install Codex CLI or expose it via PATH." >&2; exit 127; fi; if ! codex app-server daemon start >/dev/null; then echo "Unable to start the persistent Codex app-server daemon. Confirm 'codex app-server daemon bootstrap --remote-control' in Shellow, then retry." >&2; exit 1; fi; exec codex app-server proxy"#;
+const CODEX_APP_SERVER_COMMAND_BODY: &str = r#"SHELLOW_CODEX_CWD="$(pwd -P 2>/dev/null || pwd)"
+PATH="$PATH:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$HOME/.local/bin:$HOME/.cargo/bin:$HOME/.bun/bin:$HOME/.npm-global/bin:/home/linuxbrew/.linuxbrew/bin"
+export PATH
+if ! command -v codex >/dev/null 2>&1; then
+    echo "codex executable not found in non-interactive SSH PATH. Install Codex CLI or expose it via PATH." >&2
+    exit 127
+fi
+SHELLOW_CODEX_RUNTIME="$HOME/.cache/shellow/codex-app-server"
+SHELLOW_CODEX_SOCKET="$SHELLOW_CODEX_RUNTIME/app-server.sock"
+SHELLOW_CODEX_PID_FILE="$SHELLOW_CODEX_RUNTIME/app-server.pid"
+SHELLOW_CODEX_LOG="$SHELLOW_CODEX_RUNTIME/app-server.log"
+mkdir -p "$SHELLOW_CODEX_RUNTIME" || exit $?
+chmod 700 "$SHELLOW_CODEX_RUNTIME" >/dev/null 2>&1 || true
+SHELLOW_CODEX_SERVER_PID=""
+if [ -f "$SHELLOW_CODEX_PID_FILE" ]; then
+    SHELLOW_CODEX_SERVER_PID="$(sed -n '1p' "$SHELLOW_CODEX_PID_FILE" 2>/dev/null)"
+fi
+if [ -z "$SHELLOW_CODEX_SERVER_PID" ] || ! kill -0 "$SHELLOW_CODEX_SERVER_PID" >/dev/null 2>&1 || [ ! -S "$SHELLOW_CODEX_SOCKET" ]; then
+    rm -f "$SHELLOW_CODEX_SOCKET" "$SHELLOW_CODEX_PID_FILE"
+    nohup codex app-server --listen "unix://$SHELLOW_CODEX_SOCKET" >"$SHELLOW_CODEX_LOG" 2>&1 </dev/null &
+    SHELLOW_CODEX_SERVER_PID=$!
+    printf '%s\n' "$SHELLOW_CODEX_SERVER_PID" >"$SHELLOW_CODEX_PID_FILE"
+fi
+SHELLOW_CODEX_WAIT=0
+while [ ! -S "$SHELLOW_CODEX_SOCKET" ] && [ "$SHELLOW_CODEX_WAIT" -lt 50 ]; do
+    if ! kill -0 "$SHELLOW_CODEX_SERVER_PID" >/dev/null 2>&1; then
+        break
+    fi
+    SHELLOW_CODEX_WAIT=$((SHELLOW_CODEX_WAIT + 1))
+    sleep 0.1
+done
+if [ ! -S "$SHELLOW_CODEX_SOCKET" ]; then
+    echo "Unable to start the background Codex app-server." >&2
+    sed -n '1,12p' "$SHELLOW_CODEX_LOG" >&2
+    exit 1
+fi
+printf 'SHELLOW_CODEX_CWD=%s\n' "$SHELLOW_CODEX_CWD" >&2
+if command -v nc >/dev/null 2>&1; then
+    exec nc -U "$SHELLOW_CODEX_SOCKET"
+fi
+if command -v socat >/dev/null 2>&1; then
+    exec socat - "UNIX-CONNECT:$SHELLOW_CODEX_SOCKET"
+fi
+if command -v python3 >/dev/null 2>&1; then
+    exec python3 -c 'import os,select,socket,sys
+s=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM)
+s.connect(sys.argv[1])
+while True:
+    ready,_,_=select.select([s,0],[],[])
+    if s in ready:
+        data=s.recv(65536)
+        if not data: break
+        os.write(1,data)
+    if 0 in ready:
+        data=os.read(0,65536)
+        if not data: break
+        s.sendall(data)' "$SHELLOW_CODEX_SOCKET"
+fi
+echo "Shellow needs nc, socat, or python3 to connect to the background Codex app-server socket." >&2
+exit 127"#;
 const REMOTE_CWD_PREFIX: &str = "SHELLOW_CODEX_CWD=";
 const APP_SERVER_REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
-const APP_SERVER_PROXY_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(8);
+const APP_SERVER_TRANSPORT_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(8);
+const APP_SERVER_WEBSOCKET_KEY: &str = "c2hlbGxvdy1jb2RleC0wMQ==";
+const APP_SERVER_WEBSOCKET_MAX_FRAME_BYTES: usize = 32 * 1024 * 1024;
 const COMMAND_OUTPUT_PREVIEW_MAX_LINES: usize = 10;
 const COMMAND_OUTPUT_PREVIEW_MAX_CHARS: usize = 2_400;
 const STATUS_MESSAGE_MAX_CHARS: usize = 2_000;
@@ -27,6 +88,50 @@ fn json_byte_len(value: &Value) -> usize {
     serde_json::to_vec(value)
         .map(|bytes| bytes.len())
         .unwrap_or_default()
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WebSocketConnectionState {
+    Handshaking,
+    Open,
+    Closed,
+}
+
+#[derive(Debug)]
+struct WebSocketTransportState {
+    state: WebSocketConnectionState,
+    buffer: Vec<u8>,
+    fragmented_text: Vec<u8>,
+    fragmented_opcode: Option<u8>,
+    mask_seed: u32,
+}
+
+impl WebSocketTransportState {
+    fn new() -> Self {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|duration| duration.subsec_nanos())
+            .unwrap_or(0x5348_4c57);
+        Self {
+            state: WebSocketConnectionState::Handshaking,
+            buffer: Vec::new(),
+            fragmented_text: Vec::new(),
+            fragmented_opcode: None,
+            mask_seed: nanos ^ 0xa5c3_7e19,
+        }
+    }
+
+    fn next_mask(&mut self) -> [u8; 4] {
+        let mut value = self.mask_seed;
+        value ^= value << 13;
+        value ^= value >> 17;
+        value ^= value << 5;
+        if value == 0 {
+            value = 0x6d2b_79f5;
+        }
+        self.mask_seed = value;
+        value.to_be_bytes()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -303,7 +408,7 @@ pub struct CodexMessage {
 }
 
 impl CodexMessage {
-    fn user(id: impl Into<String>, text: impl Into<String>) -> Self {
+    pub(crate) fn user(id: impl Into<String>, text: impl Into<String>) -> Self {
         let text = text.into();
         let mut message = Self {
             id: id.into(),
@@ -323,7 +428,7 @@ impl CodexMessage {
         message
     }
 
-    fn assistant(id: impl Into<String>) -> Self {
+    pub(crate) fn assistant(id: impl Into<String>) -> Self {
         Self {
             id: id.into(),
             role: CodexMessageRole::Assistant,
@@ -340,7 +445,7 @@ impl CodexMessage {
         }
     }
 
-    fn status(id: impl Into<String>, text: impl Into<String>) -> Self {
+    pub(crate) fn status(id: impl Into<String>, text: impl Into<String>) -> Self {
         Self {
             id: id.into(),
             role: CodexMessageRole::Status,
@@ -443,7 +548,7 @@ impl CodexMessage {
         }
     }
 
-    fn refresh_blocks(&mut self) {
+    pub(crate) fn refresh_blocks(&mut self) {
         self.blocks = match self.format {
             CodexMessageFormat::Markdown => parse_markdown_blocks(&self.id, &self.text),
             CodexMessageFormat::Code => {
@@ -730,6 +835,23 @@ pub struct CodexApproval {
     pub command: Option<String>,
     pub cwd: Option<String>,
     pub reason: Option<String>,
+    #[serde(default)]
+    pub questions: Vec<CodexUserQuestion>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CodexUserQuestion {
+    pub question: String,
+    pub header: String,
+    pub options: Vec<CodexUserQuestionOption>,
+    pub multi_select: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CodexUserQuestionOption {
+    pub label: String,
+    pub description: String,
+    pub preview: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -796,6 +918,7 @@ pub struct CodexSession {
     model_explicitly_selected: bool,
     last_error: Option<String>,
     line_buffer: String,
+    websocket: WebSocketTransportState,
     next_request_id: u64,
     next_local_message_id: u64,
     local_revision: u64,
@@ -865,7 +988,7 @@ impl CodexSession {
             app_server_command,
         )?;
 
-        let mut session = Self {
+        let session = Self {
             title,
             endpoint,
             cwd: initial_cwd.clone(),
@@ -880,9 +1003,9 @@ impl CodexSession {
             messages: vec![
                 CodexMessage::status(
                     "status-0",
-                    "Connecting to the persistent Codex app-server daemon over SSH.",
+                    "Connecting to the background Codex app-server over SSH.",
                 ),
-                CodexMessage::status("status-1", "Waiting for JSON-RPC proxy handshake."),
+                CodexMessage::status("status-1", "Waiting for the Unix WebSocket handshake."),
             ],
             pending_approvals: Vec::new(),
             thread_activity: HashMap::new(),
@@ -907,6 +1030,7 @@ impl CodexSession {
             model_explicitly_selected: false,
             last_error: None,
             line_buffer: String::new(),
+            websocket: WebSocketTransportState::new(),
             next_request_id: 1,
             next_local_message_id: 2,
             local_revision: 1,
@@ -921,7 +1045,7 @@ impl CodexSession {
             transport,
         };
 
-        session.bootstrap()?;
+        session.start_websocket_handshake()?;
         Ok(session)
     }
 
@@ -981,10 +1105,16 @@ impl CodexSession {
 
     pub fn disconnect(&mut self) {
         #[cfg(feature = "native-integrations")]
-        self.transport.disconnect();
+        {
+            if self.websocket.state == WebSocketConnectionState::Open {
+                let _ = self.send_websocket_frame(0x8, &[]);
+            }
+            self.transport.disconnect();
+        }
+        self.websocket.state = WebSocketConnectionState::Closed;
         self.status = CodexStatus::Disconnected;
         self.turn_active = false;
-        self.push_status("Codex proxy disconnected; the remote daemon remains running.");
+        self.push_status("Codex disconnected; the background app-server remains running.");
     }
 
     pub fn poll(&mut self) -> CodexSnapshot {
@@ -992,16 +1122,17 @@ impl CodexSession {
         {
             let poll = self.transport.poll();
             self.apply_transport_status(poll.status);
-            self.consume_output(&poll.output);
-            if daemon_proxy_handshake_timed_out(
+            self.consume_transport_output(&poll.output);
+            if app_server_transport_handshake_timed_out(
                 self.initialized,
                 self.status,
                 self.connection_started_at.elapsed(),
             ) {
                 self.transport.disconnect();
+                self.websocket.state = WebSocketConnectionState::Closed;
                 self.status = CodexStatus::Failed;
                 self.report_error(
-                    "Codex daemon proxy handshake timed out. Confirm 'codex app-server daemon bootstrap --remote-control' in Shellow, then retry.",
+                    "Background Codex app-server WebSocket handshake timed out. Check the remote app-server log, then retry.",
                 );
             }
         }
@@ -1533,6 +1664,150 @@ impl CodexSession {
             pending.approval.title, decision
         ));
         Ok(self.snapshot())
+    }
+
+    #[cfg(feature = "native-integrations")]
+    fn start_websocket_handshake(&self) -> Result<(), String> {
+        let request = format!(
+            "GET / HTTP/1.1\r\nHost: localhost\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: {APP_SERVER_WEBSOCKET_KEY}\r\nSec-WebSocket-Version: 13\r\n\r\n"
+        );
+        self.transport.send_bytes(request.into_bytes())
+    }
+
+    #[cfg(feature = "native-integrations")]
+    fn consume_transport_output(&mut self, bytes: &[u8]) {
+        if bytes.is_empty() {
+            return;
+        }
+        self.websocket.buffer.extend_from_slice(bytes);
+
+        if self.websocket.state == WebSocketConnectionState::Handshaking {
+            let Some(http_start) = find_subslice(&self.websocket.buffer, b"HTTP/1.1") else {
+                return;
+            };
+            let Some(header_relative_end) =
+                find_subslice(&self.websocket.buffer[http_start..], b"\r\n\r\n")
+            else {
+                return;
+            };
+            let header_end = http_start + header_relative_end + 4;
+            let prelude = self.websocket.buffer[..http_start].to_vec();
+            let header =
+                String::from_utf8_lossy(&self.websocket.buffer[http_start..header_end]).to_string();
+            self.websocket.buffer.drain(..header_end);
+
+            if !prelude.is_empty() {
+                self.consume_output(&prelude);
+            }
+            if !header.starts_with("HTTP/1.1 101 ") && !header.starts_with("HTTP/1.1 101\r\n") {
+                self.websocket.state = WebSocketConnectionState::Closed;
+                self.status = CodexStatus::Failed;
+                self.report_error(format!(
+                    "Codex app-server WebSocket upgrade failed: {}",
+                    truncate_status_message(header.replace(['\r', '\n'], " "))
+                ));
+                return;
+            }
+
+            self.websocket.state = WebSocketConnectionState::Open;
+            self.push_status("Connected to the background app-server socket.");
+            if let Err(error) = self.bootstrap() {
+                self.websocket.state = WebSocketConnectionState::Closed;
+                self.status = CodexStatus::Failed;
+                self.report_error(error);
+                return;
+            }
+        }
+
+        if self.websocket.state == WebSocketConnectionState::Open {
+            self.consume_websocket_frames();
+        }
+    }
+
+    #[cfg(feature = "native-integrations")]
+    fn consume_websocket_frames(&mut self) {
+        loop {
+            let decoded = match decode_websocket_frame(&self.websocket.buffer) {
+                Ok(Some(frame)) => frame,
+                Ok(None) => return,
+                Err(error) => {
+                    self.websocket.state = WebSocketConnectionState::Closed;
+                    self.status = CodexStatus::Failed;
+                    self.report_error(format!("Codex WebSocket protocol error: {error}"));
+                    return;
+                }
+            };
+            self.websocket.buffer.drain(..decoded.consumed);
+
+            match decoded.opcode {
+                0x0 => {
+                    if self.websocket.fragmented_opcode.is_none() {
+                        self.report_error("Codex WebSocket sent an unexpected continuation frame.");
+                        continue;
+                    }
+                    self.websocket
+                        .fragmented_text
+                        .extend_from_slice(&decoded.payload);
+                    if decoded.fin {
+                        let opcode = self.websocket.fragmented_opcode.take().unwrap_or(0x1);
+                        let payload = std::mem::take(&mut self.websocket.fragmented_text);
+                        if opcode == 0x1 {
+                            self.deliver_websocket_text(&payload);
+                        }
+                    }
+                }
+                0x1 => {
+                    if decoded.fin {
+                        self.deliver_websocket_text(&decoded.payload);
+                    } else {
+                        self.websocket.fragmented_opcode = Some(0x1);
+                        self.websocket.fragmented_text = decoded.payload;
+                    }
+                }
+                0x2 => {
+                    if !decoded.fin {
+                        self.websocket.fragmented_opcode = Some(0x2);
+                        self.websocket.fragmented_text = decoded.payload;
+                    }
+                }
+                0x8 => {
+                    self.websocket.state = WebSocketConnectionState::Closed;
+                    if self.status != CodexStatus::Disconnected {
+                        self.status = CodexStatus::Disconnected;
+                        self.report_error_if_absent(
+                            "The background Codex app-server closed this connection.",
+                        );
+                    }
+                    return;
+                }
+                0x9 => {
+                    if let Err(error) = self.send_websocket_frame(0xA, &decoded.payload) {
+                        self.report_error(error);
+                    }
+                }
+                0xA => {}
+                opcode => {
+                    self.report_error(format!(
+                        "Codex WebSocket sent unsupported opcode {opcode:#x}."
+                    ));
+                }
+            }
+        }
+    }
+
+    fn deliver_websocket_text(&mut self, payload: &[u8]) {
+        self.consume_output(payload);
+        self.consume_output(b"\n");
+    }
+
+    #[cfg(feature = "native-integrations")]
+    fn send_websocket_frame(&mut self, opcode: u8, payload: &[u8]) -> Result<(), String> {
+        if self.websocket.state != WebSocketConnectionState::Open {
+            return Err("Codex app-server WebSocket is not connected".to_string());
+        }
+        let mask = self.websocket.next_mask();
+        self.transport
+            .send_bytes(encode_websocket_client_frame(opcode, payload, mask))
     }
 
     #[cfg(feature = "native-integrations")]
@@ -2755,6 +3030,7 @@ impl CodexSession {
                         command,
                         cwd,
                         reason,
+                        questions: Vec::new(),
                     },
                 );
             }
@@ -2781,6 +3057,7 @@ impl CodexSession {
                         command: None,
                         cwd: grant_root,
                         reason,
+                        questions: Vec::new(),
                     },
                 );
             }
@@ -2796,6 +3073,7 @@ impl CodexSession {
                         command: None,
                         cwd: None,
                         reason: None,
+                        questions: Vec::new(),
                     },
                 );
             }
@@ -2811,6 +3089,7 @@ impl CodexSession {
                         command: None,
                         cwd: None,
                         reason: None,
+                        questions: Vec::new(),
                     },
                 );
             }
@@ -2833,6 +3112,7 @@ impl CodexSession {
                         command: None,
                         cwd: None,
                         reason: None,
+                        questions: Vec::new(),
                     },
                 );
             }
@@ -3499,10 +3779,9 @@ impl CodexSession {
 
     #[cfg(feature = "native-integrations")]
     fn write_json(&mut self, message: Value) -> Result<(), String> {
-        let mut line = serde_json::to_vec(&message)
+        let payload = serde_json::to_vec(&message)
             .map_err(|error| format!("codex json encode failed: {error}"))?;
-        line.push(b'\n');
-        self.transport.send_bytes(line)
+        self.send_websocket_frame(0x1, &payload)
     }
 }
 
@@ -3810,19 +4089,135 @@ fn extract_first_bold_text(text: &str) -> Option<String> {
     None
 }
 
+#[derive(Debug, PartialEq, Eq)]
+struct DecodedWebSocketFrame {
+    fin: bool,
+    opcode: u8,
+    payload: Vec<u8>,
+    consumed: usize,
+}
+
+fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    if needle.is_empty() {
+        return Some(0);
+    }
+    haystack
+        .windows(needle.len())
+        .position(|window| window == needle)
+}
+
+fn encode_websocket_client_frame(opcode: u8, payload: &[u8], mask: [u8; 4]) -> Vec<u8> {
+    let mut frame = Vec::with_capacity(payload.len().saturating_add(14));
+    frame.push(0x80 | (opcode & 0x0f));
+    match payload.len() {
+        length @ 0..=125 => frame.push(0x80 | length as u8),
+        length @ 126..=65_535 => {
+            frame.push(0x80 | 126);
+            frame.extend_from_slice(&(length as u16).to_be_bytes());
+        }
+        length => {
+            frame.push(0x80 | 127);
+            frame.extend_from_slice(&(length as u64).to_be_bytes());
+        }
+    }
+    frame.extend_from_slice(&mask);
+    frame.extend(
+        payload
+            .iter()
+            .enumerate()
+            .map(|(index, byte)| byte ^ mask[index % mask.len()]),
+    );
+    frame
+}
+
+fn decode_websocket_frame(buffer: &[u8]) -> Result<Option<DecodedWebSocketFrame>, String> {
+    if buffer.len() < 2 {
+        return Ok(None);
+    }
+    let fin = buffer[0] & 0x80 != 0;
+    if buffer[0] & 0x70 != 0 {
+        return Err("RSV bits are set without an agreed extension".to_string());
+    }
+    let opcode = buffer[0] & 0x0f;
+    let masked = buffer[1] & 0x80 != 0;
+    let mut cursor = 2usize;
+    let payload_len = match buffer[1] & 0x7f {
+        length @ 0..=125 => length as u64,
+        126 => {
+            if buffer.len() < cursor + 2 {
+                return Ok(None);
+            }
+            let length = u16::from_be_bytes([buffer[cursor], buffer[cursor + 1]]) as u64;
+            cursor += 2;
+            length
+        }
+        127 => {
+            if buffer.len() < cursor + 8 {
+                return Ok(None);
+            }
+            let length = u64::from_be_bytes(
+                buffer[cursor..cursor + 8]
+                    .try_into()
+                    .map_err(|_| "invalid 64-bit WebSocket frame length".to_string())?,
+            );
+            cursor += 8;
+            length
+        }
+        _ => unreachable!(),
+    };
+    let payload_len = usize::try_from(payload_len)
+        .map_err(|_| "WebSocket frame length does not fit this platform".to_string())?;
+    if payload_len > APP_SERVER_WEBSOCKET_MAX_FRAME_BYTES {
+        return Err(format!(
+            "WebSocket frame exceeds {} bytes",
+            APP_SERVER_WEBSOCKET_MAX_FRAME_BYTES
+        ));
+    }
+    let mask = if masked {
+        if buffer.len() < cursor + 4 {
+            return Ok(None);
+        }
+        let mask: [u8; 4] = buffer[cursor..cursor + 4]
+            .try_into()
+            .map_err(|_| "invalid WebSocket mask".to_string())?;
+        cursor += 4;
+        Some(mask)
+    } else {
+        None
+    };
+    let frame_end = cursor
+        .checked_add(payload_len)
+        .ok_or_else(|| "WebSocket frame length overflow".to_string())?;
+    if buffer.len() < frame_end {
+        return Ok(None);
+    }
+    let mut payload = buffer[cursor..frame_end].to_vec();
+    if let Some(mask) = mask {
+        for (index, byte) in payload.iter_mut().enumerate() {
+            *byte ^= mask[index % mask.len()];
+        }
+    }
+    Ok(Some(DecodedWebSocketFrame {
+        fin,
+        opcode,
+        payload,
+        consumed: frame_end,
+    }))
+}
+
 fn normalize_cwd(cwd: Option<String>) -> Option<String> {
     cwd.map(|cwd| cwd.trim().to_string())
         .filter(|cwd| !cwd.is_empty())
 }
 
-fn daemon_proxy_handshake_timed_out(
+fn app_server_transport_handshake_timed_out(
     initialized: bool,
     status: CodexStatus,
     elapsed: Duration,
 ) -> bool {
     !initialized
         && status == CodexStatus::Connecting
-        && elapsed >= APP_SERVER_PROXY_HANDSHAKE_TIMEOUT
+        && elapsed >= APP_SERVER_TRANSPORT_HANDSHAKE_TIMEOUT
 }
 
 fn notification_thread_id(params: &Value) -> Option<&str> {
@@ -4985,44 +5380,70 @@ mod tests {
     }
 
     #[test]
-    fn builds_daemon_proxy_command_with_remote_cwd() {
+    fn builds_background_app_server_command_with_remote_cwd() {
         let command = codex_app_server_command(Some("/Users/zinglix/Shellow"));
         assert!(command.starts_with("cd '/Users/zinglix/Shellow' || exit $?; "));
         assert!(command.contains("SHELLOW_CODEX_CWD=\"$(pwd -P 2>/dev/null || pwd)\""));
-        let daemon_start = command
-            .find("codex app-server daemon start")
-            .expect("daemon start command");
-        let proxy = command
-            .find("exec codex app-server proxy")
-            .expect("daemon proxy command");
-        assert!(daemon_start < proxy);
-        assert!(command.contains("codex app-server daemon bootstrap --remote-control"));
-        assert!(!command.contains("daemon enable-remote-control"));
-        assert!(!command.contains("codex app-server --stdio"));
+        assert!(
+            command.contains("nohup codex app-server --listen \"unix://$SHELLOW_CODEX_SOCKET\"")
+        );
+        assert!(command.contains("exec nc -U \"$SHELLOW_CODEX_SOCKET\""));
+        assert!(command.contains("exec socat - \"UNIX-CONNECT:$SHELLOW_CODEX_SOCKET\""));
+        assert!(!command.contains("app-server daemon"));
+        assert!(!command.contains("app-server proxy"));
     }
 
     #[test]
-    fn times_out_only_a_stalled_daemon_proxy_handshake() {
-        assert!(!daemon_proxy_handshake_timed_out(
+    fn times_out_only_a_stalled_background_transport_handshake() {
+        assert!(!app_server_transport_handshake_timed_out(
             false,
             CodexStatus::Connecting,
-            APP_SERVER_PROXY_HANDSHAKE_TIMEOUT - Duration::from_millis(1),
+            APP_SERVER_TRANSPORT_HANDSHAKE_TIMEOUT - Duration::from_millis(1),
         ));
-        assert!(daemon_proxy_handshake_timed_out(
+        assert!(app_server_transport_handshake_timed_out(
             false,
             CodexStatus::Connecting,
-            APP_SERVER_PROXY_HANDSHAKE_TIMEOUT,
+            APP_SERVER_TRANSPORT_HANDSHAKE_TIMEOUT,
         ));
-        assert!(!daemon_proxy_handshake_timed_out(
+        assert!(!app_server_transport_handshake_timed_out(
             true,
             CodexStatus::Connected,
-            APP_SERVER_PROXY_HANDSHAKE_TIMEOUT,
+            APP_SERVER_TRANSPORT_HANDSHAKE_TIMEOUT,
         ));
-        assert!(!daemon_proxy_handshake_timed_out(
+        assert!(!app_server_transport_handshake_timed_out(
             false,
             CodexStatus::Failed,
-            APP_SERVER_PROXY_HANDSHAKE_TIMEOUT,
+            APP_SERVER_TRANSPORT_HANDSHAKE_TIMEOUT,
         ));
+    }
+
+    #[test]
+    fn websocket_client_frames_are_masked_and_round_trip() {
+        let encoded = encode_websocket_client_frame(0x1, b"{\"id\":1}", [1, 2, 3, 4]);
+        assert_eq!(encoded[0], 0x81);
+        assert_ne!(encoded[1] & 0x80, 0);
+        let decoded = decode_websocket_frame(&encoded)
+            .expect("valid frame")
+            .expect("complete frame");
+        assert!(decoded.fin);
+        assert_eq!(decoded.opcode, 0x1);
+        assert_eq!(decoded.payload, b"{\"id\":1}");
+        assert_eq!(decoded.consumed, encoded.len());
+    }
+
+    #[test]
+    fn websocket_decoder_waits_for_complete_extended_frame() {
+        let payload = vec![b'x'; 300];
+        let encoded = encode_websocket_client_frame(0x1, &payload, [9, 8, 7, 6]);
+        assert!(
+            decode_websocket_frame(&encoded[..encoded.len() - 1])
+                .expect("partial frame is not invalid")
+                .is_none()
+        );
+        let decoded = decode_websocket_frame(&encoded)
+            .expect("valid frame")
+            .expect("complete frame");
+        assert_eq!(decoded.payload, payload);
     }
 
     #[test]

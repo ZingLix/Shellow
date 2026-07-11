@@ -13,14 +13,21 @@ private enum CodexReconnectTarget {
     case privateKey(profile: HostProfile, privateKeyPEM: String, passphrase: String?, cwd: String, threadID: String?)
 }
 
+private enum ClaudeReconnectTarget {
+    case password(profile: HostProfile, password: String, cwd: String, sessionID: String?)
+    case privateKey(profile: HostProfile, privateKeyPEM: String, passphrase: String?, cwd: String, sessionID: String?)
+}
+
 private enum HostConnectMode {
     case terminal
     case codex
+    case claude
 
     var passwordPromptTitle: String {
         switch self {
         case .terminal: "Terminal Password"
         case .codex: "Codex Password"
+        case .claude: "Claude Code Password"
         }
     }
 }
@@ -46,27 +53,22 @@ private enum HostProbeCredential {
 private enum ShellowRoute: Hashable {
     case terminal
     case codex
+    case claude
 }
-
-private let codexRemoteControlBootstrapCommand = """
-PATH="$PATH:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$HOME/.local/bin:$HOME/.cargo/bin:$HOME/.bun/bin:$HOME/.npm-global/bin:/home/linuxbrew/.linuxbrew/bin"
-export PATH
-codex app-server daemon bootstrap --remote-control && printf '\n__SHELLOW_CODEX_BOOTSTRAP_OK__\n'
-"""
 
 struct AppShell: View {
     @State private var path: [ShellowRoute] = []
     @State private var coreSession = ShellowCoreSession()
     @State private var session = TerminalSession.preview
     @State private var codexSession = CodexSnapshot.disconnected()
+    @State private var claudeSession = CodexSnapshot.disconnected()
     @State private var profiles = HostProfileStore.load()
     @State private var sshKeys = SSHKeyCredentialStore.load()
     @State private var settings = ShellowSettingsStore.load()
     @State private var reconnectTarget: ReconnectTarget?
     @State private var codexReconnectTarget: CodexReconnectTarget?
+    @State private var claudeReconnectTarget: ClaudeReconnectTarget?
     @State private var passwordPrompt: PasswordPromptRequest?
-    @State private var codexBootstrapPromptEndpoint: String?
-    @State private var codexBootstrapError: String?
     @State private var isSettingsPresented = false
     @State private var terminalRenderTick = 0
 
@@ -90,6 +92,11 @@ struct AppShell: View {
                         await connectHost(profile, mode: .codex)
                     }
                 },
+                connectClaude: { profile in
+                    Task {
+                        await connectHost(profile, mode: .claude)
+                    }
+                },
                 probeCapabilities: { profile in
                     await probeHostCapabilities(profile)
                 }
@@ -100,6 +107,8 @@ struct AppShell: View {
                     terminalScreen
                 case .codex:
                     codexScreen
+                case .claude:
+                    claudeScreen
                 }
             }
             .sheet(isPresented: $isSettingsPresented) {
@@ -124,28 +133,6 @@ struct AppShell: View {
         }
         .tint(ShellowTheme.accent)
         .preferredColorScheme(settings.colorScheme.preferredSwiftUIColorScheme)
-        .alert("Enable remote Codex?", isPresented: Binding(
-            get: { codexBootstrapPromptEndpoint != nil },
-            set: { if !$0 { codexBootstrapPromptEndpoint = nil } }
-        )) {
-            Button("Cancel", role: .cancel) {
-                codexBootstrapPromptEndpoint = nil
-            }
-            Button("Enable and reconnect") {
-                codexBootstrapPromptEndpoint = nil
-                Task { await bootstrapRemoteCodexAndReconnect() }
-            }
-        } message: {
-            Text("Shellow needs to enable the persistent Codex remote-control daemon on \(codexBootstrapPromptEndpoint ?? "this host"). This runs `codex app-server daemon bootstrap --remote-control` once over SSH. Only continue on a host you trust.")
-        }
-        .alert("Could not enable remote Codex", isPresented: Binding(
-            get: { codexBootstrapError != nil },
-            set: { if !$0 { codexBootstrapError = nil } }
-        )) {
-            Button("OK", role: .cancel) { codexBootstrapError = nil }
-        } message: {
-            Text(codexBootstrapError ?? "The remote setup command failed.")
-        }
         .task {
 #if DEBUG
             await handleSimulatorLaunchRequestIfNeeded()
@@ -154,7 +141,10 @@ struct AppShell: View {
             updateSession(coreSession.snapshot())
             var lastLiveRevision = coreSession.liveShellEventRevision()
             var lastCodexRevision = coreSession.codexEventRevision()
+            var lastClaudeRevision = coreSession.claudeEventRevision()
             var idleRenderTicks = 0
+            var codexConnectingPollTicks = 0
+            var claudeConnectingPollTicks = 0
             while !Task.isCancelled {
                 try? await Task.sleep(nanoseconds: 50_000_000)
                 let revision = coreSession.liveShellEventRevision()
@@ -176,9 +166,27 @@ struct AppShell: View {
                 }
 
                 let codexRevision = coreSession.codexEventRevision()
-                if codexRevision != lastCodexRevision {
+                if codexSession.status == .connecting {
+                    codexConnectingPollTicks += 1
+                } else {
+                    codexConnectingPollTicks = 0
+                }
+                if codexRevision != lastCodexRevision || codexConnectingPollTicks >= 5 {
                     lastCodexRevision = codexRevision
+                    codexConnectingPollTicks = 0
                     updateCodexSession(coreSession.pollCodex())
+                }
+
+                let claudeRevision = coreSession.claudeEventRevision()
+                if claudeSession.status == .connecting {
+                    claudeConnectingPollTicks += 1
+                } else {
+                    claudeConnectingPollTicks = 0
+                }
+                if claudeRevision != lastClaudeRevision || claudeConnectingPollTicks >= 5 {
+                    lastClaudeRevision = claudeRevision
+                    claudeConnectingPollTicks = 0
+                    updateClaudeSession(coreSession.pollClaude())
                 }
             }
         }
@@ -363,6 +371,49 @@ struct AppShell: View {
         .toolbar(.hidden, for: .navigationBar)
     }
 
+    private var claudeScreen: some View {
+        CodexScreen(
+            snapshot: claudeSession,
+            onSendMessage: { message in
+                updateClaudeSession(coreSession.sendClaudeMessage(message))
+            },
+            onUpdateSettings: { model, _, _, approvalPolicy, _ in
+                let mode = approvalPolicy.isEmpty ? "default" : approvalPolicy
+                updateClaudeSession(coreSession.updateClaudeSettings(model: model, permissionMode: mode))
+            },
+            onBrowseDirectory: { _ in updateClaudeSession(claudeSession) },
+            onListThreads: { _, _, _, _, _ in updateClaudeSession(claudeSession) },
+            onStartThread: { cwd in
+                await startNewClaudeSession(cwd: cwd, initialMessage: nil)
+            },
+            onStartThreadAndSend: { cwd, message in
+                await startNewClaudeSession(cwd: cwd, initialMessage: message)
+            },
+            onResumeThread: { _ in updateClaudeSession(claudeSession) },
+            onReadThread: { _ in updateClaudeSession(claudeSession) },
+            onLoadMoreThreadTurns: { _, _ in updateClaudeSession(claudeSession) },
+            onRenameThread: { _, _ in updateClaudeSession(claudeSession) },
+            onArchiveThread: { _ in updateClaudeSession(claudeSession) },
+            onUnarchiveThread: { _ in updateClaudeSession(claudeSession) },
+            onDeleteThread: { _ in updateClaudeSession(claudeSession) },
+            onForkThread: { _, _ in updateClaudeSession(claudeSession) },
+            onInterruptTurn: {
+                updateClaudeSession(coreSession.interruptClaudeTurn())
+            },
+            onApprovalDecision: { requestId, decision in
+                updateClaudeSession(coreSession.answerClaudeApproval(requestId: requestId, decision: decision))
+            },
+            onDisconnect: {
+                updateClaudeSession(coreSession.disconnectClaude())
+            },
+            onReconnect: claudeReconnectTarget == nil ? nil : {
+                reconnectClaude()
+            }
+        )
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar(.hidden, for: .navigationBar)
+    }
+
     @MainActor
     private func connectHost(_ profile: HostProfile, mode: HostConnectMode) async {
         if let savedPassword = secretStore.loadSecret(for: profile, kind: .password) {
@@ -395,11 +446,14 @@ struct AppShell: View {
             didConnect = await tryPrivateKeysForTerminal(profile: profile, keys: keys)
         case .codex:
             didConnect = await tryPrivateKeysForCodex(profile: profile, keys: keys)
+        case .claude:
+            didConnect = await tryPrivateKeysForClaude(profile: profile, keys: keys)
         }
 
         if !didConnect {
             reconnectTarget = nil
             codexReconnectTarget = nil
+            claudeReconnectTarget = nil
             passwordPrompt = PasswordPromptRequest(
                 profile: profile,
                 mode: mode,
@@ -443,6 +497,17 @@ struct AppShell: View {
             showCodex()
             Task {
                 await startCodexPassword(profile: profile, password: password, cwd: "")
+            }
+        case .claude:
+            claudeReconnectTarget = .password(profile: profile, password: password, cwd: "", sessionID: nil)
+            claudeSession = .connecting(to: profile, cwd: "")
+            showClaude()
+            Task {
+                updateClaudeSession(await coreSession.startClaudePassword(
+                    to: profile,
+                    password: password,
+                    cwd: ""
+                ))
             }
         }
     }
@@ -495,9 +560,6 @@ struct AppShell: View {
         profile: HostProfile,
         keys: [StoredPrivateKeyAuth]
     ) async -> Bool {
-        codexSession = .connecting(to: profile, cwd: "")
-        showCodex()
-
         for key in keys {
             codexReconnectTarget = .privateKey(
                 profile: profile,
@@ -506,6 +568,8 @@ struct AppShell: View {
                 cwd: "",
                 threadID: nil
             )
+            codexSession = .connecting(to: profile, cwd: "")
+            showCodex()
             updateCodexSession(
                 await coreSession.startCodexPrivateKey(
                     to: profile,
@@ -536,6 +600,37 @@ struct AppShell: View {
     }
 
     @MainActor
+    private func tryPrivateKeysForClaude(
+        profile: HostProfile,
+        keys: [StoredPrivateKeyAuth]
+    ) async -> Bool {
+        claudeSession = .connecting(to: profile, cwd: "")
+        showClaude()
+
+        for key in keys {
+            claudeReconnectTarget = .privateKey(
+                profile: profile,
+                privateKeyPEM: key.privateKeyPEM,
+                passphrase: key.passphrase,
+                cwd: "",
+                sessionID: nil
+            )
+            updateClaudeSession(await coreSession.startClaudePrivateKey(
+                to: profile,
+                privateKeyPEM: key.privateKeyPEM,
+                passphrase: key.passphrase,
+                cwd: ""
+            ))
+            let result = await waitForClaudeConnectionResult()
+            if result.status == .connected {
+                return true
+            }
+            _ = coreSession.disconnectClaude()
+        }
+        return false
+    }
+
+    @MainActor
     private func waitForTerminalConnectionResult() async -> TerminalSession {
         let deadline = Date().addingTimeInterval(8)
         var current = session
@@ -560,6 +655,18 @@ struct AppShell: View {
             updateCodexSession(current)
         }
 
+        return current
+    }
+
+    @MainActor
+    private func waitForClaudeConnectionResult() async -> CodexSnapshot {
+        let deadline = Date().addingTimeInterval(15)
+        var current = claudeSession
+        while current.status == .connecting && Date() < deadline {
+            try? await Task.sleep(nanoseconds: 250_000_000)
+            current = coreSession.pollClaude()
+            updateClaudeSession(current)
+        }
         return current
     }
 
@@ -733,6 +840,11 @@ struct AppShell: View {
         path.append(.codex)
     }
 
+    private func showClaude() {
+        guard path.last != .claude else { return }
+        path.append(.claude)
+    }
+
     private func reconnect() {
         guard let reconnectTarget else { return }
 
@@ -775,43 +887,87 @@ struct AppShell: View {
         codexSession = next
         rememberCodexResumePoint(from: next)
         captureObservedHostKeyIfNeeded(from: next)
-        if next.lastError?.contains("daemon bootstrap --remote-control") == true,
-           codexBootstrapPromptEndpoint == nil,
-           codexBootstrapError == nil {
-            codexBootstrapPromptEndpoint = codexReconnectTarget?.profile.endpoint ?? next.endpoint
+    }
+
+    private func updateClaudeSession(_ next: CodexSnapshot) {
+        claudeSession = next
+        if let sessionID = next.threadId?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !sessionID.isEmpty,
+           let target = claudeReconnectTarget {
+            switch target {
+            case .password(let profile, let password, let cwd, _):
+                claudeReconnectTarget = .password(
+                    profile: profile,
+                    password: password,
+                    cwd: next.cwd ?? cwd,
+                    sessionID: sessionID
+                )
+            case .privateKey(let profile, let key, let passphrase, let cwd, _):
+                claudeReconnectTarget = .privateKey(
+                    profile: profile,
+                    privateKeyPEM: key,
+                    passphrase: passphrase,
+                    cwd: next.cwd ?? cwd,
+                    sessionID: sessionID
+                )
+            }
         }
     }
 
     @MainActor
-    private func bootstrapRemoteCodexAndReconnect() async {
-        guard let target = codexReconnectTarget else { return }
-        _ = coreSession.disconnectCodex()
-        let setupSession = ShellowCoreSession()
-        let result: TerminalSession
+    private func startNewClaudeSession(cwd: String, initialMessage: String?) async {
+        guard let target = claudeReconnectTarget else { return }
         switch target {
         case .password(let profile, let password, _, _):
-            result = await setupSession.connectPasswordExec(
+            claudeReconnectTarget = .password(profile: profile, password: password, cwd: cwd, sessionID: nil)
+            updateClaudeSession(await coreSession.startClaudePassword(
                 to: profile,
                 password: password,
-                command: codexRemoteControlBootstrapCommand
-            )
-        case .privateKey(let profile, let privateKeyPEM, let passphrase, _, _):
-            result = await setupSession.connectPrivateKeyExec(
-                to: profile,
-                privateKeyPEM: privateKeyPEM,
+                cwd: cwd
+            ))
+        case .privateKey(let profile, let key, let passphrase, _, _):
+            claudeReconnectTarget = .privateKey(
+                profile: profile,
+                privateKeyPEM: key,
                 passphrase: passphrase,
-                command: codexRemoteControlBootstrapCommand
+                cwd: cwd,
+                sessionID: nil
             )
+            updateClaudeSession(await coreSession.startClaudePrivateKey(
+                to: profile,
+                privateKeyPEM: key,
+                passphrase: passphrase,
+                cwd: cwd
+            ))
         }
-        let output = result.rows.map(\.text).joined(separator: "\n")
-        guard output.contains("__SHELLOW_CODEX_BOOTSTRAP_OK__") else {
-            codexBootstrapError = result.rows.reversed()
-                .map(\.text)
-                .first { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
-                ?? "The remote setup command did not complete successfully."
-            return
+        _ = await waitForClaudeConnectionResult()
+        if let initialMessage, claudeSession.status == .connected {
+            updateClaudeSession(coreSession.sendClaudeMessage(initialMessage))
         }
-        reconnectCodex()
+    }
+
+    private func reconnectClaude() {
+        guard let target = claudeReconnectTarget else { return }
+        showClaude()
+        Task {
+            switch target {
+            case .password(let profile, let password, let cwd, let sessionID):
+                updateClaudeSession(await coreSession.startClaudePassword(
+                    to: profile,
+                    password: password,
+                    cwd: cwd,
+                    sessionId: sessionID ?? ""
+                ))
+            case .privateKey(let profile, let key, let passphrase, let cwd, let sessionID):
+                updateClaudeSession(await coreSession.startClaudePrivateKey(
+                    to: profile,
+                    privateKeyPEM: key,
+                    passphrase: passphrase,
+                    cwd: cwd,
+                    sessionId: sessionID ?? ""
+                ))
+            }
+        }
     }
 
     private func advanceTerminalRenderTick() {

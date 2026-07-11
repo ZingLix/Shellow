@@ -7,6 +7,7 @@ compile_error!(
     "shellow-core requires the native-integrations feature; fallback builds are unsupported."
 );
 
+pub mod claude;
 pub mod codex;
 pub mod ghostty_adapter;
 pub mod integrations;
@@ -264,6 +265,7 @@ pub struct ShellowEngine {
     #[cfg(feature = "native-integrations")]
     live_terminal: Option<ghostty_adapter::LiveTerminalState>,
     codex_session: Option<codex::CodexSession>,
+    claude_session: Option<claude::ClaudeSession>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -458,6 +460,7 @@ impl ShellowEngine {
             #[cfg(feature = "native-integrations")]
             live_terminal: None,
             codex_session: None,
+            claude_session: None,
         }
     }
 
@@ -1253,6 +1256,142 @@ impl ShellowEngine {
                 snapshot
             }
             None => codex::CodexSnapshot::disconnected(),
+        }
+    }
+
+    pub fn claude_snapshot(&self) -> codex::CodexSnapshot {
+        self.claude_session
+            .as_ref()
+            .map(claude::ClaudeSession::snapshot)
+            .unwrap_or_else(|| {
+                let mut snapshot = codex::CodexSnapshot::disconnected();
+                snapshot.title = "Claude Code".to_string();
+                snapshot.messages = vec![codex::CodexMessage::status(
+                    "claude-status-0",
+                    "Connect to a host to start Claude Code.",
+                )];
+                snapshot
+            })
+    }
+
+    pub fn claude_event_revision(&self) -> u64 {
+        self.claude_session
+            .as_ref()
+            .map(claude::ClaudeSession::event_revision)
+            .unwrap_or(0)
+    }
+
+    pub fn start_claude_password(
+        &mut self,
+        profile: HostProfile,
+        password: String,
+        cwd: Option<String>,
+        session_id: Option<String>,
+    ) -> codex::CodexSnapshot {
+        self.claude_session = None;
+        match claude::ClaudeSession::start_password(profile, password, cwd, session_id) {
+            Ok(mut session) => {
+                let snapshot = session.poll();
+                self.claude_session = Some(session);
+                snapshot
+            }
+            Err(error) => {
+                let mut snapshot = codex::CodexSnapshot::failure(error);
+                snapshot.title = "Claude Code".to_string();
+                snapshot
+            }
+        }
+    }
+
+    pub fn start_claude_private_key(
+        &mut self,
+        profile: HostProfile,
+        private_key_pem: String,
+        passphrase: Option<String>,
+        cwd: Option<String>,
+        session_id: Option<String>,
+    ) -> codex::CodexSnapshot {
+        self.claude_session = None;
+        match claude::ClaudeSession::start_private_key(
+            profile,
+            private_key_pem,
+            passphrase,
+            cwd,
+            session_id,
+        ) {
+            Ok(mut session) => {
+                let snapshot = session.poll();
+                self.claude_session = Some(session);
+                snapshot
+            }
+            Err(error) => {
+                let mut snapshot = codex::CodexSnapshot::failure(error);
+                snapshot.title = "Claude Code".to_string();
+                snapshot
+            }
+        }
+    }
+
+    pub fn poll_claude(&mut self) -> codex::CodexSnapshot {
+        match self.claude_session.as_mut() {
+            Some(session) => session.poll(),
+            None => self.claude_snapshot(),
+        }
+    }
+
+    pub fn send_claude_message(&mut self, text: &str) -> codex::CodexSnapshot {
+        match self.claude_session.as_mut() {
+            Some(session) => session
+                .send_user_message(text)
+                .unwrap_or_else(codex::CodexSnapshot::failure),
+            None => codex::CodexSnapshot::failure("Claude Code is not connected"),
+        }
+    }
+
+    pub fn update_claude_settings(
+        &mut self,
+        model: Option<&str>,
+        permission_mode: Option<&str>,
+    ) -> codex::CodexSnapshot {
+        match self.claude_session.as_mut() {
+            Some(session) => session
+                .update_settings(model, permission_mode)
+                .unwrap_or_else(codex::CodexSnapshot::failure),
+            None => codex::CodexSnapshot::failure("Claude Code is not connected"),
+        }
+    }
+
+    pub fn interrupt_claude_turn(&mut self) -> codex::CodexSnapshot {
+        match self.claude_session.as_mut() {
+            Some(session) => session
+                .interrupt_turn()
+                .unwrap_or_else(codex::CodexSnapshot::failure),
+            None => codex::CodexSnapshot::failure("Claude Code is not connected"),
+        }
+    }
+
+    pub fn answer_claude_approval(
+        &mut self,
+        request_id: &str,
+        decision: &str,
+    ) -> codex::CodexSnapshot {
+        match self.claude_session.as_mut() {
+            Some(session) => session
+                .answer_approval(request_id, decision)
+                .unwrap_or_else(codex::CodexSnapshot::failure),
+            None => codex::CodexSnapshot::failure("Claude Code is not connected"),
+        }
+    }
+
+    pub fn disconnect_claude(&mut self) -> codex::CodexSnapshot {
+        match self.claude_session.as_mut() {
+            Some(session) => {
+                session.disconnect();
+                let snapshot = session.snapshot();
+                self.claude_session = None;
+                snapshot
+            }
+            None => self.claude_snapshot(),
         }
     }
 

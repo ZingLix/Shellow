@@ -718,6 +718,173 @@ pub extern "C" fn shellow_engine_disconnect_codex_json(engine: *mut ShellowEngin
 }
 
 #[unsafe(no_mangle)]
+pub extern "C" fn shellow_engine_claude_snapshot_json(engine: *const ShellowEngine) -> *mut c_char {
+    let started = Instant::now();
+    with_engine(engine, |engine| {
+        encode_codex_json("claude_snapshot", started, &engine.claude_snapshot())
+    })
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn shellow_engine_claude_event_revision(engine: *const ShellowEngine) -> u64 {
+    if engine.is_null() {
+        return 0;
+    }
+    catch_unwind(AssertUnwindSafe(|| unsafe {
+        (*engine).claude_event_revision()
+    }))
+    .unwrap_or(0)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn shellow_engine_start_claude_password_json(
+    engine: *mut ShellowEngine,
+    name: *const c_char,
+    host: *const c_char,
+    port: u16,
+    username: *const c_char,
+    trusted_host_key_sha256: *const c_char,
+    password: *const c_char,
+    cwd: *const c_char,
+    session_id: *const c_char,
+) -> *mut c_char {
+    let started = Instant::now();
+    with_engine_mut(engine, |engine| {
+        let profile = HostProfile {
+            name: read_c_string(name),
+            host: read_c_string(host),
+            port,
+            username: read_c_string(username),
+            authentication: AuthenticationKind::Password,
+            trusted_host_key_sha256: read_optional_c_string(trusted_host_key_sha256),
+        };
+        encode_codex_json(
+            "start_claude_password",
+            started,
+            &engine.start_claude_password(
+                profile,
+                read_c_string(password),
+                read_optional_c_string(cwd),
+                read_optional_c_string(session_id),
+            ),
+        )
+    })
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn shellow_engine_start_claude_private_key_json(
+    engine: *mut ShellowEngine,
+    name: *const c_char,
+    host: *const c_char,
+    port: u16,
+    username: *const c_char,
+    trusted_host_key_sha256: *const c_char,
+    private_key_pem: *const c_char,
+    passphrase: *const c_char,
+    cwd: *const c_char,
+    session_id: *const c_char,
+) -> *mut c_char {
+    let started = Instant::now();
+    with_engine_mut(engine, |engine| {
+        let profile = HostProfile {
+            name: read_c_string(name),
+            host: read_c_string(host),
+            port,
+            username: read_c_string(username),
+            authentication: AuthenticationKind::PrivateKey,
+            trusted_host_key_sha256: read_optional_c_string(trusted_host_key_sha256),
+        };
+        encode_codex_json(
+            "start_claude_private_key",
+            started,
+            &engine.start_claude_private_key(
+                profile,
+                read_c_string(private_key_pem),
+                read_optional_c_string(passphrase),
+                read_optional_c_string(cwd),
+                read_optional_c_string(session_id),
+            ),
+        )
+    })
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn shellow_engine_poll_claude_json(engine: *mut ShellowEngine) -> *mut c_char {
+    let started = Instant::now();
+    with_engine_mut(engine, |engine| {
+        encode_codex_json("poll_claude", started, &engine.poll_claude())
+    })
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn shellow_engine_send_claude_message_json(
+    engine: *mut ShellowEngine,
+    message: *const c_char,
+) -> *mut c_char {
+    let started = Instant::now();
+    with_engine_mut(engine, |engine| {
+        encode_codex_json(
+            "send_claude_message",
+            started,
+            &engine.send_claude_message(&read_c_string(message)),
+        )
+    })
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn shellow_engine_update_claude_settings_json(
+    engine: *mut ShellowEngine,
+    model: *const c_char,
+    permission_mode: *const c_char,
+) -> *mut c_char {
+    let started = Instant::now();
+    with_engine_mut(engine, |engine| {
+        encode_codex_json(
+            "update_claude_settings",
+            started,
+            &engine.update_claude_settings(
+                read_optional_c_string(model).as_deref(),
+                read_optional_c_string(permission_mode).as_deref(),
+            ),
+        )
+    })
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn shellow_engine_interrupt_claude_turn_json(
+    engine: *mut ShellowEngine,
+) -> *mut c_char {
+    let started = Instant::now();
+    with_engine_mut(engine, |engine| {
+        encode_codex_json("interrupt_claude", started, &engine.interrupt_claude_turn())
+    })
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn shellow_engine_answer_claude_approval_json(
+    engine: *mut ShellowEngine,
+    request_id: *const c_char,
+    decision: *const c_char,
+) -> *mut c_char {
+    let started = Instant::now();
+    with_engine_mut(engine, |engine| {
+        encode_codex_json(
+            "answer_claude_approval",
+            started,
+            &engine.answer_claude_approval(&read_c_string(request_id), &read_c_string(decision)),
+        )
+    })
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn shellow_engine_disconnect_claude_json(engine: *mut ShellowEngine) -> *mut c_char {
+    let started = Instant::now();
+    with_engine_mut(engine, |engine| {
+        encode_codex_json("disconnect_claude", started, &engine.disconnect_claude())
+    })
+}
+
+#[unsafe(no_mangle)]
 pub extern "C" fn shellow_string_free(value: *mut c_char) {
     if !value.is_null() {
         unsafe {

@@ -7,6 +7,7 @@ struct HostsScreen: View {
     let onOpenSettings: () -> Void
     let connectTerminal: (HostProfile) -> Void
     let connectCodex: (HostProfile) -> Void
+    let connectClaude: (HostProfile) -> Void
     let probeCapabilities: (HostProfile) async -> RemoteHostProbeOutcome
 
     @State private var draftName = ""
@@ -99,6 +100,10 @@ struct HostsScreen: View {
                 connectCodex: {
                     selectedProfile = nil
                     connectCodex($0)
+                },
+                connectClaude: {
+                    selectedProfile = nil
+                    connectClaude($0)
                 },
                 probeCapabilities: probeCapabilities
             )
@@ -195,6 +200,8 @@ struct HostsScreen: View {
             connectTerminal(profile)
         case .codex:
             connectCodex(profile)
+        case .claude:
+            connectClaude(profile)
         }
     }
 
@@ -207,6 +214,7 @@ private struct HostConnectionSheet: View {
     let updateProfile: (HostProfile) -> Void
     let connectTerminal: (HostProfile) -> Void
     let connectCodex: (HostProfile) -> Void
+    let connectClaude: (HostProfile) -> Void
     let probeCapabilities: (HostProfile) async -> RemoteHostProbeOutcome
 
     @Environment(\.dismiss) private var dismiss
@@ -225,6 +233,7 @@ private struct HostConnectionSheet: View {
         updateProfile: @escaping (HostProfile) -> Void,
         connectTerminal: @escaping (HostProfile) -> Void,
         connectCodex: @escaping (HostProfile) -> Void,
+        connectClaude: @escaping (HostProfile) -> Void,
         probeCapabilities: @escaping (HostProfile) async -> RemoteHostProbeOutcome
     ) {
         self.profile = profile
@@ -233,6 +242,7 @@ private struct HostConnectionSheet: View {
         self.updateProfile = updateProfile
         self.connectTerminal = connectTerminal
         self.connectCodex = connectCodex
+        self.connectClaude = connectClaude
         self.probeCapabilities = probeCapabilities
 
         let savedConfiguration = profile.persistentTerminal
@@ -297,13 +307,22 @@ private struct HostConnectionSheet: View {
                                 action: connectTerminalProfile
                             )
                         } else {
-                            ConnectionModeButton(
-                                title: "Codex",
-                                subtitle: "Remote coding sessions and conversations",
-                                detail: "Projects, threads, and approvals",
-                                systemImage: "sparkles",
-                                action: connectCodexProfile
-                            )
+                            VStack(spacing: 10) {
+                                ConnectionModeButton(
+                                    title: "Codex",
+                                    subtitle: "Remote coding sessions and conversations",
+                                    detail: "Projects, threads, and approvals",
+                                    systemImage: "sparkles",
+                                    action: connectCodexProfile
+                                )
+                                ConnectionModeButton(
+                                    title: "Claude Code",
+                                    subtitle: "Durable native sessions over SSH",
+                                    detail: "Streams, tools, and approvals survive disconnects",
+                                    systemImage: "bolt.horizontal.circle",
+                                    action: connectClaudeProfile
+                                )
+                            }
                         }
                     }
                 }
@@ -375,7 +394,7 @@ private struct HostConnectionSheet: View {
     }
 
     private var configurationIsValid: Bool {
-        launchKind == .codex || canConnectTerminal
+        launchKind != .terminal || canConnectTerminal
     }
 
     private var configuredProfile: HostProfile {
@@ -427,6 +446,13 @@ private struct HostConnectionSheet: View {
         updateProfile(configuredProfile)
         dismiss()
         connectCodex(configuredProfile)
+    }
+
+    private func connectClaudeProfile() {
+        let configuredProfile = configuredProfile
+        updateProfile(configuredProfile)
+        dismiss()
+        connectClaude(configuredProfile)
     }
 }
 
@@ -3701,9 +3727,16 @@ private struct CodexApprovalRow: View {
                 Spacer()
             }
 
-            Text(approval.detail)
-                .font(.callout)
-                .textSelection(.enabled)
+            if approval.questions.isEmpty {
+                Text(approval.detail)
+                    .font(.callout)
+                    .textSelection(.enabled)
+            } else {
+                CodexUserQuestionForm(
+                    questions: approval.questions,
+                    submit: decide
+                )
+            }
 
             if let cwd = approval.cwd, !cwd.isEmpty {
                 Text(cwd)
@@ -3713,7 +3746,8 @@ private struct CodexApprovalRow: View {
                     .truncationMode(.middle)
             }
 
-            HStack(spacing: 14) {
+            if approval.questions.isEmpty {
+                HStack(spacing: 14) {
                 Button {
                     decide("accept")
                 } label: {
@@ -3745,8 +3779,9 @@ private struct CodexApprovalRow: View {
                         .padding(.vertical, 4)
                 }
                 .buttonStyle(.plain)
+                }
+                .padding(.top, 2)
             }
-            .padding(.top, 2)
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 12)
@@ -3757,6 +3792,144 @@ private struct CodexApprovalRow: View {
                 .frame(width: 3)
         }
         .clipShape(RoundedRectangle(cornerRadius: 8))
+    }
+}
+
+private struct CodexUserQuestionForm: View {
+    let questions: [CodexUserQuestion]
+    let submit: (String) -> Void
+
+    @State private var selections: [String: Set<String>] = [:]
+    @State private var customAnswers: [String: String] = [:]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            ForEach(Array(questions.enumerated()), id: \.offset) { _, question in
+                VStack(alignment: .leading, spacing: 8) {
+                    Text(question.header)
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                        .textCase(.uppercase)
+                    Text(question.question)
+                        .font(.callout.weight(.medium))
+
+                    ForEach(Array(question.options.enumerated()), id: \.offset) { _, option in
+                        Button {
+                            toggle(option.label, for: question)
+                        } label: {
+                            HStack(alignment: .top, spacing: 9) {
+                                Image(systemName: selectionIcon(option.label, for: question))
+                                    .foregroundStyle(isSelected(option.label, for: question) ? ShellowTheme.accent : .secondary)
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(option.label)
+                                        .font(.callout.weight(.medium))
+                                    if !option.description.isEmpty {
+                                        Text(option.description)
+                                            .font(.caption)
+                                            .foregroundStyle(.secondary)
+                                    }
+                                }
+                                Spacer(minLength: 0)
+                            }
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+
+                        if isSelected(option.label, for: question),
+                           let preview = option.preview,
+                           !preview.isEmpty {
+                            Text(preview)
+                                .font(.caption.monospaced())
+                                .textSelection(.enabled)
+                                .padding(8)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .background(Color(.tertiarySystemBackground), in: RoundedRectangle(cornerRadius: 6))
+                        }
+                    }
+
+                    TextField(
+                        "Other answer",
+                        text: Binding(
+                            get: { customAnswers[question.question, default: ""] },
+                            set: { customAnswers[question.question] = $0 }
+                        ),
+                        axis: .vertical
+                    )
+                    .textFieldStyle(.roundedBorder)
+                    .lineLimit(1...3)
+                }
+            }
+
+            HStack {
+                Button(role: .destructive) {
+                    submit("decline")
+                } label: {
+                    Text("Cancel")
+                }
+                .buttonStyle(.plain)
+
+                Spacer()
+
+                Button {
+                    submitAnswers()
+                } label: {
+                    Label("Submit", systemImage: "paperplane.fill")
+                        .font(.caption.weight(.semibold))
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(!canSubmit)
+            }
+        }
+    }
+
+    private var canSubmit: Bool {
+        questions.allSatisfy { answer(for: $0) != nil }
+    }
+
+    private func isSelected(_ label: String, for question: CodexUserQuestion) -> Bool {
+        selections[question.question, default: []].contains(label)
+    }
+
+    private func selectionIcon(_ label: String, for question: CodexUserQuestion) -> String {
+        if question.multiSelect {
+            return isSelected(label, for: question) ? "checkmark.square.fill" : "square"
+        }
+        return isSelected(label, for: question) ? "largecircle.fill.circle" : "circle"
+    }
+
+    private func toggle(_ label: String, for question: CodexUserQuestion) {
+        if question.multiSelect {
+            var current = selections[question.question, default: []]
+            if current.contains(label) {
+                current.remove(label)
+            } else {
+                current.insert(label)
+            }
+            selections[question.question] = current
+        } else {
+            selections[question.question] = [label]
+        }
+        customAnswers[question.question] = ""
+    }
+
+    private func answer(for question: CodexUserQuestion) -> String? {
+        let custom = customAnswers[question.question, default: ""]
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        if !custom.isEmpty { return custom }
+        let selected = selections[question.question, default: []]
+        let ordered = question.options.map(\.label).filter(selected.contains)
+        return ordered.isEmpty ? nil : ordered.joined(separator: ", ")
+    }
+
+    private func submitAnswers() {
+        let answers = Dictionary(uniqueKeysWithValues: questions.compactMap { question in
+            answer(for: question).map { (question.question, $0) }
+        })
+        guard answers.count == questions.count,
+              let data = try? JSONSerialization.data(withJSONObject: ["answers": answers]),
+              let json = String(data: data, encoding: .utf8)
+        else { return }
+        submit(json)
     }
 }
 
@@ -4026,6 +4199,7 @@ private struct HostProfileRow: View {
         onOpenSettings: {},
         connectTerminal: { _ in },
         connectCodex: { _ in },
+        connectClaude: { _ in },
         probeCapabilities: { _ in
             .failure("Preview")
         }

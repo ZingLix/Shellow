@@ -188,6 +188,7 @@ private enum class AppScreen {
   Hosts,
   Terminal,
   Codex,
+  Claude,
   Settings,
 }
 
@@ -199,6 +200,7 @@ private enum class TerminalDestructiveAction {
 private enum class HostConnectMode(val passwordTitle: String) {
   Terminal("Terminal Password"),
   Codex("Codex Password"),
+  Claude("Claude Code Password"),
 }
 
 private const val TerminalDirectInputSentinel = "\u2060"
@@ -347,14 +349,6 @@ private sealed class CodexReconnectTarget {
   ) : CodexReconnectTarget()
 }
 
-private const val CODEX_BOOTSTRAP_SUCCESS_MARKER = "__SHELLOW_CODEX_BOOTSTRAP_OK__"
-private val CODEX_REMOTE_CONTROL_BOOTSTRAP_COMMAND =
-  """
-  PATH="${'$'}PATH:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:${'$'}HOME/.local/bin:${'$'}HOME/.cargo/bin:${'$'}HOME/.bun/bin:${'$'}HOME/.npm-global/bin:/home/linuxbrew/.linuxbrew/bin"
-  export PATH
-  codex app-server daemon bootstrap --remote-control && printf '\n$CODEX_BOOTSTRAP_SUCCESS_MARKER\n'
-  """.trimIndent()
-
 private fun ReconnectTarget.profile(): HostProfile =
   when (this) {
     is ReconnectTarget.Preview -> profile
@@ -426,11 +420,11 @@ fun ShellowApp() {
     mutableStateOf(core.snapshot())
   }
   var codexSnapshot by remember { mutableStateOf(CodexSnapshot.disconnected()) }
+  var claudeSnapshot by remember { mutableStateOf(CodexSnapshot.disconnected()) }
   var reconnectTarget by remember { mutableStateOf<ReconnectTarget?>(null) }
   var codexReconnectTarget by remember { mutableStateOf<CodexReconnectTarget?>(null) }
+  var claudeReconnectTarget by remember { mutableStateOf<CodexReconnectTarget?>(null) }
   var passwordPrompt by remember { mutableStateOf<PasswordPromptRequest?>(null) }
-  var codexBootstrapPromptEndpoint by remember { mutableStateOf<String?>(null) }
-  var codexBootstrapError by remember { mutableStateOf<String?>(null) }
 
   fun updateStoredProfile(updated: HostProfile) {
     val index = profiles.indexOfFirst { it.id == updated.id }
@@ -440,6 +434,8 @@ fun ShellowApp() {
     reconnectTarget = reconnectTarget?.takeIf { it.profile().id == updated.id }?.withProfile(updated) ?: reconnectTarget
     codexReconnectTarget =
       codexReconnectTarget?.takeIf { it.profile().id == updated.id }?.withProfile(updated) ?: codexReconnectTarget
+    claudeReconnectTarget =
+      claudeReconnectTarget?.takeIf { it.profile().id == updated.id }?.withProfile(updated) ?: claudeReconnectTarget
   }
 
   fun applyCapabilityOutcome(profile: HostProfile, outcome: RemoteHostProbeOutcome) {
@@ -607,16 +603,32 @@ fun ShellowApp() {
     codexSnapshot = next
     rememberCodexResumePoint(next)
     captureObservedHostKeyIfNeeded(next)
-    if (next.lastError?.contains("daemon bootstrap --remote-control") == true &&
-      codexBootstrapPromptEndpoint == null && codexBootstrapError == null
-    ) {
-      codexBootstrapPromptEndpoint = codexReconnectTarget?.profile()?.endpoint ?: next.endpoint
+  }
+
+  fun updateClaudeSnapshot(next: CodexSnapshot) {
+    claudeSnapshot = next
+    var target = claudeReconnectTarget
+    next.cwd?.trim()?.takeUnless { it.isEmpty() }?.let { cwd -> target = target?.withCwd(cwd) }
+    next.threadId?.trim()?.takeUnless { it.isEmpty() }?.let { sessionId -> target = target?.withThreadId(sessionId) }
+    val observed = next.observedHostKeySha256?.trim().takeUnless { it.isNullOrEmpty() }
+    val targetForHostKey = target
+    if (observed != null && targetForHostKey != null && targetForHostKey.profile().trustedHostKeySha256.isNullOrBlank()) {
+      val profile = targetForHostKey.profile()
+      val updated = profile.copy(trustedHostKeySha256 = observed)
+      val index = profiles.indexOfFirst { it.matchesProfileIdentity(profile) }
+      if (index >= 0) {
+        profiles[index] = updated
+        saveHostProfiles(context, profiles)
+      }
+      target = targetForHostKey.withProfile(updated)
     }
+    claudeReconnectTarget = target
   }
 
   LaunchedEffect(core) {
     var lastLiveRevision = withContext(Dispatchers.IO) { core.liveShellEventRevision() }
     var lastCodexRevision = withContext(Dispatchers.IO) { core.codexEventRevision() }
+    var lastClaudeRevision = withContext(Dispatchers.IO) { core.claudeEventRevision() }
     while (true) {
       delay(50)
       val revision = withContext(Dispatchers.IO) { core.liveShellEventRevision() }
@@ -634,6 +646,15 @@ fun ShellowApp() {
         val next = withContext(Dispatchers.IO) { core.pollCodex() }
         if (next != codexSnapshot) {
           updateCodexSnapshot(next)
+        }
+      }
+
+      val claudeRevision = withContext(Dispatchers.IO) { core.claudeEventRevision() }
+      if (claudeRevision != lastClaudeRevision) {
+        lastClaudeRevision = claudeRevision
+        val next = withContext(Dispatchers.IO) { core.pollClaude() }
+        if (next != claudeSnapshot) {
+          updateClaudeSnapshot(next)
         }
       }
     }
@@ -711,6 +732,39 @@ fun ShellowApp() {
     }
   }
 
+  fun startClaudePassword(
+    profile: HostProfile,
+    password: String,
+    cwd: String,
+    sessionId: String = "",
+  ) {
+    claudeSnapshot = CodexSnapshot.connecting(profile, cwd)
+    screen = AppScreen.Claude
+    scope.launch {
+      updateClaudeSnapshot(
+        withContext(Dispatchers.IO) { core.startClaudePassword(profile, password, cwd, sessionId) },
+      )
+    }
+  }
+
+  fun startClaudePrivateKey(
+    profile: HostProfile,
+    privateKeyPem: String,
+    passphrase: String,
+    cwd: String,
+    sessionId: String = "",
+  ) {
+    claudeSnapshot = CodexSnapshot.connecting(profile, cwd)
+    screen = AppScreen.Claude
+    scope.launch {
+      updateClaudeSnapshot(
+        withContext(Dispatchers.IO) {
+          core.startClaudePrivateKey(profile, privateKeyPem, passphrase, cwd, sessionId)
+        },
+      )
+    }
+  }
+
   fun startPasswordConnection(
     profile: HostProfile,
     password: String,
@@ -724,6 +778,10 @@ fun ShellowApp() {
       HostConnectMode.Codex -> {
         codexReconnectTarget = CodexReconnectTarget.Password(profile, password, "")
         startCodexPassword(profile, password, "")
+      }
+      HostConnectMode.Claude -> {
+        claudeReconnectTarget = CodexReconnectTarget.Password(profile, password, "")
+        startClaudePassword(profile, password, "")
       }
     }
   }
@@ -760,6 +818,17 @@ fun ShellowApp() {
       delay(250)
       current = withContext(Dispatchers.IO) { core.pollCodex() }
       updateCodexSnapshot(current)
+    }
+    return current
+  }
+
+  suspend fun waitForClaudeConnectionResult(): CodexSnapshot {
+    val deadline = System.currentTimeMillis() + 10_000
+    var current = claudeSnapshot
+    while (current.status == CodexStatus.Connecting && System.currentTimeMillis() < deadline) {
+      delay(250)
+      current = withContext(Dispatchers.IO) { core.pollClaude() }
+      updateClaudeSnapshot(current)
     }
     return current
   }
@@ -871,6 +940,33 @@ fun ShellowApp() {
     return false
   }
 
+  suspend fun tryPrivateKeysForClaude(
+    profile: HostProfile,
+    keys: List<StoredPrivateKeyAuth>,
+  ): Boolean {
+    claudeSnapshot = CodexSnapshot.connecting(profile, "")
+    screen = AppScreen.Claude
+
+    keys.forEach { key ->
+      claudeReconnectTarget =
+        CodexReconnectTarget.PrivateKey(
+          profile = profile,
+          privateKeyPem = key.privateKeyPem,
+          passphrase = key.passphrase,
+          cwd = "",
+        )
+      updateClaudeSnapshot(
+        withContext(Dispatchers.IO) {
+          core.startClaudePrivateKey(profile, key.privateKeyPem, key.passphrase, "")
+        },
+      )
+
+      if (waitForClaudeConnectionResult().status == CodexStatus.Connected) return true
+      withContext(Dispatchers.IO) { core.disconnectClaude() }
+    }
+    return false
+  }
+
   fun connectHost(
     profile: HostProfile,
     mode: HostConnectMode,
@@ -907,11 +1003,13 @@ fun ShellowApp() {
         when (mode) {
           HostConnectMode.Terminal -> tryPrivateKeysForTerminal(profile, keys)
           HostConnectMode.Codex -> tryPrivateKeysForCodex(profile, keys)
+          HostConnectMode.Claude -> tryPrivateKeysForClaude(profile, keys)
         }
 
       if (!didConnect) {
         reconnectTarget = null
         codexReconnectTarget = null
+        claudeReconnectTarget = null
         passwordPrompt =
           PasswordPromptRequest(
             profile = profile,
@@ -969,39 +1067,45 @@ fun ShellowApp() {
     }
   }
 
-  fun bootstrapRemoteCodexAndReconnect() {
-    val target = codexReconnectTarget ?: return
-    codexBootstrapPromptEndpoint = null
-    scope.launch {
-      withContext(Dispatchers.IO) { core.disconnectCodex() }
-      val result =
-        withContext(Dispatchers.IO) {
-          ShellowCoreSession().use { setupCore ->
-            when (target) {
-              is CodexReconnectTarget.Password ->
-                setupCore.connectPasswordExec(
-                  target.profile,
-                  target.password,
-                  CODEX_REMOTE_CONTROL_BOOTSTRAP_COMMAND,
-                )
-              is CodexReconnectTarget.PrivateKey ->
-                setupCore.connectPrivateKeyExec(
-                  target.profile,
-                  target.privateKeyPem,
-                  target.passphrase,
-                  CODEX_REMOTE_CONTROL_BOOTSTRAP_COMMAND,
-                )
-            }
-          }
+  fun reconnectClaude() {
+    when (val target = claudeReconnectTarget) {
+      is CodexReconnectTarget.Password ->
+        startClaudePassword(
+          target.profile,
+          target.password,
+          target.cwd,
+          target.threadId ?: claudeSnapshot.threadId.orEmpty(),
+        )
+      is CodexReconnectTarget.PrivateKey ->
+        startClaudePrivateKey(
+          target.profile,
+          target.privateKeyPem,
+          target.passphrase,
+          target.cwd,
+          target.threadId ?: claudeSnapshot.threadId.orEmpty(),
+        )
+      null -> Unit
+    }
+  }
+
+  suspend fun startFreshClaude(cwd: String, initialMessage: String? = null) {
+    val target = claudeReconnectTarget ?: return
+    claudeReconnectTarget = target.withCwd(cwd).withThreadId(null)
+    claudeSnapshot = CodexSnapshot.connecting(target.profile(), cwd)
+    screen = AppScreen.Claude
+    val started =
+      withContext(Dispatchers.IO) {
+        when (target) {
+          is CodexReconnectTarget.Password ->
+            core.startClaudePassword(target.profile, target.password, cwd)
+          is CodexReconnectTarget.PrivateKey ->
+            core.startClaudePrivateKey(target.profile, target.privateKeyPem, target.passphrase, cwd)
         }
-      val output = result.rows.joinToString("\n") { it.text }
-      if (!output.contains(CODEX_BOOTSTRAP_SUCCESS_MARKER)) {
-        codexBootstrapError =
-          result.rows.asReversed().firstOrNull { it.text.isNotBlank() }?.text
-            ?: "The remote setup command did not complete successfully."
-        return@launch
       }
-      reconnectCodex()
+    updateClaudeSnapshot(started)
+    val connected = waitForClaudeConnectionResult()
+    if (connected.status == CodexStatus.Connected && !initialMessage.isNullOrBlank()) {
+      updateClaudeSnapshot(withContext(Dispatchers.IO) { core.sendClaudeMessage(initialMessage) })
     }
   }
 
@@ -1126,6 +1230,39 @@ fun ShellowApp() {
             },
             onReconnect = if (codexReconnectTarget == null) null else ::reconnectCodex,
           )
+        AppScreen.Claude ->
+          CodexScreen(
+            snapshot = claudeSnapshot,
+            onBackToHosts = { screen = AppScreen.Hosts },
+            onSendMessage = { message ->
+              updateClaudeSnapshot(core.sendClaudeMessage(message))
+            },
+            onUpdateSettings = { model, _, _, approvalPolicy, _ ->
+              updateClaudeSnapshot(core.updateClaudeSettings(model, approvalPolicy))
+            },
+            onBrowseDirectory = { _ -> Unit },
+            onListThreads = { _, _, _, _, _ -> Unit },
+            onStartThread = { cwd -> startFreshClaude(cwd) },
+            onStartThreadAndSend = { cwd, message -> startFreshClaude(cwd, message) },
+            onResumeThread = { _ -> Unit },
+            onReadThread = { _ -> Unit },
+            onLoadMoreThreadTurns = { _, _ -> Unit },
+            onRenameThread = { _, _ -> Unit },
+            onArchiveThread = { _ -> Unit },
+            onUnarchiveThread = { _ -> Unit },
+            onDeleteThread = { _ -> Unit },
+            onForkThread = { _, _ -> Unit },
+            onInterruptTurn = {
+              updateClaudeSnapshot(core.interruptClaudeTurn())
+            },
+            onApprovalDecision = { requestId, decision ->
+              updateClaudeSnapshot(core.answerClaudeApproval(requestId, decision))
+            },
+            onDisconnect = {
+              updateClaudeSnapshot(core.disconnectClaude())
+            },
+            onReconnect = if (claudeReconnectTarget == null) null else ::reconnectClaude,
+          )
         AppScreen.Hosts ->
           HostsScreen(
             profiles = profiles,
@@ -1158,6 +1295,9 @@ fun ShellowApp() {
             onConnectCodex = { profile ->
               connectHost(profile, HostConnectMode.Codex)
             },
+            onConnectClaude = { profile ->
+              connectHost(profile, HostConnectMode.Claude)
+            },
           )
         AppScreen.Settings ->
           SettingsScreen(
@@ -1185,38 +1325,6 @@ fun ShellowApp() {
         )
       }
 
-      codexBootstrapPromptEndpoint?.let { endpoint ->
-        AlertDialog(
-          onDismissRequest = { codexBootstrapPromptEndpoint = null },
-          title = { Text("Enable remote Codex?") },
-          text = {
-            Text(
-              "Shellow needs to enable the persistent Codex remote-control daemon on $endpoint. " +
-                "This runs `codex app-server daemon bootstrap --remote-control` once over SSH. " +
-                "Only continue on a host you trust.",
-            )
-          },
-          confirmButton = {
-            TextButton(onClick = ::bootstrapRemoteCodexAndReconnect) {
-              Text("Enable and reconnect")
-            }
-          },
-          dismissButton = {
-            TextButton(onClick = { codexBootstrapPromptEndpoint = null }) { Text("Cancel") }
-          },
-        )
-      }
-
-      codexBootstrapError?.let { error ->
-        AlertDialog(
-          onDismissRequest = { codexBootstrapError = null },
-          title = { Text("Could not enable remote Codex") },
-          text = { Text(error) },
-          confirmButton = {
-            TextButton(onClick = { codexBootstrapError = null }) { Text("OK") }
-          },
-        )
-      }
     }
   }
 }
@@ -4059,6 +4167,16 @@ private fun CodexApprovalCard(
   approval: CodexApproval,
   onDecision: (String) -> Unit,
 ) {
+  var selections by remember(approval.requestId) { mutableStateOf<Map<String, Set<String>>>(emptyMap()) }
+  var customAnswers by remember(approval.requestId) { mutableStateOf<Map<String, String>>(emptyMap()) }
+
+  fun answerFor(question: xyz.zinglix.shellow.core.CodexUserQuestion): String? {
+    val custom = customAnswers[question.question].orEmpty().trim()
+    if (custom.isNotEmpty()) return custom
+    val selected = selections[question.question].orEmpty()
+    return question.options.map { it.label }.filter { it in selected }.takeIf { it.isNotEmpty() }?.joinToString(", ")
+  }
+
   Row(
     modifier =
       Modifier
@@ -4086,7 +4204,81 @@ private fun CodexApprovalCard(
         style = MaterialTheme.typography.labelLarge,
         fontWeight = FontWeight.SemiBold,
       )
-      Text(approval.detail, color = ShellowColors.TerminalText, style = MaterialTheme.typography.bodySmall)
+      if (approval.questions.isEmpty()) {
+        Text(approval.detail, color = ShellowColors.TerminalText, style = MaterialTheme.typography.bodySmall)
+      } else {
+        approval.questions.forEach { question ->
+          Text(
+            question.header.uppercase(),
+            color = ShellowColors.TerminalMuted,
+            style = MaterialTheme.typography.labelSmall,
+            fontWeight = FontWeight.SemiBold,
+          )
+          Text(
+            question.question,
+            color = ShellowColors.TerminalText,
+            style = MaterialTheme.typography.bodyMedium,
+            fontWeight = FontWeight.Medium,
+          )
+          question.options.forEach { option ->
+            val selected = option.label in selections[question.question].orEmpty()
+            Row(
+              modifier =
+                Modifier
+                  .fillMaxWidth()
+                  .background(
+                    if (selected) ShellowColors.Accent.copy(alpha = 0.12f) else ShellowColors.KeyBackground.copy(alpha = 0.35f),
+                    RoundedCornerShape(7.dp),
+                  )
+                  .clickable {
+                    val current = selections[question.question].orEmpty()
+                    val next =
+                      if (question.multiSelect) {
+                        if (option.label in current) current - option.label else current + option.label
+                      } else {
+                        setOf(option.label)
+                      }
+                    selections = selections + (question.question to next)
+                    customAnswers = customAnswers + (question.question to "")
+                  }
+                  .padding(horizontal = 10.dp, vertical = 8.dp),
+              horizontalArrangement = Arrangement.spacedBy(9.dp),
+              verticalAlignment = Alignment.Top,
+            ) {
+              Text(
+                if (question.multiSelect) {
+                  if (selected) "☑" else "☐"
+                } else {
+                  if (selected) "●" else "○"
+                },
+                color = if (selected) ShellowColors.Accent else ShellowColors.TerminalMuted,
+              )
+              Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                Text(option.label, color = ShellowColors.TerminalText, fontWeight = FontWeight.SemiBold)
+                if (option.description.isNotEmpty()) {
+                  Text(option.description, color = ShellowColors.TerminalMuted, style = MaterialTheme.typography.bodySmall)
+                }
+              }
+            }
+            if (selected && !option.preview.isNullOrEmpty()) {
+              Text(
+                option.preview,
+                modifier = Modifier.fillMaxWidth().background(ShellowColors.KeyBackground, RoundedCornerShape(6.dp)).padding(8.dp),
+                color = ShellowColors.TerminalText,
+                style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
+              )
+            }
+          }
+          OutlinedTextField(
+            value = customAnswers[question.question].orEmpty(),
+            onValueChange = { value -> customAnswers = customAnswers + (question.question to value) },
+            modifier = Modifier.fillMaxWidth(),
+            label = { Text("Other answer") },
+            minLines = 1,
+            maxLines = 3,
+          )
+        }
+      }
       approval.cwd?.let {
         Text(
           it,
@@ -4096,7 +4288,7 @@ private fun CodexApprovalCard(
           overflow = TextOverflow.Ellipsis,
         )
       }
-      Row(
+      if (approval.questions.isEmpty()) Row(
         modifier = Modifier.fillMaxWidth(),
         horizontalArrangement = Arrangement.spacedBy(2.dp),
         verticalAlignment = Alignment.CenterVertically,
@@ -4110,6 +4302,24 @@ private fun CodexApprovalCard(
         Spacer(modifier = Modifier.weight(1f))
         TextButton(onClick = { onDecision("decline") }) {
           Text("Deny", color = MaterialTheme.colorScheme.error)
+        }
+      } else Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+      ) {
+        TextButton(onClick = { onDecision("decline") }) {
+          Text("Cancel", color = MaterialTheme.colorScheme.error)
+        }
+        Spacer(modifier = Modifier.weight(1f))
+        Button(
+          enabled = approval.questions.all { answerFor(it) != null },
+          onClick = {
+            val answers = approval.questions.associate { it.question to answerFor(it).orEmpty() }
+            onDecision(JSONObject().put("answers", JSONObject(answers)).toString())
+          },
+        ) {
+          Text("Submit")
         }
       }
     }
@@ -5726,6 +5936,7 @@ private fun HostsScreen(
   onDeleteKey: (SSHKeyCredential) -> Unit,
   onConnectTerminal: (HostProfile) -> Unit,
   onConnectCodex: (HostProfile) -> Unit,
+  onConnectClaude: (HostProfile) -> Unit,
 ) {
   var addingProfile by remember { mutableStateOf(false) }
   var managingKeys by remember { mutableStateOf(false) }
@@ -5805,6 +6016,7 @@ private fun HostsScreen(
                 when (profile.launchKind) {
                   ProfileLaunchKind.Terminal -> onConnectTerminal(profile)
                   ProfileLaunchKind.Codex -> onConnectCodex(profile)
+                  ProfileLaunchKind.Claude -> onConnectClaude(profile)
                 }
               },
               onEdit = { selectedProfile = profile },
@@ -5869,6 +6081,11 @@ private fun HostsScreen(
         selectedProfile = null
         onConnectCodex(updated)
       },
+      onConnectClaude = { updated ->
+        onUpdateProfile(updated)
+        selectedProfile = null
+        onConnectClaude(updated)
+      },
     )
   }
 }
@@ -5920,7 +6137,11 @@ private fun HostProfileRow(
       horizontalArrangement = Arrangement.spacedBy(12.dp),
     ) {
       Text(
-        if (profile.launchKind == ProfileLaunchKind.Terminal) "T" else "C",
+        when (profile.launchKind) {
+          ProfileLaunchKind.Terminal -> "T"
+          ProfileLaunchKind.Codex -> "C"
+          ProfileLaunchKind.Claude -> "A"
+        },
         color = ShellowColors.Accent,
         fontWeight = FontWeight.Bold,
         modifier =
@@ -5960,6 +6181,7 @@ private fun HostConnectionDialog(
   onDismiss: () -> Unit,
   onConnectTerminal: (HostProfile) -> Unit,
   onConnectCodex: (HostProfile) -> Unit,
+  onConnectClaude: (HostProfile) -> Unit,
 ) {
   var launchKind by remember(profile.id) { mutableStateOf(profile.launchKind) }
   var persistentEnabled by remember(profile.id) { mutableStateOf(profile.persistentTerminal != null) }
@@ -6069,12 +6291,19 @@ private fun HostConnectionDialog(
               selected = launchKind == ProfileLaunchKind.Codex,
               modifier = Modifier.weight(1f),
             ) { launchKind = ProfileLaunchKind.Codex }
+            AuthenticationChoice(
+              title = "Claude",
+              selected = launchKind == ProfileLaunchKind.Claude,
+              modifier = Modifier.weight(1f),
+            ) { launchKind = ProfileLaunchKind.Claude }
           }
           Text(
             if (launchKind == ProfileLaunchKind.Terminal) {
               "Open a remote shell and persistent workspaces"
-            } else {
+            } else if (launchKind == ProfileLaunchKind.Codex) {
               "Open remote coding conversations"
+            } else {
+              "Open durable Claude Code sessions over SSH"
             },
             color = ShellowColors.TerminalMuted,
             style = MaterialTheme.typography.labelSmall,
@@ -6127,7 +6356,7 @@ private fun HostConnectionDialog(
         }
 
         TextButton(
-          enabled = launchKind == ProfileLaunchKind.Codex || persistentConfigurationValid,
+          enabled = launchKind != ProfileLaunchKind.Terminal || persistentConfigurationValid,
           onClick = { onSaveProfile(workingProfile) },
         ) {
           Text("Save profile")
@@ -6155,6 +6384,12 @@ private fun HostConnectionDialog(
             subtitle = "Remote coding sessions and conversations",
             detail = "Projects, threads, and approvals",
             onClick = { onConnectCodex(workingProfile) },
+          )
+          ConnectionModeOption(
+            title = "Claude Code",
+            subtitle = "Durable stream-json session over SSH",
+            detail = "Survives app and SSH disconnects without tmux",
+            onClick = { onConnectClaude(workingProfile) },
           )
         }
       }
@@ -6317,6 +6552,11 @@ private fun AddHostDialog(
             selected = launchKind == ProfileLaunchKind.Codex,
             modifier = Modifier.weight(1f),
           ) { launchKind = ProfileLaunchKind.Codex }
+          AuthenticationChoice(
+            title = "Claude",
+            selected = launchKind == ProfileLaunchKind.Claude,
+            modifier = Modifier.weight(1f),
+          ) { launchKind = ProfileLaunchKind.Claude }
         }
         OutlinedTextField(
           value = name,
