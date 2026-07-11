@@ -7,6 +7,7 @@ struct HostProfile: Identifiable, Hashable, Codable {
     var port: Int
     var username: String
     var authentication: AuthenticationKind
+    var preferredKeyID: UUID? = nil
     var launchKind: ProfileLaunchKind? = nil
     var trustedHostKeySHA256: String?
     // Keep the v1 JSON key for backward compatibility. New code reads and
@@ -524,6 +525,7 @@ struct SSHKeyCredential: Identifiable, Hashable, Codable {
 }
 
 enum AuthenticationKind: String, CaseIterable, Identifiable, Codable {
+    case automatic
     case password
     case privateKey
 
@@ -531,8 +533,9 @@ enum AuthenticationKind: String, CaseIterable, Identifiable, Codable {
 
     var title: String {
         switch self {
+        case .automatic: "Auto"
         case .password: "Password"
-        case .privateKey: "Private Key"
+        case .privateKey: "Key"
         }
     }
 }

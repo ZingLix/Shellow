@@ -92,6 +92,14 @@ class PersistentTerminalTest {
     assertEquals(ProfileLaunchKind.Terminal, ProfileLaunchKind.fromWire(""))
   }
 
+  @Test
+  fun authenticationKind_decodesSavedAndUnknownValues() {
+    assertEquals(AuthenticationKind.Password, AuthenticationKind.fromWire(0))
+    assertEquals(AuthenticationKind.PrivateKey, AuthenticationKind.fromWire(1))
+    assertEquals(AuthenticationKind.Automatic, AuthenticationKind.fromWire(2))
+    assertEquals(AuthenticationKind.Automatic, AuthenticationKind.fromWire(99))
+  }
+
   private fun profile(backend: PersistentTerminalBackend) =
     HostProfile(
       name = "Lab",

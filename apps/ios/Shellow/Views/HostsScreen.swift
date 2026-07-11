@@ -8,22 +8,14 @@ struct HostsScreen: View {
     let connectTerminal: (HostProfile) -> Void
     let connectCodex: (HostProfile) -> Void
     let connectClaude: (HostProfile) -> Void
-    let probeCapabilities: (HostProfile) async -> RemoteHostProbeOutcome
 
     @State private var draftName = ""
     @State private var draftHost = ""
     @State private var draftPort = "22"
-    @State private var draftUser = ""
-    @State private var draftAuthentication: AuthenticationKind = .password
-    @State private var draftLaunchKind: ProfileLaunchKind = .terminal
-    @State private var draftUsesPersistentTerminal = false
-    @State private var draftPersistentTerminalBackend: PersistentTerminalBackend = .tmux
-    @State private var draftPersistentSessionName = ""
+    @State private var draftUser = "root"
     @State private var isAddingProfile = false
     @State private var isManagingKeys = false
     @State private var selectedProfile: HostProfile?
-
-    private let secretStore = SSHSecretStore.shared
 
     var body: some View {
         List {
@@ -88,24 +80,8 @@ struct HostsScreen: View {
         .sheet(item: $selectedProfile) { profile in
             HostConnectionSheet(
                 profile: profile,
-                hasSavedPassword: secretStore.hasSecret(for: profile, kind: .password),
-                hasSavedPrivateKey: sshKeys.contains {
-                    secretStore.hasSecret(forKeyID: $0.id, kind: .privateKey)
-                },
-                updateProfile: updateProfile,
-                connectTerminal: { configuredProfile in
-                    selectedProfile = nil
-                    connectTerminal(configuredProfile)
-                },
-                connectCodex: {
-                    selectedProfile = nil
-                    connectCodex($0)
-                },
-                connectClaude: {
-                    selectedProfile = nil
-                    connectClaude($0)
-                },
-                probeCapabilities: probeCapabilities
+                sshKeys: sshKeys,
+                updateProfile: updateProfile
             )
             .presentationDetents([.fraction(0.72), .large])
             .presentationDragIndicator(.visible)
@@ -116,11 +92,6 @@ struct HostsScreen: View {
                 draftHost: $draftHost,
                 draftPort: $draftPort,
                 draftUser: $draftUser,
-                draftAuthentication: $draftAuthentication,
-                draftLaunchKind: $draftLaunchKind,
-                draftUsesPersistentTerminal: $draftUsesPersistentTerminal,
-                draftPersistentTerminalBackend: $draftPersistentTerminalBackend,
-                draftPersistentSessionName: $draftPersistentSessionName,
                 addProfile: addProfile
             )
             .presentationDetents([.large])
@@ -138,13 +109,8 @@ struct HostsScreen: View {
     }
 
     private var canAddProfile: Bool {
-        !draftName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            && !draftHost.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            && !draftUser.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        !draftHost.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             && validDraftPort != nil
-            && (draftLaunchKind != .terminal
-                || !draftUsesPersistentTerminal
-                || PersistentTerminalConfiguration.validatedName(draftPersistentSessionName) != nil)
     }
 
     private func addProfile() {
@@ -152,21 +118,21 @@ struct HostsScreen: View {
             return
         }
 
+        let host = draftHost.trimmingCharacters(in: .whitespacesAndNewlines)
+        let user = draftUser.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            ? "root"
+            : draftUser.trimmingCharacters(in: .whitespacesAndNewlines)
+        let name = draftName.trimmingCharacters(in: .whitespacesAndNewlines)
+
         profiles.append(
             HostProfile(
-                name: draftName,
-                host: draftHost,
+                name: name.isEmpty ? generatedProfileName(user: user, host: host, port: port) : name,
+                host: host,
                 port: port,
-                username: draftUser,
-                authentication: draftAuthentication,
-                launchKind: draftLaunchKind,
+                username: user,
+                authentication: .automatic,
+                launchKind: .terminal,
                 trustedHostKeySHA256: nil,
-                tmuxSession: draftLaunchKind == .terminal && draftUsesPersistentTerminal
-                    ? PersistentTerminalConfiguration(
-                        name: draftPersistentSessionName,
-                        backend: draftPersistentTerminalBackend
-                    )
-                    : nil,
                 lastConnected: nil
             )
         )
@@ -174,12 +140,7 @@ struct HostsScreen: View {
         draftName = ""
         draftHost = ""
         draftPort = "22"
-        draftUser = ""
-        draftAuthentication = .password
-        draftLaunchKind = .terminal
-        draftUsesPersistentTerminal = false
-        draftPersistentTerminalBackend = .tmux
-        draftPersistentSessionName = ""
+        draftUser = "root"
     }
 
     private var validDraftPort: Int? {
@@ -187,6 +148,10 @@ struct HostsScreen: View {
             return nil
         }
         return port
+    }
+
+    private func generatedProfileName(user: String, host: String, port: Int) -> String {
+        "\(user)@\(host):\(port)"
     }
 
     private func updateProfile(_ profile: HostProfile) {
@@ -207,46 +172,44 @@ struct HostsScreen: View {
 
 }
 
+private enum ProfileEditorTab: String, CaseIterable, Identifiable {
+    case connection = "Connection"
+    case server = "Server"
+
+    var id: String { rawValue }
+}
+
 private struct HostConnectionSheet: View {
     let profile: HostProfile
-    let hasSavedPassword: Bool
-    let hasSavedPrivateKey: Bool
+    let sshKeys: [SSHKeyCredential]
     let updateProfile: (HostProfile) -> Void
-    let connectTerminal: (HostProfile) -> Void
-    let connectCodex: (HostProfile) -> Void
-    let connectClaude: (HostProfile) -> Void
-    let probeCapabilities: (HostProfile) async -> RemoteHostProbeOutcome
 
     @Environment(\.dismiss) private var dismiss
+    @State private var selectedTab = ProfileEditorTab.connection
+    @State private var name: String
+    @State private var host: String
+    @State private var port: String
+    @State private var username: String
     @State private var launchKind: ProfileLaunchKind
+    @State private var authentication: AuthenticationKind
+    @State private var preferredKeyID: UUID?
     @State private var usesPersistentTerminal: Bool
     @State private var persistentTerminalBackend: PersistentTerminalBackend
     @State private var persistentSessionName: String
-    @State private var capabilityReport: RemoteHostCapabilityReport?
-    @State private var isProbingCapabilities = false
-    @State private var capabilityProbeError: String?
 
-    init(
-        profile: HostProfile,
-        hasSavedPassword: Bool,
-        hasSavedPrivateKey: Bool,
-        updateProfile: @escaping (HostProfile) -> Void,
-        connectTerminal: @escaping (HostProfile) -> Void,
-        connectCodex: @escaping (HostProfile) -> Void,
-        connectClaude: @escaping (HostProfile) -> Void,
-        probeCapabilities: @escaping (HostProfile) async -> RemoteHostProbeOutcome
-    ) {
+    init(profile: HostProfile, sshKeys: [SSHKeyCredential], updateProfile: @escaping (HostProfile) -> Void) {
         self.profile = profile
-        self.hasSavedPassword = hasSavedPassword
-        self.hasSavedPrivateKey = hasSavedPrivateKey
+        self.sshKeys = sshKeys
         self.updateProfile = updateProfile
-        self.connectTerminal = connectTerminal
-        self.connectCodex = connectCodex
-        self.connectClaude = connectClaude
-        self.probeCapabilities = probeCapabilities
 
         let savedConfiguration = profile.persistentTerminal
+        _name = State(initialValue: profile.name)
+        _host = State(initialValue: profile.host)
+        _port = State(initialValue: String(profile.port))
+        _username = State(initialValue: profile.username)
         _launchKind = State(initialValue: profile.resolvedLaunchKind)
+        _authentication = State(initialValue: profile.authentication)
+        _preferredKeyID = State(initialValue: profile.preferredKeyID)
         _usesPersistentTerminal = State(initialValue: savedConfiguration != nil)
         _persistentTerminalBackend = State(initialValue: savedConfiguration?.backend ?? .tmux)
         _persistentSessionName = State(
@@ -255,89 +218,32 @@ private struct HostConnectionSheet: View {
                 host: profile.host
             )
         )
-        _capabilityReport = State(initialValue: profile.capabilityReport)
     }
 
     var body: some View {
         NavigationStack {
-            ScrollView {
-                VStack(alignment: .leading, spacing: 20) {
-                    HostConnectionCard(
-                        profile: profile,
-                        credentialStatus: credentialStatus
-                    )
-
-                    ProfileLaunchCard(launchKind: $launchKind)
-
-                    HostCapabilityCard(
-                        report: capabilityReport,
-                        isLoading: isProbingCapabilities,
-                        errorMessage: capabilityProbeError,
-                        canProbe: canProbeCapabilities,
-                        refresh: {
-                            Task { await refreshCapabilities() }
-                        }
-                    )
-
-                    if launchKind == .terminal {
-                        PersistentTerminalCard(
-                            isEnabled: $usesPersistentTerminal,
-                            backend: $persistentTerminalBackend,
-                            sessionName: $persistentSessionName,
-                            suggestedName: suggestedPersistentSessionName,
-                            capability: capabilityReport?.capability(for: persistentTerminalBackend)
-                        )
-                    }
-
-                    VStack(alignment: .leading, spacing: 10) {
-                        Text("Open profile")
-                            .font(.headline)
-
-                        if launchKind == .terminal {
-                            ConnectionModeButton(
-                                title: usesPersistentTerminal ? "Resume Terminal" : "Terminal",
-                                subtitle: usesPersistentTerminal
-                                    ? "Persistent \(persistentTerminalBackend.displayTitle) workspaces"
-                                    : "Interactive shell with keyboard tools",
-                                detail: usesPersistentTerminal
-                                    ? "Restores \(persistentSessionName), then lets you switch sessions"
-                                    : "Commands, processes, and remote files",
-                                systemImage: "terminal",
-                                isEnabled: canConnectTerminal,
-                                action: connectTerminalProfile
-                            )
-                        } else {
-                            VStack(spacing: 10) {
-                                ConnectionModeButton(
-                                    title: "Codex",
-                                    subtitle: "Remote coding sessions and conversations",
-                                    detail: "Projects, threads, and approvals",
-                                    systemImage: "sparkles",
-                                    action: connectCodexProfile
-                                )
-                                ConnectionModeButton(
-                                    title: "Claude Code",
-                                    subtitle: "Durable native sessions over SSH",
-                                    detail: "Streams, tools, and approvals survive disconnects",
-                                    systemImage: "bolt.horizontal.circle",
-                                    action: connectClaudeProfile
-                                )
-                            }
+            Form {
+                Section {
+                    Picker("Profile settings", selection: $selectedTab) {
+                        ForEach(ProfileEditorTab.allCases) { tab in
+                            Text(tab.rawValue).tag(tab)
                         }
                     }
+                    .pickerStyle(.segmented)
+                    .labelsHidden()
                 }
-                .padding(.horizontal, 20)
-                .padding(.top, 12)
-                .padding(.bottom, 24)
+
+                if selectedTab == .connection {
+                    connectionSettings
+                } else {
+                    serverSettings
+                }
             }
-            .background(Color(.systemGroupedBackground))
-            .navigationTitle(profile.name)
+            .navigationTitle("Edit Profile")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button("Cancel") {
-                        dismiss()
-                    }
+                    Button("Cancel") { dismiss() }
                 }
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Save") {
@@ -348,111 +254,188 @@ private struct HostConnectionSheet: View {
                 }
             }
         }
-        .task {
-            if canProbeCapabilities,
-               capabilityReport == nil || capabilityReport?.isStale == true {
-                await refreshCapabilities()
+    }
+
+    @ViewBuilder
+    private var connectionSettings: some View {
+        Section("Open With") {
+            Picker("Default experience", selection: $launchKind) {
+                ForEach(ProfileLaunchKind.allCases) { kind in
+                    Text(kind.title).tag(kind)
+                }
+            }
+            .pickerStyle(.segmented)
+
+            Text(launchKind.detail)
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+        }
+
+        Section("Authentication") {
+            Picker("Method", selection: $authentication) {
+                ForEach(AuthenticationKind.allCases) { kind in
+                    Text(kind.title).tag(kind)
+                }
+            }
+            .pickerStyle(.segmented)
+
+            if authentication == .privateKey {
+                Picker("SSH key", selection: $preferredKeyID) {
+                    Text("All saved keys").tag(Optional<UUID>.none)
+                    ForEach(sshKeys) { key in
+                        Text(key.name).tag(Optional(key.id))
+                    }
+                }
+
+                if sshKeys.isEmpty {
+                    Text("No SSH keys are saved yet. Add one from the SSH Keys menu before connecting.")
+                        .font(.footnote)
+                        .foregroundStyle(ShellowTheme.warning)
+                }
+            }
+
+            Text(authenticationDetail)
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+        }
+
+        if launchKind == .terminal {
+            Section("Terminal Session") {
+                Toggle("Restore a named session", isOn: $usesPersistentTerminal)
+                    .onChange(of: usesPersistentTerminal) {
+                        if usesPersistentTerminal,
+                           PersistentTerminalConfiguration.validatedName(persistentSessionName) == nil {
+                            persistentSessionName = suggestedPersistentSessionName
+                        }
+                    }
+
+                if usesPersistentTerminal {
+                    Picker("Multiplexer", selection: $persistentTerminalBackend) {
+                        ForEach(PersistentTerminalBackend.allCases) { backend in
+                            Text(backend.compactTitle).tag(backend)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+
+                    TextField("Session name", text: $persistentSessionName)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                        .font(.system(.body, design: .monospaced))
+
+                    if PersistentTerminalConfiguration.validatedName(persistentSessionName) == nil {
+                        Text("Use 1–48 ASCII letters, numbers, hyphens, or underscores; start with a letter or number.")
+                            .font(.footnote)
+                            .foregroundStyle(ShellowTheme.warning)
+                    } else if let capabilityWarning {
+                        Text(capabilityWarning)
+                            .font(.footnote)
+                            .foregroundStyle(ShellowTheme.warning)
+                    }
+                }
             }
         }
     }
 
-    private var credentialStatus: HostCredentialStatus {
-        if hasSavedPassword {
-            return HostCredentialStatus(
-                title: "Password saved",
-                detail: "Connects automatically with Keychain",
-                systemImage: "key.fill",
-                tint: ShellowTheme.success
-            )
+    @ViewBuilder
+    private var serverSettings: some View {
+        Section("Server Details") {
+            TextField("Name", text: $name)
+            TextField("Host", text: $host)
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled()
+            TextField("Port", text: $port)
+                .keyboardType(.numberPad)
+            TextField("User", text: $username)
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled()
         }
 
-        if profile.authentication == .privateKey, hasSavedPrivateKey {
-            return HostCredentialStatus(
-                title: "SSH key ready",
-                detail: "Tries your saved key automatically",
-                systemImage: "key.horizontal.fill",
-                tint: ShellowTheme.success
-            )
+        Section {
+            Text(serverRequirement ?? "Leave Name blank to use \(generatedName). An empty User is saved as root.")
+                .font(.footnote)
+                .foregroundStyle(serverRequirement == nil ? .secondary : ShellowTheme.warning)
         }
+    }
 
-        let title = profile.authentication == .password ? "Password required" : "SSH key required"
-        return HostCredentialStatus(
-            title: title,
-            detail: "You’ll authenticate when opening this profile",
-            systemImage: "key",
-            tint: .secondary
-        )
+    private var authenticationDetail: String {
+        switch authentication {
+        case .automatic:
+            "Tries every saved key, then uses a saved password or asks for one."
+        case .password:
+            "Uses password authentication only."
+        case .privateKey:
+            preferredKeyID == nil
+                ? "Tries every saved key and never falls back to a password."
+                : "Uses only the selected key and never falls back to a password."
+        }
+    }
+
+    private var normalizedUser: String {
+        let value = username.trimmingCharacters(in: .whitespacesAndNewlines)
+        return value.isEmpty ? "root" : value
+    }
+
+    private var parsedPort: Int? {
+        guard let value = Int(port), (1...65535).contains(value) else { return nil }
+        return value
+    }
+
+    private var generatedName: String {
+        "\(normalizedUser)@\(host.trimmingCharacters(in: .whitespacesAndNewlines)):\(parsedPort ?? 22)"
+    }
+
+    private var serverRequirement: String? {
+        if host.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return "Enter a hostname or IP address."
+        }
+        if parsedPort == nil {
+            return "Port must be a number from 1 to 65535."
+        }
+        return nil
     }
 
     private var suggestedPersistentSessionName: String {
-        PersistentTerminalConfiguration.suggestedName(profileName: profile.name, host: profile.host)
+        PersistentTerminalConfiguration.suggestedName(profileName: name, host: host)
     }
 
-    private var canConnectTerminal: Bool {
-        !usesPersistentTerminal
-            || PersistentTerminalConfiguration.validatedName(persistentSessionName) != nil
+    private var capabilityWarning: String? {
+        guard
+            let capability = profile.capabilityReport?.capability(for: persistentTerminalBackend),
+            capability.supportLevel != .supported
+        else { return nil }
+        return "This host was last detected without full \(persistentTerminalBackend.displayTitle) support; you can still save and try it."
     }
 
     private var configurationIsValid: Bool {
-        launchKind != .terminal || canConnectTerminal
+        serverRequirement == nil
+            && (!usesPersistentTerminal
+                || launchKind != .terminal
+                || PersistentTerminalConfiguration.validatedName(persistentSessionName) != nil)
     }
 
     private var configuredProfile: HostProfile {
-        var configuredProfile = profile
-        configuredProfile.launchKind = launchKind
-        configuredProfile.capabilityReport = capabilityReport
-        configuredProfile.persistentTerminal = usesPersistentTerminal
-            ? PersistentTerminalConfiguration(
-                name: persistentSessionName,
-                backend: persistentTerminalBackend
-            )
+        var configured = profile
+        let normalizedHost = host.trimmingCharacters(in: .whitespacesAndNewlines)
+        let normalizedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        let endpointChanged = normalizedHost != profile.host
+            || parsedPort != profile.port
+            || normalizedUser != profile.username
+
+        configured.name = normalizedName.isEmpty ? generatedName : normalizedName
+        configured.host = normalizedHost
+        configured.port = parsedPort ?? 22
+        configured.username = normalizedUser
+        configured.launchKind = launchKind
+        configured.authentication = authentication
+        configured.preferredKeyID = authentication == .privateKey ? preferredKeyID : nil
+        configured.persistentTerminal = launchKind == .terminal && usesPersistentTerminal
+            ? PersistentTerminalConfiguration(name: persistentSessionName, backend: persistentTerminalBackend)
             : nil
-        return configuredProfile
-    }
-
-    private var canProbeCapabilities: Bool {
-        hasSavedPassword || hasSavedPrivateKey
-    }
-
-    @MainActor
-    private func refreshCapabilities() async {
-        guard canProbeCapabilities, !isProbingCapabilities else { return }
-        isProbingCapabilities = true
-        capabilityProbeError = nil
-        let outcome = await probeCapabilities(profile)
-        isProbingCapabilities = false
-        guard !Task.isCancelled else { return }
-
-        if let report = outcome.report {
-            capabilityReport = report
-            var updatedProfile = profile
-            updatedProfile.capabilityReport = report
-            updateProfile(updatedProfile)
-        } else {
-            capabilityProbeError = outcome.errorMessage ?? "Capability detection failed."
+        if endpointChanged {
+            configured.trustedHostKeySHA256 = nil
+            configured.capabilityReport = nil
         }
-    }
-
-    private func connectTerminalProfile() {
-        guard canConnectTerminal else { return }
-        let configuredProfile = configuredProfile
-        updateProfile(configuredProfile)
-        dismiss()
-        connectTerminal(configuredProfile)
-    }
-
-    private func connectCodexProfile() {
-        let configuredProfile = configuredProfile
-        updateProfile(configuredProfile)
-        dismiss()
-        connectCodex(configuredProfile)
-    }
-
-    private func connectClaudeProfile() {
-        let configuredProfile = configuredProfile
-        updateProfile(configuredProfile)
-        dismiss()
-        connectClaude(configuredProfile)
+        return configured
     }
 }
 
@@ -805,11 +788,6 @@ private struct NewHostProfileSheet: View {
     @Binding var draftHost: String
     @Binding var draftPort: String
     @Binding var draftUser: String
-    @Binding var draftAuthentication: AuthenticationKind
-    @Binding var draftLaunchKind: ProfileLaunchKind
-    @Binding var draftUsesPersistentTerminal: Bool
-    @Binding var draftPersistentTerminalBackend: PersistentTerminalBackend
-    @Binding var draftPersistentSessionName: String
     let addProfile: () -> Void
 
     @Environment(\.dismiss) private var dismiss
@@ -817,18 +795,7 @@ private struct NewHostProfileSheet: View {
     var body: some View {
         NavigationStack {
             Form {
-                Section("Profile") {
-                    Picker("Open with", selection: $draftLaunchKind) {
-                        ForEach(ProfileLaunchKind.allCases) { kind in
-                            Label(kind.title, systemImage: kind.systemImage).tag(kind)
-                        }
-                    }
-                    Text(draftLaunchKind.detail)
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                }
-
-                Section("Connection") {
+                Section("Server Details") {
                     TextField("Name", text: $draftName)
                     TextField("Host", text: $draftHost)
                         .textInputAutocapitalization(.never)
@@ -838,56 +805,22 @@ private struct NewHostProfileSheet: View {
                     TextField("User", text: $draftUser)
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()
-                    if let profileRequirement {
-                        Text(profileRequirement)
-                            .font(.footnote)
-                            .foregroundStyle(.secondary)
-                    }
                 }
 
-                Section("Authentication") {
-                    Picker("Method", selection: $draftAuthentication) {
-                        ForEach(AuthenticationKind.allCases) { kind in
-                            Text(kind.title).tag(kind)
-                        }
-                    }
-                }
+                Section {
+                    Text(profileRequirement ?? "Only Host is required. New profiles use Terminal, Auto authentication, port 22, and user root.")
+                        .font(.footnote)
+                        .foregroundStyle(profileRequirement == nil ? .secondary : ShellowTheme.warning)
 
-                if draftLaunchKind == .terminal {
-                    Section("Persistent Terminal") {
-                    Toggle("Restore a named session", isOn: $draftUsesPersistentTerminal)
-                        .onChange(of: draftUsesPersistentTerminal) {
-                            if draftUsesPersistentTerminal,
-                               PersistentTerminalConfiguration.validatedName(draftPersistentSessionName) == nil {
-                                draftPersistentSessionName = suggestedPersistentSessionName
-                            }
-                        }
-
-                    if draftUsesPersistentTerminal {
-                        Picker("Multiplexer", selection: $draftPersistentTerminalBackend) {
-                            ForEach(PersistentTerminalBackend.allCases) { backend in
-                                Text(backend.compactTitle).tag(backend)
-                            }
-                        }
-
-                        TextField("Session name", text: $draftPersistentSessionName)
-                            .textInputAutocapitalization(.never)
-                            .autocorrectionDisabled()
-                            .font(.system(.body, design: .monospaced))
-
-                        Text(persistentTerminalRequirement
-                            ?? "\(draftPersistentTerminalBackend.persistenceDetail)")
-                            .font(.footnote)
-                            .foregroundStyle(persistentTerminalRequirement == nil ? .secondary : ShellowTheme.warning)
-                    } else {
-                        Text("Optional. tmux, GNU screen, or Zellij can keep remote programs alive when the app disconnects.")
+                    if draftName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                       !draftHost.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                        Text("Generated name: \(generatedName)")
                             .font(.footnote)
                             .foregroundStyle(.secondary)
-                    }
                     }
                 }
             }
-            .navigationTitle("New Profile")
+            .navigationTitle("Add Host")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
@@ -912,34 +845,20 @@ private struct NewHostProfileSheet: View {
     }
 
     private var profileRequirement: String? {
-        if draftName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            return "Enter a name for this host."
-        }
         if draftHost.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             return "Enter a hostname or IP address."
-        }
-        if draftUser.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            return "Enter the SSH username."
         }
         guard let port = Int(draftPort), (1...65535).contains(port) else {
             return "Port must be a number from 1 to 65535."
         }
-        if let persistentTerminalRequirement {
-            return persistentTerminalRequirement
-        }
         return nil
     }
 
-    private var suggestedPersistentSessionName: String {
-        PersistentTerminalConfiguration.suggestedName(profileName: draftName, host: draftHost)
-    }
-
-    private var persistentTerminalRequirement: String? {
-        guard draftLaunchKind == .terminal, draftUsesPersistentTerminal else { return nil }
-        guard PersistentTerminalConfiguration.validatedName(draftPersistentSessionName) != nil else {
-            return "Use 1–48 ASCII letters, numbers, hyphens, or underscores; start with a letter or number."
-        }
-        return nil
+    private var generatedName: String {
+        let user = draftUser.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            ? "root"
+            : draftUser.trimmingCharacters(in: .whitespacesAndNewlines)
+        return "\(user)@\(draftHost.trimmingCharacters(in: .whitespacesAndNewlines)):\(Int(draftPort) ?? 22)"
     }
 }
 
@@ -4199,9 +4118,6 @@ private struct HostProfileRow: View {
         onOpenSettings: {},
         connectTerminal: { _ in },
         connectCodex: { _ in },
-        connectClaude: { _ in },
-        probeCapabilities: { _ in
-            .failure("Preview")
-        }
+        connectClaude: { _ in }
     )
 }

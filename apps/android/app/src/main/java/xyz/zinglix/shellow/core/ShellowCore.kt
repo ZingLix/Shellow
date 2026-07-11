@@ -19,6 +19,7 @@ data class HostProfile(
   val port: Int,
   val username: String,
   val authentication: AuthenticationKind,
+  val preferredKeyId: String? = null,
   val launchKind: ProfileLaunchKind = ProfileLaunchKind.Terminal,
   val trustedHostKeySha256: String? = null,
   val persistentTerminal: PersistentTerminalConfiguration? = null,
@@ -47,6 +48,7 @@ data class HostProfile(
       .put("port", port)
       .put("username", username)
       .put("authentication", authentication.wire)
+      .put("preferredKeyId", preferredKeyId.orEmpty())
       .put("launchKind", launchKind.wire)
       .put("trustedHostKeySha256", trustedHostKeySha256.orEmpty())
       .put("persistentTerminal", persistentTerminal?.toJson())
@@ -59,12 +61,7 @@ data class HostProfile(
       val host = json.optString("host")
       val port = json.optInt("port", 22)
       val username = json.optString("username")
-      val authentication =
-        if (json.optInt("authentication", AuthenticationKind.Password.wire) == AuthenticationKind.PrivateKey.wire) {
-          AuthenticationKind.PrivateKey
-        } else {
-          AuthenticationKind.Password
-        }
+      val authentication = AuthenticationKind.fromWire(json.optInt("authentication", AuthenticationKind.Automatic.wire))
 
       return HostProfile(
         name = name,
@@ -72,6 +69,7 @@ data class HostProfile(
         port = port,
         username = username,
         authentication = authentication,
+        preferredKeyId = json.optNullableString("preferredKeyId"),
         launchKind = ProfileLaunchKind.fromWire(json.optString("launchKind")),
         trustedHostKeySha256 = json.optNullableString("trustedHostKeySha256"),
         persistentTerminal =
@@ -111,8 +109,13 @@ private fun legacyProfileId(
   "legacy-" + listOf(name, host, port.toString(), username, authentication.wire.toString()).joinToString("|").hashCode().toUInt().toString(16)
 
 enum class AuthenticationKind(val wire: Int, val title: String) {
+  Automatic(2, "Auto"),
   Password(0, "Password"),
-  PrivateKey(1, "Private Key"),
+  PrivateKey(1, "Key");
+
+  companion object {
+    fun fromWire(value: Int): AuthenticationKind = entries.firstOrNull { it.wire == value } ?: Automatic
+  }
 }
 
 data class TerminalSession(

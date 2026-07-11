@@ -181,16 +181,9 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
+import kotlin.math.abs
 import kotlin.math.floor
 import kotlin.math.roundToInt
-
-private enum class AppScreen {
-  Hosts,
-  Terminal,
-  Codex,
-  Claude,
-  Settings,
-}
 
 private enum class TerminalDestructiveAction {
   Clear,
@@ -317,6 +310,11 @@ private data class PasswordPromptRequest(
   val reason: String?,
 )
 
+private data class ConnectionNotice(
+  val title: String,
+  val message: String,
+)
+
 private sealed class ReconnectTarget {
   data class Preview(val profile: HostProfile) : ReconnectTarget()
   data class Password(
@@ -414,7 +412,8 @@ fun ShellowApp() {
         keys.addAll(loadSSHKeyCredentials(context))
       }
     }
-  var screen by remember { mutableStateOf(AppScreen.Hosts) }
+  var navigation by remember { mutableStateOf(AppNavigationState()) }
+  val screen = navigation.currentScreen
   var session by remember {
     core.setTerminalTheme(initialDisplaySettings.terminalTheme.wire)
     mutableStateOf(core.snapshot())
@@ -425,6 +424,15 @@ fun ShellowApp() {
   var codexReconnectTarget by remember { mutableStateOf<CodexReconnectTarget?>(null) }
   var claudeReconnectTarget by remember { mutableStateOf<CodexReconnectTarget?>(null) }
   var passwordPrompt by remember { mutableStateOf<PasswordPromptRequest?>(null) }
+  var connectionNotice by remember { mutableStateOf<ConnectionNotice?>(null) }
+
+  fun navigateTo(destination: AppScreen) {
+    navigation = navigation.navigateTo(destination)
+  }
+
+  fun navigateBack() {
+    navigation = navigation.navigateBack()
+  }
 
   fun updateStoredProfile(updated: HostProfile) {
     val index = profiles.indexOfFirst { it.id == updated.id }
@@ -670,7 +678,7 @@ fun ShellowApp() {
 
   fun connectPasswordShell(profile: HostProfile, password: String, startupCommand: String) {
     session = TerminalSession.connecting(profile)
-    screen = AppScreen.Terminal
+    navigateTo(AppScreen.Terminal)
     scope.launch {
       updateSession(withContext(Dispatchers.IO) { core.startPasswordShell(profile, password) })
       val command = startupCommand.trim()
@@ -694,7 +702,7 @@ fun ShellowApp() {
     startupCommand: String,
   ) {
     session = TerminalSession.connecting(profile)
-    screen = AppScreen.Terminal
+    navigateTo(AppScreen.Terminal)
     scope.launch {
       updateSession(withContext(Dispatchers.IO) { core.startPrivateKeyShell(profile, privateKeyPem, passphrase) })
       val command = startupCommand.trim()
@@ -713,7 +721,7 @@ fun ShellowApp() {
 
   fun startCodexPassword(profile: HostProfile, password: String, cwd: String) {
     codexSnapshot = CodexSnapshot.connecting(profile, cwd)
-    screen = AppScreen.Codex
+    navigateTo(AppScreen.Codex)
     scope.launch {
       updateCodexSnapshot(withContext(Dispatchers.IO) { core.startCodexPassword(profile, password, cwd) })
     }
@@ -726,7 +734,7 @@ fun ShellowApp() {
     cwd: String,
   ) {
     codexSnapshot = CodexSnapshot.connecting(profile, cwd)
-    screen = AppScreen.Codex
+    navigateTo(AppScreen.Codex)
     scope.launch {
       updateCodexSnapshot(withContext(Dispatchers.IO) { core.startCodexPrivateKey(profile, privateKeyPem, passphrase, cwd) })
     }
@@ -739,7 +747,7 @@ fun ShellowApp() {
     sessionId: String = "",
   ) {
     claudeSnapshot = CodexSnapshot.connecting(profile, cwd)
-    screen = AppScreen.Claude
+    navigateTo(AppScreen.Claude)
     scope.launch {
       updateClaudeSnapshot(
         withContext(Dispatchers.IO) { core.startClaudePassword(profile, password, cwd, sessionId) },
@@ -755,7 +763,7 @@ fun ShellowApp() {
     sessionId: String = "",
   ) {
     claudeSnapshot = CodexSnapshot.connecting(profile, cwd)
-    screen = AppScreen.Claude
+    navigateTo(AppScreen.Claude)
     scope.launch {
       updateClaudeSnapshot(
         withContext(Dispatchers.IO) {
@@ -786,8 +794,15 @@ fun ShellowApp() {
     }
   }
 
-  fun storedPrivateKeyAuths(): List<StoredPrivateKeyAuth> =
+  fun storedPrivateKeyAuths(profile: HostProfile? = null): List<StoredPrivateKeyAuth> =
     sshKeys.mapNotNull { credential ->
+      if (
+        profile?.authentication == AuthenticationKind.PrivateKey &&
+          profile.preferredKeyId != null &&
+          profile.preferredKeyId != credential.id
+      ) {
+        return@mapNotNull null
+      }
       val privateKeyPem = secretStore.loadKeySecret(credential.id, SSHSecretKind.PrivateKey)
       if (privateKeyPem.isNullOrBlank() || !privateKeyLooksUsable(privateKeyPem)) {
         null
@@ -850,7 +865,7 @@ fun ShellowApp() {
     threadId: String?,
   ) {
     codexSnapshot = CodexSnapshot.connecting(profile, cwd)
-    screen = AppScreen.Codex
+    navigateTo(AppScreen.Codex)
     updateCodexSnapshot(withContext(Dispatchers.IO) { core.startCodexPassword(profile, password, cwd) })
     resumeCodexThreadAfterReconnect(threadId)
   }
@@ -863,7 +878,7 @@ fun ShellowApp() {
     threadId: String?,
   ) {
     codexSnapshot = CodexSnapshot.connecting(profile, cwd)
-    screen = AppScreen.Codex
+    navigateTo(AppScreen.Codex)
     updateCodexSnapshot(withContext(Dispatchers.IO) { core.startCodexPrivateKey(profile, privateKeyPem, passphrase, cwd) })
     resumeCodexThreadAfterReconnect(threadId)
   }
@@ -873,7 +888,7 @@ fun ShellowApp() {
     keys: List<StoredPrivateKeyAuth>,
   ): Boolean {
     session = TerminalSession.connecting(profile)
-    screen = AppScreen.Terminal
+    navigateTo(AppScreen.Terminal)
 
     keys.forEach { key ->
       reconnectTarget =
@@ -913,7 +928,7 @@ fun ShellowApp() {
     keys: List<StoredPrivateKeyAuth>,
   ): Boolean {
     codexSnapshot = CodexSnapshot.connecting(profile, "")
-    screen = AppScreen.Codex
+    navigateTo(AppScreen.Codex)
 
     keys.forEach { key ->
       codexReconnectTarget =
@@ -945,7 +960,7 @@ fun ShellowApp() {
     keys: List<StoredPrivateKeyAuth>,
   ): Boolean {
     claudeSnapshot = CodexSnapshot.connecting(profile, "")
-    screen = AppScreen.Claude
+    navigateTo(AppScreen.Claude)
 
     keys.forEach { key ->
       claudeReconnectTarget =
@@ -973,12 +988,11 @@ fun ShellowApp() {
   ) {
     scope.launch {
       val savedPassword = withContext(Dispatchers.IO) { secretStore.loadSecret(profile, SSHSecretKind.Password) }
-      if (!savedPassword.isNullOrBlank()) {
-        startPasswordConnection(profile, savedPassword, mode)
-        return@launch
-      }
-
       if (profile.authentication == AuthenticationKind.Password) {
+        if (!savedPassword.isNullOrBlank()) {
+          startPasswordConnection(profile, savedPassword, mode)
+          return@launch
+        }
         passwordPrompt =
           PasswordPromptRequest(
             profile = profile,
@@ -988,14 +1002,28 @@ fun ShellowApp() {
         return@launch
       }
 
-      val keys = withContext(Dispatchers.IO) { storedPrivateKeyAuths() }
+      val keys = withContext(Dispatchers.IO) { storedPrivateKeyAuths(profile) }
       if (keys.isEmpty()) {
-        passwordPrompt =
-          PasswordPromptRequest(
-            profile = profile,
-            mode = mode,
-            reason = "No saved SSH key is available. Enter a password to connect instead.",
-          )
+        if (profile.authentication == AuthenticationKind.Automatic) {
+          if (!savedPassword.isNullOrBlank()) {
+            startPasswordConnection(profile, savedPassword, mode)
+          } else {
+            passwordPrompt =
+              PasswordPromptRequest(
+                profile = profile,
+                mode = mode,
+                reason = "No saved SSH key is available. Enter the password for this host.",
+              )
+          }
+        } else {
+          connectionNotice =
+            ConnectionNotice(
+              title = "SSH Key Unavailable",
+              message =
+                if (profile.preferredKeyId == null) "This profile only uses SSH keys, but no saved key is available."
+                else "The SSH key selected for this profile is no longer available.",
+            )
+        }
         return@launch
       }
 
@@ -1010,12 +1038,25 @@ fun ShellowApp() {
         reconnectTarget = null
         codexReconnectTarget = null
         claudeReconnectTarget = null
-        passwordPrompt =
-          PasswordPromptRequest(
-            profile = profile,
-            mode = mode,
-            reason = "Saved SSH keys did not authenticate. Enter a password to continue.",
-          )
+        navigateTo(AppScreen.Hosts)
+        if (profile.authentication == AuthenticationKind.Automatic) {
+          if (!savedPassword.isNullOrBlank()) {
+            startPasswordConnection(profile, savedPassword, mode)
+          } else {
+            passwordPrompt =
+              PasswordPromptRequest(
+                profile = profile,
+                mode = mode,
+                reason = "Saved SSH keys did not authenticate. Enter a password to continue.",
+              )
+          }
+        } else {
+          connectionNotice =
+            ConnectionNotice(
+              title = "SSH Key Authentication Failed",
+              message = "None of the SSH keys selected for this profile authenticated successfully. Password fallback is disabled.",
+            )
+        }
       }
     }
   }
@@ -1024,7 +1065,7 @@ fun ShellowApp() {
     when (val target = reconnectTarget) {
       is ReconnectTarget.Preview -> {
         updateSession(core.connectPreview(target.profile))
-        screen = AppScreen.Terminal
+        navigateTo(AppScreen.Terminal)
       }
       is ReconnectTarget.Password ->
         connectPasswordShell(
@@ -1092,7 +1133,7 @@ fun ShellowApp() {
     val target = claudeReconnectTarget ?: return
     claudeReconnectTarget = target.withCwd(cwd).withThreadId(null)
     claudeSnapshot = CodexSnapshot.connecting(target.profile(), cwd)
-    screen = AppScreen.Claude
+    navigateTo(AppScreen.Claude)
     val started =
       withContext(Dispatchers.IO) {
         when (target) {
@@ -1110,6 +1151,10 @@ fun ShellowApp() {
   }
 
   val activeTerminalProfile = reconnectTarget?.profile()
+
+  BackHandler(enabled = navigation.canNavigateBack) {
+    navigateBack()
+  }
 
   ShellowTheme(colorScheme = displaySettings.colorScheme) {
     Box(
@@ -1135,7 +1180,7 @@ fun ShellowApp() {
                   }
                 }
               },
-            onBackToHosts = { screen = AppScreen.Hosts },
+            onBackToHosts = ::navigateBack,
             onInput = { input -> updateSession(core.sendTerminalInput(input)) },
             onReconnect = if (reconnectTarget == null) null else ::reconnect,
             onDisconnect = { updateSession(core.disconnectLiveShell()) },
@@ -1152,7 +1197,7 @@ fun ShellowApp() {
         AppScreen.Codex ->
           CodexScreen(
             snapshot = codexSnapshot,
-            onBackToHosts = { screen = AppScreen.Hosts },
+            onBackToHosts = ::navigateBack,
             onSendMessage = { message ->
               updateCodexSnapshot(core.sendCodexMessage(message))
             },
@@ -1233,7 +1278,7 @@ fun ShellowApp() {
         AppScreen.Claude ->
           CodexScreen(
             snapshot = claudeSnapshot,
-            onBackToHosts = { screen = AppScreen.Hosts },
+            onBackToHosts = ::navigateBack,
             onSendMessage = { message ->
               updateClaudeSnapshot(core.sendClaudeMessage(message))
             },
@@ -1268,17 +1313,12 @@ fun ShellowApp() {
             profiles = profiles,
             sshKeys = sshKeys,
             secretStore = secretStore,
-            onOpenSettings = { screen = AppScreen.Settings },
+            onOpenSettings = { navigateTo(AppScreen.Settings) },
             onAddProfile = { profile ->
               profiles.add(profile)
               saveHostProfiles(context, profiles)
             },
             onUpdateProfile = ::updateStoredProfile,
-            onProbeCapabilities = { profile ->
-              val outcome = probeWithStoredCredential(profile)
-              applyCapabilityOutcome(profile, outcome)
-              outcome
-            },
             onAddKey = { credential ->
               sshKeys.add(credential)
               saveSSHKeyCredentials(context, sshKeys)
@@ -1303,7 +1343,7 @@ fun ShellowApp() {
           SettingsScreen(
             report = session.integration,
             displaySettings = displaySettings,
-            onBack = { screen = AppScreen.Hosts },
+            onBack = ::navigateBack,
             onDisplaySettingsChange = { updated ->
               if (updated.terminalTheme != displaySettings.terminalTheme) {
                 core.setTerminalTheme(updated.terminalTheme.wire)
@@ -1321,6 +1361,18 @@ fun ShellowApp() {
           onConnect = { password ->
             passwordPrompt = null
             startPasswordConnection(request.profile, password, request.mode)
+          },
+        )
+      }
+
+      connectionNotice?.let { notice ->
+        AlertDialog(
+          onDismissRequest = { connectionNotice = null },
+          containerColor = ShellowColors.PanelBackground,
+          title = { Text(notice.title) },
+          text = { Text(notice.message) },
+          confirmButton = {
+            TextButton(onClick = { connectionNotice = null }) { Text("OK") }
           },
         )
       }
@@ -5931,7 +5983,6 @@ private fun HostsScreen(
   onOpenSettings: () -> Unit,
   onAddProfile: (HostProfile) -> Unit,
   onUpdateProfile: (HostProfile) -> Unit,
-  onProbeCapabilities: suspend (HostProfile) -> RemoteHostProbeOutcome,
   onAddKey: (SSHKeyCredential) -> Unit,
   onDeleteKey: (SSHKeyCredential) -> Unit,
   onConnectTerminal: (HostProfile) -> Unit,
@@ -6051,41 +6102,14 @@ private fun HostsScreen(
   }
 
   selectedProfile?.let { profile ->
-    val hasSavedPassword =
-      remember(profile.id) {
-        !secretStore.loadSecret(profile, SSHSecretKind.Password).isNullOrBlank()
-      }
-    val hasSavedPrivateKey =
-      remember(profile.id, sshKeys) {
-        sshKeys.any { credential ->
-          !secretStore.loadKeySecret(credential.id, SSHSecretKind.PrivateKey).isNullOrBlank()
-        }
-      }
     HostConnectionDialog(
       profile = profile,
-      hasSavedPassword = hasSavedPassword,
-      hasSavedPrivateKey = hasSavedPrivateKey,
+      sshKeys = sshKeys,
       onSaveProfile = { updated ->
-        selectedProfile = updated
         onUpdateProfile(updated)
+        selectedProfile = null
       },
-      onProbeCapabilities = onProbeCapabilities,
       onDismiss = { selectedProfile = null },
-      onConnectTerminal = { updated ->
-        onUpdateProfile(updated)
-        selectedProfile = null
-        onConnectTerminal(updated)
-      },
-      onConnectCodex = { updated ->
-        onUpdateProfile(updated)
-        selectedProfile = null
-        onConnectCodex(updated)
-      },
-      onConnectClaude = { updated ->
-        onUpdateProfile(updated)
-        selectedProfile = null
-        onConnectClaude(updated)
-      },
     )
   }
 }
@@ -6174,16 +6198,18 @@ private fun HostProfileRow(
 @Composable
 private fun HostConnectionDialog(
   profile: HostProfile,
-  hasSavedPassword: Boolean,
-  hasSavedPrivateKey: Boolean,
+  sshKeys: List<SSHKeyCredential>,
   onSaveProfile: (HostProfile) -> Unit,
-  onProbeCapabilities: suspend (HostProfile) -> RemoteHostProbeOutcome,
   onDismiss: () -> Unit,
-  onConnectTerminal: (HostProfile) -> Unit,
-  onConnectCodex: (HostProfile) -> Unit,
-  onConnectClaude: (HostProfile) -> Unit,
 ) {
+  var selectedTab by remember(profile.id) { mutableStateOf(ProfileEditorTab.Connection) }
+  var name by remember(profile.id) { mutableStateOf(profile.name) }
+  var host by remember(profile.id) { mutableStateOf(profile.host) }
+  var port by remember(profile.id) { mutableStateOf(profile.port.toString()) }
+  var username by remember(profile.id) { mutableStateOf(profile.username) }
   var launchKind by remember(profile.id) { mutableStateOf(profile.launchKind) }
+  var authentication by remember(profile.id) { mutableStateOf(profile.authentication) }
+  var preferredKeyId by remember(profile.id) { mutableStateOf(profile.preferredKeyId) }
   var persistentEnabled by remember(profile.id) { mutableStateOf(profile.persistentTerminal != null) }
   var persistentBackend by
     remember(profile.id) { mutableStateOf(profile.persistentTerminal?.backend ?: PersistentTerminalBackend.Tmux) }
@@ -6194,208 +6220,220 @@ private fun HostConnectionDialog(
           ?: PersistentTerminalConfiguration.suggestedName(profile.name, profile.host),
       )
     }
-  var detectedReport by remember(profile.id) { mutableStateOf(profile.capabilityReport) }
-  var probeInProgress by remember(profile.id) { mutableStateOf(false) }
-  var probeError by remember(profile.id) { mutableStateOf<String?>(null) }
+  val parsedPort = port.toIntOrNull()?.takeIf { it in 1..65535 }
+  val normalizedHost = host.trim()
+  val normalizedUser = username.trim().ifEmpty { "root" }
+  val generatedName = "$normalizedUser@$normalizedHost:${parsedPort ?: 22}"
+  val normalizedName = name.trim().ifEmpty { generatedName }
   val validatedPersistentName = PersistentTerminalConfiguration.validatedName(persistentName)
+  val endpointChanged = normalizedHost != profile.host || parsedPort != profile.port || normalizedUser != profile.username
   val workingProfile =
     profile.copy(
+      name = normalizedName,
+      host = normalizedHost,
+      port = parsedPort ?: 22,
+      username = normalizedUser,
       launchKind = launchKind,
+      authentication = authentication,
+      preferredKeyId = if (authentication == AuthenticationKind.PrivateKey) preferredKeyId else null,
+      trustedHostKeySha256 = if (endpointChanged) null else profile.trustedHostKeySha256,
       persistentTerminal =
-        if (persistentEnabled && validatedPersistentName != null) {
+        if (launchKind == ProfileLaunchKind.Terminal && persistentEnabled && validatedPersistentName != null) {
           PersistentTerminalConfiguration(validatedPersistentName, persistentBackend)
         } else {
           null
         },
-      capabilityReport = detectedReport ?: profile.capabilityReport,
+      capabilityReport = if (endpointChanged) null else profile.capabilityReport,
     )
   val persistentConfigurationValid = !persistentEnabled || validatedPersistentName != null
-
-  suspend fun refreshCapabilities() {
-    probeInProgress = true
-    probeError = null
-    val outcome = onProbeCapabilities(workingProfile)
-    probeInProgress = false
-    if (outcome.report != null) {
-      detectedReport = outcome.report
-    } else {
-      probeError = outcome.errorMessage ?: "Capability detection failed."
+  val serverRequirement =
+    when {
+      normalizedHost.isEmpty() -> "Enter a hostname or IP address."
+      parsedPort == null -> "Port must be a number from 1 to 65535."
+      else -> null
     }
-  }
-
-  LaunchedEffect(profile.id) {
-    if (profile.capabilityReport == null || profile.capabilityReport.isStale) {
-      refreshCapabilities()
-    }
-  }
+  val configurationValid =
+    serverRequirement == null &&
+      (launchKind != ProfileLaunchKind.Terminal || persistentConfigurationValid)
 
   AlertDialog(
     onDismissRequest = onDismiss,
     containerColor = ShellowColors.PanelBackground,
     titleContentColor = ShellowColors.TerminalText,
     textContentColor = ShellowColors.TerminalText,
-    title = { Text(profile.name) },
+    title = { Text("Edit Profile") },
     text = {
       Column(
         modifier = Modifier.heightIn(max = 620.dp).verticalScroll(rememberScrollState()),
         verticalArrangement = Arrangement.spacedBy(14.dp),
       ) {
-        Column(
-          modifier =
-            Modifier
-              .fillMaxWidth()
-              .background(ShellowColors.KeyBackground.copy(alpha = 0.38f), RoundedCornerShape(12.dp))
-              .padding(14.dp),
-          verticalArrangement = Arrangement.spacedBy(10.dp),
-        ) {
-          Text(
-            profile.endpoint,
-            color = ShellowColors.TerminalText,
-            style = MaterialTheme.typography.bodyMedium.copy(fontFamily = FontFamily.Monospace),
-            fontWeight = FontWeight.SemiBold,
-          )
-          PanelDivider()
-          ConnectionStatusRow(
-            title =
-              when {
-                hasSavedPassword -> "Password saved"
-                profile.authentication == AuthenticationKind.PrivateKey && hasSavedPrivateKey -> "SSH key ready"
-                profile.authentication == AuthenticationKind.Password -> "Password required"
-                else -> "SSH key required"
-              },
-            detail =
-              when {
-                hasSavedPassword -> "Connects automatically from secure storage"
-                profile.authentication == AuthenticationKind.PrivateKey && hasSavedPrivateKey -> "Tries your saved key automatically"
-                else -> "You'll authenticate when opening this profile"
-              },
-            healthy = hasSavedPassword || (profile.authentication == AuthenticationKind.PrivateKey && hasSavedPrivateKey),
-          )
-          ConnectionStatusRow(
-            title = if (profile.trustedHostKeySha256 == null) "Host not verified yet" else "Host key verified",
-            detail = if (profile.trustedHostKeySha256 == null) "The key will be recorded on first connection" else "Pinned to this saved host",
-            healthy = profile.trustedHostKeySha256 != null,
-          )
+        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+          ProfileEditorTab.entries.forEach { tab ->
+            AuthenticationChoice(
+              title = tab.title,
+              selected = selectedTab == tab,
+              modifier = Modifier.weight(1f),
+            ) { selectedTab = tab }
+          }
         }
 
-        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-          Text("Default workspace", color = ShellowColors.TerminalText, fontWeight = FontWeight.SemiBold)
-          Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            AuthenticationChoice(
-              title = "Terminal",
-              selected = launchKind == ProfileLaunchKind.Terminal,
-              modifier = Modifier.weight(1f),
-            ) { launchKind = ProfileLaunchKind.Terminal }
-            AuthenticationChoice(
-              title = "Codex",
-              selected = launchKind == ProfileLaunchKind.Codex,
-              modifier = Modifier.weight(1f),
-            ) { launchKind = ProfileLaunchKind.Codex }
-            AuthenticationChoice(
-              title = "Claude",
-              selected = launchKind == ProfileLaunchKind.Claude,
-              modifier = Modifier.weight(1f),
-            ) { launchKind = ProfileLaunchKind.Claude }
-          }
-          Text(
-            if (launchKind == ProfileLaunchKind.Terminal) {
-              "Open a remote shell and persistent workspaces"
-            } else if (launchKind == ProfileLaunchKind.Codex) {
-              "Open remote coding conversations"
-            } else {
-              "Open durable Claude Code sessions over SSH"
-            },
-            color = ShellowColors.TerminalMuted,
-            style = MaterialTheme.typography.labelSmall,
-          )
-        }
-
-        if (launchKind == ProfileLaunchKind.Terminal) Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-          Row(
-            modifier = Modifier.fillMaxWidth(),
-            verticalAlignment = Alignment.CenterVertically,
-          ) {
-            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-              Text("Persistent terminal", color = ShellowColors.TerminalText, fontWeight = FontWeight.SemiBold)
-              Text("Restore the same remote workspace after reconnecting", color = ShellowColors.TerminalMuted, style = MaterialTheme.typography.labelSmall)
-            }
-            Checkbox(
-              checked = persistentEnabled,
-              onCheckedChange = { persistentEnabled = it },
-            )
-          }
-          if (persistentEnabled) {
-            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-              PersistentTerminalBackend.entries.forEach { backend ->
+        if (selectedTab == ProfileEditorTab.Connection) {
+          Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text("Open with", color = ShellowColors.TerminalText, fontWeight = FontWeight.SemiBold)
+            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+              ProfileLaunchKind.entries.forEach { kind ->
                 AuthenticationChoice(
-                  title = backend.compactTitle,
-                  selected = persistentBackend == backend,
+                  title = if (kind == ProfileLaunchKind.Claude) "Claude" else kind.title,
+                  selected = launchKind == kind,
                   modifier = Modifier.weight(1f),
-                ) { persistentBackend = backend }
+                ) { launchKind = kind }
               }
             }
-            OutlinedTextField(
-              value = persistentName,
-              onValueChange = { persistentName = it },
-              modifier = Modifier.fillMaxWidth(),
-              label = { Text("Session name") },
-              supportingText = {
-                Text(
-                  if (validatedPersistentName == null) "Use 1–48 ASCII letters, numbers, - or _."
-                  else persistentBackend.persistenceDetail,
-                )
+            Text(
+              when (launchKind) {
+                ProfileLaunchKind.Terminal -> "Open a remote shell and persistent workspaces."
+                ProfileLaunchKind.Codex -> "Open remote Codex sessions."
+                ProfileLaunchKind.Claude -> "Open durable Claude Code sessions over SSH."
               },
-              isError = validatedPersistentName == null,
-              singleLine = true,
+              color = ShellowColors.TerminalMuted,
+              style = MaterialTheme.typography.labelSmall,
             )
-            val capability = detectedReport?.capability(persistentBackend)
-            if (capability != null && capability.supportLevel != RemoteComponentSupportLevel.Supported) {
-              Text(capability.featureSummary, color = ShellowColors.Warning, style = MaterialTheme.typography.labelSmall)
+          }
+
+          Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text("Authentication", color = ShellowColors.TerminalText, fontWeight = FontWeight.SemiBold)
+            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+              AuthenticationKind.entries.forEach { kind ->
+                AuthenticationChoice(
+                  title = kind.title,
+                  selected = authentication == kind,
+                  modifier = Modifier.weight(1f),
+                ) { authentication = kind }
+              }
+            }
+            Text(
+              when (authentication) {
+                AuthenticationKind.Automatic -> "Tries every saved key, then uses a saved password or asks for one."
+                AuthenticationKind.Password -> "Uses password authentication only."
+                AuthenticationKind.PrivateKey ->
+                  if (preferredKeyId == null) "Tries every saved key and never falls back to a password."
+                  else "Uses only the selected key and never falls back to a password."
+              },
+              color = ShellowColors.TerminalMuted,
+              style = MaterialTheme.typography.labelSmall,
+            )
+
+            if (authentication == AuthenticationKind.PrivateKey) {
+              AuthenticationChoice(
+                title = "All saved keys",
+                selected = preferredKeyId == null,
+                modifier = Modifier.fillMaxWidth(),
+              ) { preferredKeyId = null }
+              sshKeys.forEach { key ->
+                AuthenticationChoice(
+                  title = key.name,
+                  selected = preferredKeyId == key.id,
+                  modifier = Modifier.fillMaxWidth(),
+                ) { preferredKeyId = key.id }
+              }
+              if (sshKeys.isEmpty()) {
+                Text(
+                  "No SSH keys are saved yet. Add one from the SSH Keys menu before connecting.",
+                  color = ShellowColors.Warning,
+                  style = MaterialTheme.typography.labelSmall,
+                )
+              }
             }
           }
-        }
 
-        TextButton(
-          enabled = launchKind != ProfileLaunchKind.Terminal || persistentConfigurationValid,
-          onClick = { onSaveProfile(workingProfile) },
-        ) {
-          Text("Save profile")
-        }
-
-        RemoteCapabilityCard(
-          report = detectedReport,
-          inProgress = probeInProgress,
-          errorMessage = probeError,
-          onRefresh = { refreshCapabilities() },
-        )
-
-        Text("Open profile", color = ShellowColors.TerminalText, fontWeight = FontWeight.SemiBold)
-        if (launchKind == ProfileLaunchKind.Terminal) {
-          ConnectionModeOption(
-            title = if (persistentEnabled) "Resume Terminal" else "Terminal",
-            subtitle = if (persistentEnabled) "Persistent ${persistentBackend.displayTitle} workspaces" else "Interactive shell with keyboard tools",
-            detail = if (persistentEnabled) "Restore $persistentName, then switch sessions" else "Commands, processes, and remote files",
-            enabled = persistentConfigurationValid,
-            onClick = { onConnectTerminal(workingProfile) },
-          )
+          if (launchKind == ProfileLaunchKind.Terminal) {
+            Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+              Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                Text("Persistent terminal", color = ShellowColors.TerminalText, fontWeight = FontWeight.SemiBold)
+                Text("Restore the same remote workspace after reconnecting", color = ShellowColors.TerminalMuted, style = MaterialTheme.typography.labelSmall)
+              }
+              Checkbox(checked = persistentEnabled, onCheckedChange = { persistentEnabled = it })
+            }
+            if (persistentEnabled) {
+              Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                PersistentTerminalBackend.entries.forEach { backend ->
+                  AuthenticationChoice(
+                    title = backend.compactTitle,
+                    selected = persistentBackend == backend,
+                    modifier = Modifier.weight(1f),
+                  ) { persistentBackend = backend }
+                }
+              }
+              OutlinedTextField(
+                value = persistentName,
+                onValueChange = { persistentName = it },
+                modifier = Modifier.fillMaxWidth(),
+                label = { Text("Session name") },
+                isError = validatedPersistentName == null,
+                singleLine = true,
+              )
+              if (validatedPersistentName == null) {
+                Text("Use 1–48 ASCII letters, numbers, - or _.", color = ShellowColors.Warning, style = MaterialTheme.typography.labelSmall)
+              } else {
+                val capability = profile.capabilityReport?.capability(persistentBackend)
+                if (capability != null && capability.supportLevel != RemoteComponentSupportLevel.Supported) {
+                  Text(
+                    "This host was last detected without full ${persistentBackend.displayTitle} support; you can still save and try it.",
+                    color = ShellowColors.Warning,
+                    style = MaterialTheme.typography.labelSmall,
+                  )
+                }
+              }
+            }
+          }
         } else {
-          ConnectionModeOption(
-            title = "Codex",
-            subtitle = "Remote coding sessions and conversations",
-            detail = "Projects, threads, and approvals",
-            onClick = { onConnectCodex(workingProfile) },
+          OutlinedTextField(
+            value = name,
+            onValueChange = { name = it },
+            modifier = Modifier.fillMaxWidth(),
+            label = { Text("Name") },
+            singleLine = true,
           )
-          ConnectionModeOption(
-            title = "Claude Code",
-            subtitle = "Durable stream-json session over SSH",
-            detail = "Survives app and SSH disconnects without tmux",
-            onClick = { onConnectClaude(workingProfile) },
+          OutlinedTextField(
+            value = host,
+            onValueChange = { host = it },
+            modifier = Modifier.fillMaxWidth(),
+            label = { Text("Host") },
+            singleLine = true,
+          )
+          OutlinedTextField(
+            value = port,
+            onValueChange = { port = it },
+            modifier = Modifier.fillMaxWidth(),
+            label = { Text("Port") },
+            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+            singleLine = true,
+          )
+          OutlinedTextField(
+            value = username,
+            onValueChange = { username = it },
+            modifier = Modifier.fillMaxWidth(),
+            label = { Text("User") },
+            singleLine = true,
+          )
+          Text(
+            serverRequirement ?: "Leave Name blank to use $generatedName. An empty User is saved as root.",
+            color = if (serverRequirement == null) ShellowColors.TerminalMuted else ShellowColors.Warning,
+            style = MaterialTheme.typography.labelSmall,
           )
         }
       }
     },
-    confirmButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
+    confirmButton = {
+      TextButton(enabled = configurationValid, onClick = { onSaveProfile(workingProfile) }) { Text("Save") }
+    },
+    dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
   )
+}
+
+private enum class ProfileEditorTab(val title: String) {
+  Connection("Connection"),
+  Server("Server"),
 }
 
 @Composable
@@ -6506,21 +6544,15 @@ private fun AddHostDialog(
   var name by remember { mutableStateOf("") }
   var host by remember { mutableStateOf("") }
   var port by remember { mutableStateOf("22") }
-  var username by remember { mutableStateOf("") }
-  var authentication by remember { mutableStateOf(AuthenticationKind.Password) }
-  var launchKind by remember { mutableStateOf(ProfileLaunchKind.Terminal) }
-  var persistentEnabled by remember { mutableStateOf(false) }
-  var persistentBackend by remember { mutableStateOf(PersistentTerminalBackend.Tmux) }
-  var persistentName by remember { mutableStateOf("shellow-session") }
+  var username by remember { mutableStateOf("root") }
   val parsedPort = port.toIntOrNull()
-  val validatedPersistentName = PersistentTerminalConfiguration.validatedName(persistentName)
+  val normalizedHost = host.trim()
+  val normalizedUser = username.trim().ifEmpty { "root" }
+  val generatedName = "$normalizedUser@$normalizedHost:${parsedPort ?: 22}"
   val addHostRequirement =
     when {
-      name.isBlank() -> "Enter a name for this host."
-      host.isBlank() -> "Enter a hostname or IP address."
-      username.isBlank() -> "Enter the SSH username."
+      normalizedHost.isEmpty() -> "Enter a hostname or IP address."
       parsedPort == null || parsedPort !in 1..65535 -> "Port must be a number from 1 to 65535."
-      launchKind == ProfileLaunchKind.Terminal && persistentEnabled && validatedPersistentName == null -> "Session names use 1–48 ASCII letters, numbers, - or _."
       else -> null
     }
   val canAdd = addHostRequirement == null
@@ -6530,7 +6562,7 @@ private fun AddHostDialog(
     containerColor = ShellowColors.PanelBackground,
     titleContentColor = ShellowColors.TerminalText,
     textContentColor = ShellowColors.TerminalText,
-    title = { Text("Add Profile") },
+    title = { Text("Add Host") },
     text = {
       Column(
         modifier =
@@ -6540,24 +6572,6 @@ private fun AddHostDialog(
             .verticalScroll(rememberScrollState()),
         verticalArrangement = Arrangement.spacedBy(10.dp),
       ) {
-        Text("Open with", color = ShellowColors.TerminalMuted, style = MaterialTheme.typography.labelMedium)
-        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-          AuthenticationChoice(
-            title = "Terminal",
-            selected = launchKind == ProfileLaunchKind.Terminal,
-            modifier = Modifier.weight(1f),
-          ) { launchKind = ProfileLaunchKind.Terminal }
-          AuthenticationChoice(
-            title = "Codex",
-            selected = launchKind == ProfileLaunchKind.Codex,
-            modifier = Modifier.weight(1f),
-          ) { launchKind = ProfileLaunchKind.Codex }
-          AuthenticationChoice(
-            title = "Claude",
-            selected = launchKind == ProfileLaunchKind.Claude,
-            modifier = Modifier.weight(1f),
-          ) { launchKind = ProfileLaunchKind.Claude }
-        }
         OutlinedTextField(
           value = name,
           onValueChange = { name = it },
@@ -6587,59 +6601,14 @@ private fun AddHostDialog(
           label = { Text("User") },
           singleLine = true,
         )
-        Text("Authentication", color = ShellowColors.TerminalMuted, style = MaterialTheme.typography.labelMedium)
-        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-          AuthenticationChoice(
-            title = "Password",
-            selected = authentication == AuthenticationKind.Password,
-            modifier = Modifier.weight(1f),
-          ) { authentication = AuthenticationKind.Password }
-          AuthenticationChoice(
-            title = "Private Key",
-            selected = authentication == AuthenticationKind.PrivateKey,
-            modifier = Modifier.weight(1f),
-          ) { authentication = AuthenticationKind.PrivateKey }
-        }
-        if (launchKind == ProfileLaunchKind.Terminal) Row(
-          modifier = Modifier.fillMaxWidth(),
-          verticalAlignment = Alignment.CenterVertically,
-        ) {
-          Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-            Text("Persistent terminal", color = ShellowColors.TerminalText, style = MaterialTheme.typography.bodyMedium)
-            Text("Restore this workspace after reconnecting", color = ShellowColors.TerminalMuted, style = MaterialTheme.typography.labelSmall)
-          }
-          Checkbox(
-            checked = persistentEnabled,
-            onCheckedChange = { enabled ->
-              persistentEnabled = enabled
-              if (enabled && persistentName == "shellow-session") {
-                persistentName = PersistentTerminalConfiguration.suggestedName(name, host)
-              }
-            },
-          )
-        }
-        if (launchKind == ProfileLaunchKind.Terminal && persistentEnabled) {
-          Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-            PersistentTerminalBackend.entries.forEach { backend ->
-              AuthenticationChoice(
-                title = backend.compactTitle,
-                selected = persistentBackend == backend,
-                modifier = Modifier.weight(1f),
-              ) { persistentBackend = backend }
-            }
-          }
-          OutlinedTextField(
-            value = persistentName,
-            onValueChange = { persistentName = it },
-            modifier = Modifier.fillMaxWidth(),
-            label = { Text("Session name") },
-            isError = validatedPersistentName == null,
-            singleLine = true,
-          )
-        }
         addHostRequirement?.let {
-          Text(it, color = ShellowColors.TerminalMuted, style = MaterialTheme.typography.labelSmall)
-        }
+          Text(it, color = ShellowColors.Warning, style = MaterialTheme.typography.labelSmall)
+        } ?: Text(
+          if (name.isBlank() && normalizedHost.isNotEmpty()) "Generated name: $generatedName"
+          else "Only Host is required. New profiles use Terminal and Auto authentication.",
+          color = ShellowColors.TerminalMuted,
+          style = MaterialTheme.typography.labelSmall,
+        )
       }
     },
     confirmButton = {
@@ -6648,19 +6617,13 @@ private fun AddHostDialog(
         onClick = {
           onAdd(
             HostProfile(
-              name = name.trim(),
-              host = host.trim(),
+              name = name.trim().ifEmpty { generatedName },
+              host = normalizedHost,
               port = parsedPort ?: 22,
-              username = username.trim(),
-              authentication = authentication,
-              launchKind = launchKind,
+              username = normalizedUser,
+              authentication = AuthenticationKind.Automatic,
+              launchKind = ProfileLaunchKind.Terminal,
               trustedHostKeySha256 = null,
-              persistentTerminal =
-                if (launchKind == ProfileLaunchKind.Terminal && persistentEnabled && validatedPersistentName != null) {
-                  PersistentTerminalConfiguration(validatedPersistentName, persistentBackend)
-                } else {
-                  null
-                },
             ),
           )
         },

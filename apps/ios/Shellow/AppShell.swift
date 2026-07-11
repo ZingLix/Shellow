@@ -39,6 +39,12 @@ private struct PasswordPromptRequest: Identifiable {
     var reason: String?
 }
 
+private struct ConnectionNotice: Identifiable {
+    let id = UUID()
+    var title: String
+    var message: String
+}
+
 private struct StoredPrivateKeyAuth {
     var credential: SSHKeyCredential
     var privateKeyPEM: String
@@ -69,6 +75,7 @@ struct AppShell: View {
     @State private var codexReconnectTarget: CodexReconnectTarget?
     @State private var claudeReconnectTarget: ClaudeReconnectTarget?
     @State private var passwordPrompt: PasswordPromptRequest?
+    @State private var connectionNotice: ConnectionNotice?
     @State private var isSettingsPresented = false
     @State private var terminalRenderTick = 0
 
@@ -96,9 +103,6 @@ struct AppShell: View {
                     Task {
                         await connectHost(profile, mode: .claude)
                     }
-                },
-                probeCapabilities: { profile in
-                    await probeHostCapabilities(profile)
                 }
             )
             .navigationDestination(for: ShellowRoute.self) { route in
@@ -129,6 +133,13 @@ struct AppShell: View {
                     }
                 )
                 .presentationDetents([.large])
+            }
+            .alert(item: $connectionNotice) { notice in
+                Alert(
+                    title: Text(notice.title),
+                    message: Text(notice.message),
+                    dismissButton: .default(Text("OK"))
+                )
             }
         }
         .tint(ShellowTheme.accent)
@@ -416,12 +427,13 @@ struct AppShell: View {
 
     @MainActor
     private func connectHost(_ profile: HostProfile, mode: HostConnectMode) async {
-        if let savedPassword = secretStore.loadSecret(for: profile, kind: .password) {
-            startPasswordConnection(profile: profile, password: savedPassword, mode: mode)
-            return
-        }
+        let savedPassword = secretStore.loadSecret(for: profile, kind: .password)
 
         if profile.authentication == .password {
+            if let savedPassword {
+                startPasswordConnection(profile: profile, password: savedPassword, mode: mode)
+                return
+            }
             passwordPrompt = PasswordPromptRequest(
                 profile: profile,
                 mode: mode,
@@ -430,13 +442,26 @@ struct AppShell: View {
             return
         }
 
-        let keys = storedPrivateKeyAuths()
+        let keys = storedPrivateKeyAuths(for: profile)
         guard !keys.isEmpty else {
-            passwordPrompt = PasswordPromptRequest(
-                profile: profile,
-                mode: mode,
-                reason: "No saved SSH key is available. Enter a password to connect instead."
-            )
+            if profile.authentication == .automatic {
+                if let savedPassword {
+                    startPasswordConnection(profile: profile, password: savedPassword, mode: mode)
+                } else {
+                    passwordPrompt = PasswordPromptRequest(
+                        profile: profile,
+                        mode: mode,
+                        reason: "No saved SSH key is available. Enter the password for this host."
+                    )
+                }
+            } else {
+                connectionNotice = ConnectionNotice(
+                    title: "SSH Key Unavailable",
+                    message: profile.preferredKeyID == nil
+                        ? "This profile only uses SSH keys, but no saved key is available."
+                        : "The SSH key selected for this profile is no longer available."
+                )
+            }
             return
         }
 
@@ -454,11 +479,23 @@ struct AppShell: View {
             reconnectTarget = nil
             codexReconnectTarget = nil
             claudeReconnectTarget = nil
-            passwordPrompt = PasswordPromptRequest(
-                profile: profile,
-                mode: mode,
-                reason: "Saved SSH keys did not authenticate. Enter a password to continue."
-            )
+            path = []
+            if profile.authentication == .automatic {
+                if let savedPassword {
+                    startPasswordConnection(profile: profile, password: savedPassword, mode: mode)
+                } else {
+                    passwordPrompt = PasswordPromptRequest(
+                        profile: profile,
+                        mode: mode,
+                        reason: "Saved SSH keys did not authenticate. Enter a password to continue."
+                    )
+                }
+            } else {
+                connectionNotice = ConnectionNotice(
+                    title: "SSH Key Authentication Failed",
+                    message: "None of the SSH keys selected for this profile authenticated successfully. Password fallback is disabled."
+                )
+            }
         }
     }
 
@@ -670,8 +707,14 @@ struct AppShell: View {
         return current
     }
 
-    private func storedPrivateKeyAuths() -> [StoredPrivateKeyAuth] {
+    private func storedPrivateKeyAuths(for profile: HostProfile? = nil) -> [StoredPrivateKeyAuth] {
         sshKeys.compactMap { credential in
+            if let profile,
+               profile.authentication == .privateKey,
+               let preferredKeyID = profile.preferredKeyID,
+               credential.id != preferredKeyID {
+                return nil
+            }
             guard
                 let privateKeyPEM = secretStore.loadSecret(forKeyID: credential.id, kind: .privateKey),
                 privateKeyLooksUsable(privateKeyPEM)

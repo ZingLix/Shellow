@@ -946,6 +946,7 @@ private struct RendererFrameReport: Decodable {
 private extension AuthenticationKind {
     var ffiValue: UInt8 {
         switch self {
+        case .automatic: 0
         case .password: 0
         case .privateKey: 1
         }
