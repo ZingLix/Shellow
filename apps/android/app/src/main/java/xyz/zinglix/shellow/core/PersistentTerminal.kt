@@ -94,6 +94,97 @@ data class PersistentTerminalConfiguration(
   }
 }
 
+data class RemoteTerminalSessionSummary(
+  val name: String,
+  val isAttached: Boolean,
+  val windowCount: Int?,
+)
+
+data class RemoteTerminalSessionCatalog(
+  val sessions: List<RemoteTerminalSessionSummary> = emptyList(),
+  val errorMessage: String? = null,
+)
+
+object RemoteTerminalSessionProbe {
+  private const val Marker = "__SHELLOW_SESSIONS_V1__"
+
+  fun command(backend: PersistentTerminalBackend): String {
+    val body =
+      when (backend) {
+        PersistentTerminalBackend.Tmux ->
+          """
+          tmux list-sessions -F 'session|#{session_name}|#{session_attached}|#{session_windows}' 2>/dev/null || true
+          """.trimIndent()
+        PersistentTerminalBackend.Screen ->
+          """
+          screen -ls 2>/dev/null | awk '
+            /^[[:space:]]*[0-9]+[.]/ {
+              name=${'$'}1; sub(/^[0-9]+[.]/, "", name);
+              attached=(index(${'$'}0, "(Attached)") > 0 ? 1 : 0);
+              printf "session|%s|%d|\n", name, attached;
+            }
+          ' || true
+          """.trimIndent()
+        PersistentTerminalBackend.Zellij ->
+          """
+          zellij list-sessions --no-formatting 2>/dev/null | awk '
+            NF {
+              name=${'$'}1;
+              if (name ~ /^[A-Za-z0-9][A-Za-z0-9_-]*${'$'}/) {
+                attached=(index(tolower(${'$'}0), "current") > 0 || index(tolower(${'$'}0), "attached") > 0 ? 1 : 0);
+                printf "session|%s|%d|\n", name, attached;
+              }
+            }
+          ' || true
+          """.trimIndent()
+      }
+
+    return """
+      LC_ALL=C
+      PATH="${'$'}PATH:/opt/homebrew/bin:/usr/local/bin:/home/linuxbrew/.linuxbrew/bin:${'$'}HOME/.local/bin:${'$'}HOME/bin"
+      export PATH
+      printf '$Marker\n'
+      if command -v ${backend.executable} >/dev/null 2>&1; then
+      $body
+      else
+        printf 'error|${backend.displayTitle} is not installed on this host.\n'
+      fi
+    """.trimIndent()
+  }
+
+  fun parse(output: String): RemoteTerminalSessionCatalog? {
+    val lines = output.replace("\r", "").split('\n')
+    if (Marker !in lines) return null
+
+    val sessions = linkedMapOf<String, RemoteTerminalSessionSummary>()
+    var errorMessage: String? = null
+    lines.forEach { line ->
+      val fields = line.split('|')
+      when {
+        fields.firstOrNull() == "session" && fields.size >= 4 -> {
+          val name = PersistentTerminalConfiguration.validatedName(fields[1]) ?: return@forEach
+          sessions.putIfAbsent(
+            name,
+            RemoteTerminalSessionSummary(
+              name = name,
+              isAttached = fields[2].toIntOrNull()?.let { it > 0 } ?: false,
+              windowCount = fields[3].toIntOrNull(),
+            ),
+          )
+        }
+        fields.firstOrNull() == "error" && fields.size >= 2 -> {
+          errorMessage = fields.drop(1).joinToString("|")
+        }
+      }
+    }
+
+    return RemoteTerminalSessionCatalog(
+      sessions = sessions.values.sortedBy { it.name.lowercase(Locale.ROOT) },
+      errorMessage = errorMessage,
+    )
+  }
+}
+
 private fun Char.isAsciiAlphaNumeric(): Boolean = this in 'a'..'z' || this in 'A'..'Z' || this in '0'..'9'
 
 enum class RemoteComponentSupportLevel(val wire: String, val title: String) {

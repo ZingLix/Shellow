@@ -146,9 +146,13 @@ import xyz.zinglix.shellow.core.HostProfile
 import xyz.zinglix.shellow.core.IntegrationReport
 import xyz.zinglix.shellow.core.PersistentTerminalBackend
 import xyz.zinglix.shellow.core.PersistentTerminalConfiguration
+import xyz.zinglix.shellow.core.ProfileLaunchKind
 import xyz.zinglix.shellow.core.RemoteComponentSupportLevel
 import xyz.zinglix.shellow.core.RemoteHostCapabilityProbe
 import xyz.zinglix.shellow.core.RemoteHostProbeOutcome
+import xyz.zinglix.shellow.core.RemoteTerminalSessionCatalog
+import xyz.zinglix.shellow.core.RemoteTerminalSessionProbe
+import xyz.zinglix.shellow.core.RemoteTerminalSessionSummary
 import xyz.zinglix.shellow.core.ShellowCoreSession
 import xyz.zinglix.shellow.core.SSHSecretKind
 import xyz.zinglix.shellow.core.SSHSecretStore
@@ -275,7 +279,23 @@ private data class AppDisplaySettings(
   val fontSizeSp: Float = 14f,
   val lineHeightScale: Float = 1f,
   val colorScheme: ShellowColorScheme = ShellowColorScheme.System,
+  val terminalTheme: TerminalThemeSelection = TerminalThemeSelection.ShellowDark,
 )
+
+private enum class TerminalThemeSelection(
+  val wire: String,
+  val title: String,
+  val background: ComposeColor,
+) {
+  ShellowDark("shellow_dark", "Shellow Dark", ComposeColor(0xFF0D0F0E)),
+  Midnight("midnight", "Midnight", ComposeColor(0xFF0B1220)),
+  Amber("amber", "Amber", ComposeColor(0xFF17130D)),
+  PaperLight("paper_light", "Paper Light", ComposeColor(0xFFFAF8F2));
+
+  companion object {
+    fun fromWire(value: String?) = entries.firstOrNull { it.wire == value } ?: ShellowDark
+  }
+}
 
 private data class SSHKeyCredential(
   val id: String = UUID.randomUUID().toString(),
@@ -377,7 +397,8 @@ fun ShellowApp() {
   val context = LocalContext.current
   val secretStore = remember { SSHSecretStore(context) }
   val scope = rememberCoroutineScope()
-  var displaySettings by remember { mutableStateOf(loadDisplaySettings(context)) }
+  val initialDisplaySettings = remember(context) { loadDisplaySettings(context) }
+  var displaySettings by remember { mutableStateOf(initialDisplaySettings) }
   val profiles =
     remember {
       mutableStateListOf<HostProfile>().also { profiles ->
@@ -391,7 +412,10 @@ fun ShellowApp() {
       }
     }
   var screen by remember { mutableStateOf(AppScreen.Hosts) }
-  var session by remember { mutableStateOf(core.snapshot()) }
+  var session by remember {
+    core.setTerminalTheme(initialDisplaySettings.terminalTheme.wire)
+    mutableStateOf(core.snapshot())
+  }
   var codexSnapshot by remember { mutableStateOf(CodexSnapshot.disconnected()) }
   var reconnectTarget by remember { mutableStateOf<ReconnectTarget?>(null) }
   var codexReconnectTarget by remember { mutableStateOf<CodexReconnectTarget?>(null) }
@@ -479,6 +503,47 @@ fun ShellowApp() {
       lastOutcome = outcome
     }
     return lastOutcome
+  }
+
+  suspend fun loadRemoteTerminalSessions(
+    profile: HostProfile,
+    configuration: PersistentTerminalConfiguration,
+  ): RemoteTerminalSessionCatalog {
+    val target = reconnectTarget
+    if (target == null || target.profile().id != profile.id) {
+      return RemoteTerminalSessionCatalog(errorMessage = "Reconnect this profile to load remote sessions.")
+    }
+
+    val command = RemoteTerminalSessionProbe.command(configuration.backend)
+    val result =
+      withContext(Dispatchers.IO) {
+        ShellowCoreSession().use { probeCore ->
+          when (target) {
+            is ReconnectTarget.Password ->
+              probeCore.connectPasswordExec(profile, target.password, command)
+            is ReconnectTarget.PrivateKey ->
+              probeCore.connectPrivateKeyExec(
+                profile,
+                target.privateKeyPem,
+                target.passphrase,
+                command,
+              )
+            is ReconnectTarget.Preview -> null
+          }
+        }
+      }
+      ?: return RemoteTerminalSessionCatalog(errorMessage = "Remote sessions are unavailable in preview mode.")
+
+    val output = result.rows.joinToString("\n") { it.text }
+    return RemoteTerminalSessionProbe.parse(output)
+      ?: RemoteTerminalSessionCatalog(
+        errorMessage =
+          result.rows
+            .asReversed()
+            .firstOrNull { it.text.isNotBlank() }
+            ?.text
+            ?: "The host did not return a recognizable session list.",
+      )
   }
 
   fun captureObservedHostKeyIfNeeded(next: TerminalSession) {
@@ -888,6 +953,8 @@ fun ShellowApp() {
     }
   }
 
+  val activeTerminalProfile = reconnectTarget?.profile()
+
   ShellowTheme(colorScheme = displaySettings.colorScheme) {
     Box(
       modifier =
@@ -902,7 +969,16 @@ fun ShellowApp() {
           TerminalScreen(
             session = session,
             displaySettings = displaySettings,
-            persistentTerminal = reconnectTarget?.profile()?.persistentTerminal,
+            profileName = activeTerminalProfile?.name ?: session.title,
+            persistentTerminal = activeTerminalProfile?.persistentTerminal,
+            loadPersistentSessions =
+              activeTerminalProfile?.let { profile ->
+                profile.persistentTerminal?.let { configuration ->
+                  {
+                    loadRemoteTerminalSessions(profile, configuration)
+                  }
+                }
+              },
             onBackToHosts = { screen = AppScreen.Hosts },
             onInput = { input -> updateSession(core.sendTerminalInput(input)) },
             onReconnect = if (reconnectTarget == null) null else ::reconnect,
@@ -924,8 +1000,16 @@ fun ShellowApp() {
             onSendMessage = { message ->
               updateCodexSnapshot(core.sendCodexMessage(message))
             },
-            onUpdateSettings = { model, approvalPolicy, sandbox ->
-              updateCodexSnapshot(core.updateCodexSettings(model, approvalPolicy, sandbox))
+            onUpdateSettings = { model, reasoningEffort, serviceTier, approvalPolicy, sandbox ->
+              updateCodexSnapshot(
+                core.updateCodexSettings(
+                  model,
+                  reasoningEffort,
+                  serviceTier,
+                  approvalPolicy,
+                  sandbox,
+                ),
+              )
             },
             onBrowseDirectory = { path ->
               updateCodexSnapshot(withContext(Dispatchers.IO) { core.browseCodexDirectory(path) })
@@ -1028,7 +1112,12 @@ fun ShellowApp() {
             report = session.integration,
             displaySettings = displaySettings,
             onBack = { screen = AppScreen.Hosts },
-            onDisplaySettingsChange = { displaySettings = it },
+            onDisplaySettingsChange = { updated ->
+              if (updated.terminalTheme != displaySettings.terminalTheme) {
+                core.setTerminalTheme(updated.terminalTheme.wire)
+              }
+              displaySettings = updated
+            },
           )
       }
 
@@ -1052,7 +1141,7 @@ private fun CodexScreen(
   snapshot: CodexSnapshot,
   onBackToHosts: () -> Unit,
   onSendMessage: (String) -> Unit,
-  onUpdateSettings: (String, String, String) -> Unit,
+  onUpdateSettings: (String, String, String, String, String) -> Unit,
   onBrowseDirectory: suspend (String) -> Unit,
   onListThreads: suspend (String, String, String, Boolean, Boolean) -> Unit,
   onStartThread: suspend (String) -> Unit,
@@ -1073,7 +1162,7 @@ private fun CodexScreen(
   var draft by remember { mutableStateOf("") }
   var selectedPath by remember { mutableStateOf("") }
   var historySearch by remember { mutableStateOf("") }
-  var homeRoute by remember { mutableStateOf(CodexHomeRoute.Overview) }
+  var homeRoute by remember { mutableStateOf(CodexHomeRoute.Draft) }
   var draftReturnRoute by remember { mutableStateOf(CodexHomeRoute.Overview) }
   var threadReturnRoute by remember { mutableStateOf(CodexHomeRoute.Overview) }
   var threadReturnScope by remember { mutableStateOf(CodexHistoryScope.AllProjects) }
@@ -1082,7 +1171,11 @@ private fun CodexScreen(
   var showArchivedThreads by remember { mutableStateOf(false) }
   var didLoadProjectState by remember { mutableStateOf(false) }
   var showSettings by remember { mutableStateOf(false) }
+  var showSessionSwitcher by remember { mutableStateOf(false) }
+  var showDirectoryPicker by remember { mutableStateOf(false) }
   var settingsModel by remember { mutableStateOf("") }
+  var settingsReasoningEffort by remember { mutableStateOf("") }
+  var settingsServiceTier by remember { mutableStateOf("") }
   var settingsApprovalPolicy by remember { mutableStateOf("") }
   var settingsSandbox by remember { mutableStateOf("") }
   var renameTarget by remember { mutableStateOf<CodexThreadSummary?>(null) }
@@ -1096,13 +1189,6 @@ private fun CodexScreen(
   val scope = rememberCoroutineScope()
   val selectedProjectPath = selectedPath.trim()
   val historyCwd = if (historyScope == CodexHistoryScope.CurrentProject) selectedProjectPath else ""
-  val knownProjectPaths =
-    remember(snapshot.projects.recent, snapshot.projects.current, snapshot.cwd) {
-      mergeProjects(
-        snapshot.projects.recent,
-        listOfNotNull(snapshot.projects.current, snapshot.cwd),
-      )
-    }
   val canSend =
     snapshot.status == CodexStatus.Connected &&
       snapshot.threadId != null &&
@@ -1123,14 +1209,27 @@ private fun CodexScreen(
     }
   val settingsCanApply =
     settingsModel.trim() != snapshot.settings.model.orEmpty().trim() ||
+      settingsReasoningEffort != snapshot.settings.reasoningEffort.orEmpty() ||
+      settingsServiceTier != snapshot.settings.serviceTier.orEmpty() ||
       settingsApprovalPolicy != snapshot.settings.approvalPolicy.orEmpty() ||
       settingsSandbox != snapshot.settings.sandbox.orEmpty()
   val showCodexSettings = {
     settingsModel = snapshot.settings.model.orEmpty()
+    settingsReasoningEffort = snapshot.settings.reasoningEffort.orEmpty()
+    settingsServiceTier = snapshot.settings.serviceTier.orEmpty()
     settingsApprovalPolicy = snapshot.settings.approvalPolicy.orEmpty()
     settingsSandbox = snapshot.settings.sandbox.orEmpty()
     showSettings = true
   }
+  val codexSessionThreads =
+    remember(snapshot.threads.threads, snapshot.threadDetail.thread) {
+      buildList {
+        snapshot.threadDetail.thread?.let { add(it) }
+        snapshot.threads.threads.forEach { thread ->
+          if (none { it.id == thread.id }) add(thread)
+        }
+      }
+    }
 
   val chatScrollSignature =
     remember(snapshot.messages, snapshot.pendingApprovals, snapshot.turnActive) {
@@ -1174,6 +1273,8 @@ private fun CodexScreen(
 
   LaunchedEffect(snapshot.settings) {
     settingsModel = snapshot.settings.model.orEmpty()
+    settingsReasoningEffort = snapshot.settings.reasoningEffort.orEmpty()
+    settingsServiceTier = snapshot.settings.serviceTier.orEmpty()
     settingsApprovalPolicy = snapshot.settings.approvalPolicy.orEmpty()
     settingsSandbox = snapshot.settings.sandbox.orEmpty()
   }
@@ -1195,7 +1296,11 @@ private fun CodexScreen(
       }
       onListThreads("", historySearch, "", showArchivedThreads, false)
     }
-    isShowingThread = snapshot.threadId != null
+    if (snapshot.threadId != null) {
+      isShowingThread = true
+    } else if (snapshot.status == CodexStatus.Connected) {
+      isShowingThread = false
+    }
   }
 
   val returnToThreadOrigin: () -> Unit = {
@@ -1227,7 +1332,7 @@ private fun CodexScreen(
   }
 
   val handleCodexBack: () -> Unit = {
-    if (isShowingThread && snapshot.threadId != null) {
+    if (isShowingThread) {
       returnToThreadOrigin()
     } else {
       when (homeRoute) {
@@ -1255,22 +1360,88 @@ private fun CodexScreen(
 
   BackHandler(onBack = handleCodexBack)
 
+  if (showDirectoryPicker) {
+    CodexDirectoryPickerDialog(
+      snapshot = snapshot,
+      selectedPath = selectedProjectPath,
+      onOpenDirectory = { path ->
+        scope.launch { onBrowseDirectory(path) }
+      },
+      onSelectDirectory = { path ->
+        selectedPath = path
+        showDirectoryPicker = false
+      },
+      onDismiss = { showDirectoryPicker = false },
+    )
+  }
+
   if (showSettings) {
     CodexSettingsDialog(
       model = settingsModel,
       modelOptions = modelOptions,
       isLoadingModels = snapshot.settings.isLoadingModels,
       modelsError = snapshot.settings.modelsError,
+      reasoningEffort = settingsReasoningEffort,
+      serviceTier = settingsServiceTier,
       approvalPolicy = settingsApprovalPolicy,
       sandbox = settingsSandbox,
       canApply = settingsCanApply,
-      onModelChange = { settingsModel = it },
+      onModelChange = {
+        settingsModel = it
+        settingsReasoningEffort = ""
+        settingsServiceTier = ""
+      },
+      onReasoningEffortChange = { settingsReasoningEffort = it },
+      onServiceTierChange = { settingsServiceTier = it },
       onApprovalPolicyChange = { settingsApprovalPolicy = it },
       onSandboxChange = { settingsSandbox = it },
       onDismiss = { showSettings = false },
       onApply = {
-        onUpdateSettings(settingsModel.trim(), settingsApprovalPolicy, settingsSandbox)
+        onUpdateSettings(
+          settingsModel.trim(),
+          settingsReasoningEffort,
+          settingsServiceTier,
+          settingsApprovalPolicy,
+          settingsSandbox,
+        )
         showSettings = false
+      },
+    )
+  }
+
+  if (showSessionSwitcher) {
+    CodexSessionSwitcherDialog(
+      profileName = snapshot.title,
+      threads = codexSessionThreads,
+      selectedThreadId = snapshot.threadId,
+      pendingApprovalCount = snapshot.pendingApprovals.size,
+      loading = snapshot.threads.isLoading,
+      errorMessage = snapshot.threads.error,
+      onDismiss = { showSessionSwitcher = false },
+      onRefresh = {
+        val cwd = selectedProjectPath.ifEmpty { snapshot.cwd.orEmpty() }
+        scope.launch { onListThreads(cwd, "", "", false, false) }
+      },
+      onNewConversation = {
+        showSessionSwitcher = false
+        draftReturnRoute = homeRoute
+        draft = ""
+        chatAutoFollow = true
+        homeRoute = CodexHomeRoute.Draft
+        isShowingThread = false
+      },
+      onResume = { thread ->
+        showSessionSwitcher = false
+        threadReturnRoute = homeRoute
+        threadReturnScope = historyScope
+        openingThreadId = thread.id
+        draft = ""
+        chatAutoFollow = true
+        scope.launch {
+          onResumeThread(thread.id)
+          isShowingThread = true
+          if (openingThreadId == thread.id) openingThreadId = null
+        }
       },
     )
   }
@@ -1342,7 +1513,15 @@ private fun CodexScreen(
         horizontalArrangement = Arrangement.spacedBy(8.dp),
       ) {
         CodexBackButton(contentDescription = "Back", onClick = handleCodexBack)
-        Column(Modifier.weight(1f)) {
+        Column(
+          Modifier
+            .weight(1f)
+            .clickable(enabled = snapshot.status == CodexStatus.Connected) {
+              showSessionSwitcher = true
+              val cwd = selectedProjectPath.ifEmpty { snapshot.cwd.orEmpty() }
+              scope.launch { onListThreads(cwd, "", "", false, false) }
+            },
+        ) {
           Text(
             codexHeaderTitle(snapshot, homeRoute, selectedProjectPath, isShowingThread),
             color = ShellowColors.TerminalText,
@@ -1351,7 +1530,12 @@ private fun CodexScreen(
             overflow = TextOverflow.Ellipsis,
           )
           Text(
-            codexHeaderSubtitle(snapshot, homeRoute, selectedProjectPath, isShowingThread),
+            buildString {
+              append(codexHeaderSubtitle(snapshot, homeRoute, selectedProjectPath, isShowingThread))
+              if (snapshot.status == CodexStatus.Connected) {
+                append(" · ${codexSessionThreads.size} ${if (codexSessionThreads.size == 1) "session" else "sessions"} ▾")
+              }
+            },
             color = ShellowColors.TerminalMuted,
             style = MaterialTheme.typography.labelSmall,
             maxLines = 1,
@@ -1593,19 +1777,15 @@ private fun CodexScreen(
         CodexHomeRoute.Draft ->
           CodexDraftChatPanel(
             selectedPath = selectedPath,
-            onSelectedPathChange = { selectedPath = it },
-            knownProjectPaths = knownProjectPaths,
             draft = draft,
             onDraftChange = { draft = it },
             canSend = canSendInitialDraft,
             isStarting = isStartingDraftThread,
             onSend = sendInitialDraft,
-            onShowProject = {
-              val path = selectedProjectPath
-              if (path.isNotEmpty()) {
-                historyScope = CodexHistoryScope.CurrentProject
-                homeRoute = CodexHomeRoute.Project
-                scope.launch { onListThreads(path, historySearch, "", showArchivedThreads, false) }
+            onChooseDirectory = {
+              if (snapshot.status == CodexStatus.Connected && selectedProjectPath.isNotEmpty()) {
+                showDirectoryPicker = true
+                scope.launch { onBrowseDirectory(selectedProjectPath) }
               }
             },
             modifier = Modifier.weight(1f),
@@ -1950,53 +2130,78 @@ private fun CodexProjectThreadsPanel(
 }
 
 @Composable
+private fun CodexNewConversationPrompt(
+  directoryName: String?,
+  onChooseDirectory: () -> Unit,
+  modifier: Modifier = Modifier,
+) {
+  Box(
+    modifier = modifier.padding(horizontal = 24.dp),
+    contentAlignment = Alignment.Center,
+  ) {
+    if (directoryName.isNullOrBlank()) {
+      Text(
+        "What should we build?",
+        color = ShellowColors.TerminalText,
+        style = MaterialTheme.typography.titleLarge,
+        fontWeight = FontWeight.SemiBold,
+        textAlign = TextAlign.Center,
+      )
+    } else {
+      Row(
+        modifier = Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.Center,
+      ) {
+        Text(
+          "What should we build in ",
+          color = ShellowColors.TerminalText,
+          style = MaterialTheme.typography.titleLarge,
+          fontWeight = FontWeight.SemiBold,
+          maxLines = 1,
+        )
+        Text(
+          directoryName,
+          modifier =
+            Modifier
+              .weight(1f, fill = false)
+              .clickable(onClick = onChooseDirectory)
+              .semantics { contentDescription = "Choose directory, current directory $directoryName" },
+          color = ShellowColors.Accent,
+          style = MaterialTheme.typography.titleLarge,
+          fontWeight = FontWeight.SemiBold,
+          textDecoration = TextDecoration.Underline,
+          maxLines = 1,
+          overflow = TextOverflow.Ellipsis,
+        )
+        Text(
+          "?",
+          color = ShellowColors.TerminalText,
+          style = MaterialTheme.typography.titleLarge,
+          fontWeight = FontWeight.SemiBold,
+        )
+      }
+    }
+  }
+}
+
+@Composable
 private fun CodexDraftChatPanel(
   selectedPath: String,
-  onSelectedPathChange: (String) -> Unit,
-  knownProjectPaths: List<String>,
   draft: String,
   onDraftChange: (String) -> Unit,
   canSend: Boolean,
   isStarting: Boolean,
   onSend: () -> Unit,
-  onShowProject: () -> Unit,
+  onChooseDirectory: () -> Unit,
   modifier: Modifier = Modifier,
 ) {
   Column(modifier = modifier.fillMaxWidth()) {
-    LazyColumn(
-      modifier = Modifier.weight(1f).fillMaxWidth().padding(horizontal = 12.dp),
-      verticalArrangement = Arrangement.spacedBy(10.dp),
-    ) {
-      item("draft-workspace") {
-        Row(
-          modifier = Modifier.fillMaxWidth().padding(top = 12.dp),
-          horizontalArrangement = Arrangement.spacedBy(8.dp),
-          verticalAlignment = Alignment.CenterVertically,
-        ) {
-          CodexInlineTextField(
-            value = selectedPath,
-            onValueChange = onSelectedPathChange,
-            modifier = Modifier.weight(1f),
-            placeholder = "Workspace path",
-            imeAction = ImeAction.Go,
-            onSubmit = {
-              if (selectedPath.isNotBlank()) {
-                onShowProject()
-              }
-            },
-          )
-          CodexForwardButton(
-            contentDescription = "Show Workspace Conversations",
-            enabled = selectedPath.isNotBlank(),
-            onClick = onShowProject,
-          )
-        }
-      }
-
-      items(knownProjectPaths, key = { it }) { path ->
-        CodexDirectoryRow(lastPathComponent(path), path) { onSelectedPathChange(path) }
-      }
-    }
+    CodexNewConversationPrompt(
+      directoryName = selectedPath.trim().takeIf { it.isNotEmpty() }?.let(::lastPathComponent),
+      onChooseDirectory = onChooseDirectory,
+      modifier = Modifier.weight(1f).fillMaxWidth(),
+    )
 
     Row(
       modifier =
@@ -2020,6 +2225,60 @@ private fun CodexDraftChatPanel(
       }
     }
   }
+}
+
+@Composable
+private fun CodexDirectoryPickerDialog(
+  snapshot: CodexSnapshot,
+  selectedPath: String,
+  onOpenDirectory: (String) -> Unit,
+  onSelectDirectory: (String) -> Unit,
+  onDismiss: () -> Unit,
+) {
+  val currentPath = snapshot.directory.path?.trim().orEmpty().ifBlank { selectedPath.trim() }
+
+  AlertDialog(
+    onDismissRequest = onDismiss,
+    containerColor = ShellowColors.PanelBackground,
+    titleContentColor = ShellowColors.TerminalText,
+    textContentColor = ShellowColors.TerminalText,
+    title = { Text("Choose Directory") },
+    text = {
+      Column(
+        modifier = Modifier.fillMaxWidth(),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+      ) {
+        if (currentPath.isNotEmpty()) {
+          Text(
+            currentPath,
+            color = ShellowColors.TerminalMuted,
+            style = MaterialTheme.typography.labelSmall,
+            fontFamily = FontFamily.Monospace,
+            maxLines = 2,
+            overflow = TextOverflow.Ellipsis,
+          )
+        }
+        CodexDirectoryList(
+          snapshot = snapshot,
+          onOpenDirectory = onOpenDirectory,
+          modifier = Modifier.fillMaxWidth().heightIn(min = 180.dp, max = 420.dp),
+        )
+      }
+    },
+    confirmButton = {
+      TextButton(
+        onClick = { onSelectDirectory(currentPath) },
+        enabled = currentPath.isNotEmpty() && !snapshot.directory.isLoading,
+      ) {
+        Text("Choose")
+      }
+    },
+    dismissButton = {
+      TextButton(onClick = onDismiss) {
+        Text("Cancel")
+      }
+    },
+  )
 }
 
 @Composable
@@ -2453,6 +2712,96 @@ private fun CodexNewConversationButton(
 }
 
 @Composable
+private fun CodexSessionSwitcherDialog(
+  profileName: String,
+  threads: List<CodexThreadSummary>,
+  selectedThreadId: String?,
+  pendingApprovalCount: Int,
+  loading: Boolean,
+  errorMessage: String?,
+  onDismiss: () -> Unit,
+  onRefresh: () -> Unit,
+  onNewConversation: () -> Unit,
+  onResume: (CodexThreadSummary) -> Unit,
+) {
+  AlertDialog(
+    onDismissRequest = onDismiss,
+    containerColor = ShellowColors.PanelBackground,
+    titleContentColor = ShellowColors.TerminalText,
+    textContentColor = ShellowColors.TerminalText,
+    title = { Text("Sessions") },
+    text = {
+      Column(
+        modifier = Modifier.heightIn(max = 520.dp).verticalScroll(rememberScrollState()),
+        verticalArrangement = Arrangement.spacedBy(10.dp),
+      ) {
+        Text("Codex on $profileName", color = ShellowColors.TerminalMuted, style = MaterialTheme.typography.labelSmall)
+        when {
+          loading && threads.isEmpty() -> {
+            Row(horizontalArrangement = Arrangement.spacedBy(10.dp), verticalAlignment = Alignment.CenterVertically) {
+              CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
+              Text("Loading conversations…", color = ShellowColors.TerminalMuted)
+            }
+          }
+          threads.isEmpty() -> {
+            Text(
+              errorMessage ?: "No conversations yet.",
+              color = ShellowColors.TerminalMuted,
+              style = MaterialTheme.typography.bodySmall,
+            )
+          }
+          else -> {
+            threads.forEach { thread ->
+              Row(
+                modifier =
+                  Modifier
+                    .fillMaxWidth()
+                    .background(ShellowColors.KeyBackground.copy(alpha = 0.42f), RoundedCornerShape(10.dp))
+                    .clickable(enabled = thread.id != selectedThreadId) { onResume(thread) }
+                    .padding(horizontal = 12.dp, vertical = 10.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+              ) {
+                Text(
+                  if (thread.id == selectedThreadId) "●" else "○",
+                  color = if (thread.id == selectedThreadId) ShellowColors.Accent else ShellowColors.TerminalMuted,
+                )
+                Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                  Text(
+                    thread.displayTitle,
+                    color = ShellowColors.TerminalText,
+                    fontWeight = FontWeight.SemiBold,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                  )
+                  Text(
+                    codexCompactPath(thread.cwd),
+                    color = ShellowColors.TerminalMuted,
+                    style = MaterialTheme.typography.labelSmall,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                  )
+                }
+                thread.statusIndicator?.let { indicator ->
+                  CodexThreadStatusBadge(indicator)
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    confirmButton = { TextButton(onClick = onDismiss) { Text("Done") } },
+    dismissButton = {
+      Row {
+        TextButton(enabled = !loading, onClick = onRefresh) { Text("Refresh") }
+        TextButton(onClick = onNewConversation) { Text("New") }
+      }
+    },
+  )
+}
+
+@Composable
 private fun CodexBackButton(
   contentDescription: String,
   onClick: () -> Unit,
@@ -2747,6 +3096,99 @@ private fun CodexHistoryList(
   }
 }
 
+private enum class CodexThreadStatusIndicatorKind {
+  Running,
+  Approval,
+  UserInput,
+  Failed,
+  SystemError,
+}
+
+private data class CodexThreadStatusIndicator(
+  val kind: CodexThreadStatusIndicatorKind,
+  val title: String,
+  val accessibilityLabel: String,
+)
+
+private val CodexThreadSummary.statusIndicator: CodexThreadStatusIndicator?
+  get() {
+    if (status == "systemError") {
+      return CodexThreadStatusIndicator(CodexThreadStatusIndicatorKind.SystemError, "Error", "Codex system error")
+    }
+    if (status == "active") {
+      if (pendingApprovalCount > 0 || "waitingOnApproval" in activeFlags) {
+        val count = pendingApprovalCount.coerceAtLeast(1)
+        return CodexThreadStatusIndicator(
+          CodexThreadStatusIndicatorKind.Approval,
+          if (count > 1) "Approval $count" else "Approval",
+          "$count pending Codex approval${if (count == 1) "" else "s"}",
+        )
+      }
+      if ("waitingOnUserInput" in activeFlags) {
+        return CodexThreadStatusIndicator(CodexThreadStatusIndicatorKind.UserInput, "Reply needed", "Codex needs a reply")
+      }
+      return CodexThreadStatusIndicator(CodexThreadStatusIndicatorKind.Running, "Running", "Codex is running")
+    }
+    if (pendingApprovalCount > 0 || "waitingOnApproval" in activeFlags) {
+      val count = pendingApprovalCount.coerceAtLeast(1)
+      return CodexThreadStatusIndicator(
+        CodexThreadStatusIndicatorKind.Approval,
+        if (count > 1) "Approval $count" else "Approval",
+        "$count pending Codex approval${if (count == 1) "" else "s"}",
+      )
+    }
+    if ("waitingOnUserInput" in activeFlags) {
+      return CodexThreadStatusIndicator(CodexThreadStatusIndicatorKind.UserInput, "Reply needed", "Codex needs a reply")
+    }
+    if (lastTurnStatus == "failed") {
+      return CodexThreadStatusIndicator(
+        CodexThreadStatusIndicatorKind.Failed,
+        "Failed",
+        lastTurnError?.let { "Codex failed: $it" } ?: "Codex failed",
+      )
+    }
+    if (lastTurnStatus == "inProgress") {
+      return CodexThreadStatusIndicator(CodexThreadStatusIndicatorKind.Running, "Running", "Codex is running")
+    }
+    return null
+  }
+
+@Composable
+private fun CodexThreadStatusBadge(indicator: CodexThreadStatusIndicator) {
+  val tint =
+    when (indicator.kind) {
+      CodexThreadStatusIndicatorKind.Running -> ShellowColors.Accent
+      CodexThreadStatusIndicatorKind.Approval,
+      CodexThreadStatusIndicatorKind.UserInput -> ShellowColors.Warning
+      CodexThreadStatusIndicatorKind.Failed,
+      CodexThreadStatusIndicatorKind.SystemError -> MaterialTheme.colorScheme.error
+    }
+  Row(
+    modifier =
+      Modifier
+        .background(tint.copy(alpha = 0.13f), RoundedCornerShape(12.dp))
+        .semantics { contentDescription = indicator.accessibilityLabel }
+        .padding(horizontal = 7.dp, vertical = 4.dp),
+    horizontalArrangement = Arrangement.spacedBy(4.dp),
+    verticalAlignment = Alignment.CenterVertically,
+  ) {
+    if (indicator.kind == CodexThreadStatusIndicatorKind.Running) {
+      CircularProgressIndicator(
+        modifier = Modifier.size(10.dp),
+        color = tint,
+        strokeWidth = 1.5.dp,
+      )
+    }
+    Text(
+      indicator.title,
+      color = tint,
+      style = MaterialTheme.typography.labelSmall,
+      fontWeight = FontWeight.SemiBold,
+      maxLines = 1,
+    )
+  }
+}
+
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun CodexThreadRow(
@@ -2803,6 +3245,10 @@ private fun CodexThreadRow(
       }
       if (isOpening) {
         Text("Opening", color = ShellowColors.TerminalMuted, style = MaterialTheme.typography.labelMedium, modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp))
+      } else {
+        thread.statusIndicator?.let { indicator ->
+          CodexThreadStatusBadge(indicator)
+        }
       }
     }
     DropdownMenu(
@@ -2846,7 +3292,7 @@ private fun formatCodexThreadMeta(thread: CodexThreadSummary, showProjectContext
   val formatted = SimpleDateFormat("MMM d, HH:mm", Locale.getDefault()).format(Date(timestampMs))
   val fork = if (thread.forkedFromId != null) "fork" else ""
   val project = if (showProjectContext) lastPathComponent(thread.cwd) else ""
-  return listOf(project, formatted, thread.status, fork).filter { it.isNotBlank() }.joinToString(" · ")
+  return listOf(project, formatted, fork).filter { it.isNotBlank() }.joinToString(" · ")
 }
 
 @Composable
@@ -2855,9 +3301,13 @@ private fun CodexSettingsDialog(
   modelOptions: List<CodexModelOption>,
   isLoadingModels: Boolean,
   modelsError: String?,
+  reasoningEffort: String,
+  serviceTier: String,
   approvalPolicy: String,
   sandbox: String,
   onModelChange: (String) -> Unit,
+  onReasoningEffortChange: (String) -> Unit,
+  onServiceTierChange: (String) -> Unit,
   onApprovalPolicyChange: (String) -> Unit,
   onSandboxChange: (String) -> Unit,
   onDismiss: () -> Unit,
@@ -2869,6 +3319,13 @@ private fun CodexSettingsDialog(
       listOf("" to "Default") +
         codexModelPickerOptions(modelOptions, model).map { it.id to it.name }
     }
+  val selectedModel = modelOptions.firstOrNull { it.id == model }
+  val reasoningChoices =
+    listOf("" to "Use model default") +
+      selectedModel.orEmptyReasoningEfforts().map { it.id to it.name }
+  val speedChoices =
+    listOf("" to "Standard") +
+      selectedModel.orEmptyServiceTiers().map { it.id to it.name }
 
   AlertDialog(
     onDismissRequest = onDismiss,
@@ -2892,6 +3349,14 @@ private fun CodexSettingsDialog(
             modifier = Modifier.padding(bottom = 4.dp),
           )
         }
+        CodexOptionRow("Reasoning", reasoningEffort, reasoningChoices, onReasoningEffortChange)
+        CodexOptionRow("Speed", serviceTier, speedChoices, onServiceTierChange)
+        if (selectedModel?.serviceTiers.isNullOrEmpty()) {
+          CodexInlineStatusRow(
+            text = "Fast mode is unavailable for this model.",
+            modifier = Modifier.padding(bottom = 4.dp),
+          )
+        }
         CodexOptionRow("Approval", approvalPolicy, listOf("" to "Default", "untrusted" to "Untrusted", "on-failure" to "On failure", "on-request" to "On request", "never" to "Never"), onApprovalPolicyChange)
         CodexOptionRow("Sandbox", sandbox, listOf("" to "Default", "read-only" to "Read only", "workspace-write" to "Workspace write", "danger-full-access" to "Danger full access"), onSandboxChange)
       }
@@ -2900,6 +3365,10 @@ private fun CodexSettingsDialog(
     dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
   )
 }
+
+private fun CodexModelOption?.orEmptyReasoningEfforts() = this?.reasoningEfforts.orEmpty()
+
+private fun CodexModelOption?.orEmptyServiceTiers() = this?.serviceTiers.orEmpty()
 
 @Composable
 private fun CodexOptionRow(
@@ -3566,7 +4035,9 @@ private fun CodexApprovalCard(
 private fun TerminalScreen(
   session: TerminalSession,
   displaySettings: AppDisplaySettings,
+  profileName: String,
   persistentTerminal: PersistentTerminalConfiguration?,
+  loadPersistentSessions: (suspend () -> RemoteTerminalSessionCatalog)?,
   onBackToHosts: () -> Unit,
   onInput: (String) -> Unit,
   onReconnect: (() -> Unit)?,
@@ -3591,6 +4062,12 @@ private fun TerminalScreen(
   var searchVisible by remember { mutableStateOf(false) }
   var toolsExpanded by remember { mutableStateOf(false) }
   var persistentToolsVisible by remember { mutableStateOf(false) }
+  var persistentSessionsVisible by remember { mutableStateOf(false) }
+  var persistentSessionCatalog by remember { mutableStateOf(RemoteTerminalSessionCatalog()) }
+  var activePersistentSessionName by remember(persistentTerminal?.name) {
+    mutableStateOf(persistentTerminal?.name)
+  }
+  var refreshingPersistentSessions by remember { mutableStateOf(false) }
   var pendingDestructiveAction by remember { mutableStateOf<TerminalDestructiveAction?>(null) }
   var searchQuery by remember { mutableStateOf("") }
   var searchIndex by remember { mutableStateOf(0) }
@@ -3650,6 +4127,38 @@ private fun TerminalScreen(
   fun sendTerminalInput(value: String) {
     selection = null
     onInput(value)
+  }
+
+  suspend fun refreshPersistentSessions() {
+    val loader = loadPersistentSessions ?: return
+    if (refreshingPersistentSessions) return
+    refreshingPersistentSessions = true
+    persistentSessionCatalog = loader()
+    refreshingPersistentSessions = false
+  }
+
+  fun switchPersistentSession(name: String) {
+    val configuration = persistentTerminal ?: return
+    val validatedName = PersistentTerminalConfiguration.validatedName(name) ?: return
+    activePersistentSessionName = validatedName
+    persistentSessionsVisible = false
+    persistentToolsVisible = false
+    terminalScope.launch {
+      sendTerminalInput(configuration.backend.detachSequence)
+      delay(400)
+      sendTerminalInput("${configuration.backend.attachCommand(validatedName)}\r")
+      delay(900)
+      refreshPersistentSessions()
+    }
+  }
+
+  LaunchedEffect(session.state, persistentTerminal?.name) {
+    if (session.state == ConnectionState.Connected && persistentTerminal != null) {
+      if (activePersistentSessionName == null) {
+        activePersistentSessionName = persistentTerminal.name
+      }
+      refreshPersistentSessions()
+    }
   }
 
   LaunchedEffect(session.clipboardSequence, session.pendingClipboardText) {
@@ -3812,6 +4321,7 @@ private fun TerminalScreen(
   Column(
     Modifier
       .fillMaxSize()
+      .background(displaySettings.terminalTheme.background)
       .onPreviewKeyEvent { event ->
         if (event.type != KeyEventType.KeyDown) {
           return@onPreviewKeyEvent false
@@ -3977,6 +4487,14 @@ private fun TerminalScreen(
       }
       TerminalFloatingHeader(
         session = session,
+        profileName = profileName,
+        workspaceName = activePersistentSessionName ?: persistentTerminal?.name,
+        workspaceCount = persistentSessionCatalog.sessions.size,
+        refreshingWorkspaces = refreshingPersistentSessions,
+        onOpenWorkspaceSwitcher =
+          if (persistentTerminal == null) null else {
+            { persistentSessionsVisible = true }
+          },
         onBackToHosts = onBackToHosts,
         onReconnect = onReconnect,
         onDisconnect = onDisconnect,
@@ -4276,6 +4794,23 @@ private fun TerminalScreen(
     )
   }
 
+  if (persistentSessionsVisible && persistentTerminal != null) {
+    TerminalSessionSwitcherDialog(
+      profileName = profileName,
+      configuration = persistentTerminal,
+      catalog = persistentSessionCatalog,
+      activeSessionName = activePersistentSessionName ?: persistentTerminal.name,
+      refreshing = refreshingPersistentSessions,
+      onDismiss = { persistentSessionsVisible = false },
+      onRefresh = { terminalScope.launch { refreshPersistentSessions() } },
+      onSwitchSession = ::switchPersistentSession,
+      onOpenControls = {
+        persistentSessionsVisible = false
+        persistentToolsVisible = true
+      },
+    )
+  }
+
   if (persistentToolsVisible && persistentTerminal != null) {
     PersistentTerminalControlDialog(
       configuration = persistentTerminal,
@@ -4288,15 +4823,129 @@ private fun TerminalScreen(
         }
       },
       onSwitchSession = { name ->
-        persistentToolsVisible = false
-        terminalScope.launch {
-          sendTerminalInput(persistentTerminal.backend.detachSequence)
-          delay(400)
-          sendTerminalInput("${persistentTerminal.backend.attachCommand(name)}\r")
-        }
+        switchPersistentSession(name)
       },
     )
   }
+}
+
+@Composable
+private fun TerminalSessionSwitcherDialog(
+  profileName: String,
+  configuration: PersistentTerminalConfiguration,
+  catalog: RemoteTerminalSessionCatalog,
+  activeSessionName: String,
+  refreshing: Boolean,
+  onDismiss: () -> Unit,
+  onRefresh: () -> Unit,
+  onSwitchSession: (String) -> Unit,
+  onOpenControls: () -> Unit,
+) {
+  var newSessionName by remember(configuration.name) {
+    mutableStateOf(
+      (configuration.name.take(PersistentTerminalConfiguration.MaximumNameLength - 2) + "-2"),
+    )
+  }
+  val validatedNewSessionName = PersistentTerminalConfiguration.validatedName(newSessionName)
+
+  AlertDialog(
+    onDismissRequest = onDismiss,
+    containerColor = ShellowColors.PanelBackground,
+    titleContentColor = ShellowColors.TerminalText,
+    textContentColor = ShellowColors.TerminalText,
+    title = { Text("Sessions") },
+    text = {
+      Column(
+        modifier = Modifier.heightIn(max = 520.dp).verticalScroll(rememberScrollState()),
+        verticalArrangement = Arrangement.spacedBy(10.dp),
+      ) {
+        Text(
+          "${configuration.backend.displayTitle} on $profileName",
+          color = ShellowColors.TerminalMuted,
+          style = MaterialTheme.typography.labelSmall,
+        )
+
+        when {
+          refreshing && catalog.sessions.isEmpty() -> {
+            Row(horizontalArrangement = Arrangement.spacedBy(10.dp), verticalAlignment = Alignment.CenterVertically) {
+              CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
+              Text("Loading sessions…", color = ShellowColors.TerminalMuted)
+            }
+          }
+          catalog.sessions.isEmpty() -> {
+            Text(
+              catalog.errorMessage ?: "No remote sessions yet.",
+              color = ShellowColors.TerminalMuted,
+              style = MaterialTheme.typography.bodySmall,
+            )
+          }
+          else -> {
+            catalog.sessions.forEach { remoteSession ->
+              Row(
+                modifier =
+                  Modifier
+                    .fillMaxWidth()
+                    .background(ShellowColors.KeyBackground.copy(alpha = 0.42f), RoundedCornerShape(10.dp))
+                    .clickable(
+                      enabled = remoteSession.name != activeSessionName,
+                      onClick = { onSwitchSession(remoteSession.name) },
+                    )
+                    .padding(horizontal = 12.dp, vertical = 10.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+              ) {
+                Text(
+                  if (remoteSession.name == activeSessionName) "●" else "○",
+                  color = if (remoteSession.name == activeSessionName) ShellowColors.Accent else ShellowColors.TerminalMuted,
+                )
+                Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                  Text(
+                    remoteSession.name,
+                    color = ShellowColors.TerminalText,
+                    fontFamily = FontFamily.Monospace,
+                    fontWeight = FontWeight.SemiBold,
+                  )
+                  Text(
+                    remoteSession.windowCount?.let { count -> "$count ${if (count == 1) "window" else "windows"}" }
+                      ?: if (remoteSession.isAttached) "Active remote workspace" else "Available remote workspace",
+                    color = ShellowColors.TerminalMuted,
+                    style = MaterialTheme.typography.labelSmall,
+                  )
+                }
+                if (remoteSession.isAttached) {
+                  Text("Attached", color = ShellowColors.Success, style = MaterialTheme.typography.labelSmall)
+                }
+              }
+            }
+          }
+        }
+
+        PanelDivider()
+        Text("New session", color = ShellowColors.TerminalText, fontWeight = FontWeight.SemiBold)
+        OutlinedTextField(
+          value = newSessionName,
+          onValueChange = { newSessionName = it },
+          modifier = Modifier.fillMaxWidth(),
+          label = { Text("Session name") },
+          isError = validatedNewSessionName == null,
+          singleLine = true,
+        )
+        TextButton(
+          enabled = validatedNewSessionName != null,
+          onClick = { validatedNewSessionName?.let(onSwitchSession) },
+        ) {
+          Text("Create and switch")
+        }
+      }
+    },
+    confirmButton = { TextButton(onClick = onDismiss) { Text("Done") } },
+    dismissButton = {
+      Row {
+        TextButton(enabled = !refreshing, onClick = onRefresh) { Text("Refresh") }
+        TextButton(onClick = onOpenControls) { Text("Controls") }
+      }
+    },
+  )
 }
 
 private data class PersistentTerminalControl(
@@ -4508,6 +5157,11 @@ private fun TerminalKey(
 @Composable
 private fun TerminalFloatingHeader(
   session: TerminalSession,
+  profileName: String,
+  workspaceName: String?,
+  workspaceCount: Int,
+  refreshingWorkspaces: Boolean,
+  onOpenWorkspaceSwitcher: (() -> Unit)?,
   onBackToHosts: () -> Unit,
   onReconnect: (() -> Unit)?,
   onDisconnect: () -> Unit,
@@ -4529,14 +5183,32 @@ private fun TerminalFloatingHeader(
           .size(9.dp)
           .background(statusColor(session.state), RoundedCornerShape(9.dp))
     )
-    Text(
-      session.title,
-      modifier = Modifier.weight(1f),
-      color = ShellowColors.TerminalText,
-      style = MaterialTheme.typography.titleSmall,
-      maxLines = 1,
-      overflow = TextOverflow.Ellipsis,
-    )
+    Column(
+      modifier =
+        Modifier
+          .weight(1f)
+          .clickable(enabled = onOpenWorkspaceSwitcher != null) { onOpenWorkspaceSwitcher?.invoke() },
+      verticalArrangement = Arrangement.spacedBy(1.dp),
+    ) {
+      Text(
+        workspaceName ?: session.title,
+        color = ShellowColors.TerminalText,
+        style = MaterialTheme.typography.titleSmall,
+        maxLines = 1,
+        overflow = TextOverflow.Ellipsis,
+      )
+      Text(
+        when {
+          refreshingWorkspaces && workspaceCount == 0 -> "$profileName · Loading sessions"
+          onOpenWorkspaceSwitcher != null -> "$profileName · $workspaceCount ${if (workspaceCount == 1) "session" else "sessions"} ▾"
+          else -> profileName
+        },
+        color = ShellowColors.TerminalMuted,
+        style = MaterialTheme.typography.labelSmall,
+        maxLines = 1,
+        overflow = TextOverflow.Ellipsis,
+      )
+    }
     Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
       if (session.bellCount > 0) {
         Text(
@@ -4990,14 +5662,14 @@ private fun HostsScreen(
         horizontalArrangement = Arrangement.spacedBy(8.dp),
       ) {
         Text(
-          "Hosts",
+          "Profiles",
           modifier = Modifier.weight(1f),
           color = ShellowColors.TerminalText,
           style = MaterialTheme.typography.titleLarge,
         )
         IconButton(
           onClick = { addingProfile = true },
-          modifier = Modifier.semantics { contentDescription = "Add Host" },
+          modifier = Modifier.semantics { contentDescription = "Add Profile" },
         ) {
           Text("+", color = ShellowColors.Accent, style = MaterialTheme.typography.titleLarge)
         }
@@ -5044,7 +5716,13 @@ private fun HostsScreen(
           profiles.forEachIndexed { index, profile ->
             HostProfileRow(
               profile = profile,
-              onClick = { selectedProfile = profile },
+              onOpen = {
+                when (profile.launchKind) {
+                  ProfileLaunchKind.Terminal -> onConnectTerminal(profile)
+                  ProfileLaunchKind.Codex -> onConnectCodex(profile)
+                }
+              },
+              onEdit = { selectedProfile = profile },
             )
             if (index < profiles.lastIndex) {
               PanelDivider()
@@ -5121,18 +5799,18 @@ private fun EmptyHostsPanel(onAddHost: () -> Unit) {
     verticalArrangement = Arrangement.spacedBy(8.dp),
   ) {
     Text(
-      "No Hosts",
+      "No Profiles",
       color = ShellowColors.TerminalText,
       style = MaterialTheme.typography.bodyMedium,
       fontWeight = FontWeight.SemiBold,
     )
     Text(
-      "Add a host to start a Terminal or Codex session.",
+      "Add a profile to open a host directly in Terminal or Codex.",
       color = ShellowColors.TerminalMuted,
       style = MaterialTheme.typography.bodySmall,
     )
     TextButton(onClick = onAddHost) {
-      Text("Add Host")
+      Text("Add Profile")
     }
   }
 }
@@ -5140,26 +5818,50 @@ private fun EmptyHostsPanel(onAddHost: () -> Unit) {
 @Composable
 private fun HostProfileRow(
   profile: HostProfile,
-  onClick: () -> Unit,
+  onOpen: () -> Unit,
+  onEdit: () -> Unit,
 ) {
   Row(
     modifier =
       Modifier
         .fillMaxWidth()
-        .clickable(onClick = onClick)
         .padding(horizontal = 14.dp, vertical = 12.dp),
     verticalAlignment = Alignment.CenterVertically,
     horizontalArrangement = Arrangement.spacedBy(12.dp),
   ) {
-    Column(
-      modifier = Modifier.weight(1f),
-      verticalArrangement = Arrangement.spacedBy(2.dp),
+    Row(
+      modifier = Modifier.weight(1f).clickable(onClick = onOpen),
+      verticalAlignment = Alignment.CenterVertically,
+      horizontalArrangement = Arrangement.spacedBy(12.dp),
     ) {
-      Text(profile.name, color = ShellowColors.TerminalText, style = MaterialTheme.typography.titleSmall)
-      Text(profile.endpoint, color = ShellowColors.TerminalMuted)
-      Text(profile.hostKeyTrustTitle, color = ShellowColors.TerminalMuted, style = MaterialTheme.typography.labelSmall)
+      Text(
+        if (profile.launchKind == ProfileLaunchKind.Terminal) "T" else "C",
+        color = ShellowColors.Accent,
+        fontWeight = FontWeight.Bold,
+        modifier =
+          Modifier
+            .background(ShellowColors.Accent.copy(alpha = 0.12f), RoundedCornerShape(8.dp))
+            .padding(horizontal = 9.dp, vertical = 7.dp),
+      )
+      Column(
+        modifier = Modifier.weight(1f),
+        verticalArrangement = Arrangement.spacedBy(2.dp),
+      ) {
+        Text(profile.name, color = ShellowColors.TerminalText, style = MaterialTheme.typography.titleSmall)
+        Text("${profile.launchKind.title} · ${profile.endpoint}", color = ShellowColors.TerminalMuted)
+        profile.persistentTerminal?.takeIf { profile.launchKind == ProfileLaunchKind.Terminal }?.let { configuration ->
+          Text(
+            "${configuration.backend.compactTitle} · ${configuration.name}",
+            color = ShellowColors.Accent,
+            style = MaterialTheme.typography.labelSmall,
+          )
+        }
+      }
+      Text("Open", color = ShellowColors.Accent, style = MaterialTheme.typography.labelMedium)
     }
-    Text("Open", color = ShellowColors.Accent, style = MaterialTheme.typography.labelMedium)
+    TextButton(onClick = onEdit, modifier = Modifier.semantics { contentDescription = "Edit ${profile.name}" }) {
+      Text("Edit", color = ShellowColors.TerminalMuted, style = MaterialTheme.typography.labelMedium)
+    }
   }
 }
 
@@ -5174,6 +5876,7 @@ private fun HostConnectionDialog(
   onConnectTerminal: (HostProfile) -> Unit,
   onConnectCodex: (HostProfile) -> Unit,
 ) {
+  var launchKind by remember(profile.id) { mutableStateOf(profile.launchKind) }
   var persistentEnabled by remember(profile.id) { mutableStateOf(profile.persistentTerminal != null) }
   var persistentBackend by
     remember(profile.id) { mutableStateOf(profile.persistentTerminal?.backend ?: PersistentTerminalBackend.Tmux) }
@@ -5190,6 +5893,7 @@ private fun HostConnectionDialog(
   val validatedPersistentName = PersistentTerminalConfiguration.validatedName(persistentName)
   val workingProfile =
     profile.copy(
+      launchKind = launchKind,
       persistentTerminal =
         if (persistentEnabled && validatedPersistentName != null) {
           PersistentTerminalConfiguration(validatedPersistentName, persistentBackend)
@@ -5256,7 +5960,7 @@ private fun HostConnectionDialog(
               when {
                 hasSavedPassword -> "Connects automatically from secure storage"
                 profile.authentication == AuthenticationKind.PrivateKey && hasSavedPrivateKey -> "Tries your saved key automatically"
-                else -> "You'll authenticate after choosing a workspace"
+                else -> "You'll authenticate when opening this profile"
               },
             healthy = hasSavedPassword || (profile.authentication == AuthenticationKind.PrivateKey && hasSavedPrivateKey),
           )
@@ -5268,6 +5972,31 @@ private fun HostConnectionDialog(
         }
 
         Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+          Text("Default workspace", color = ShellowColors.TerminalText, fontWeight = FontWeight.SemiBold)
+          Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            AuthenticationChoice(
+              title = "Terminal",
+              selected = launchKind == ProfileLaunchKind.Terminal,
+              modifier = Modifier.weight(1f),
+            ) { launchKind = ProfileLaunchKind.Terminal }
+            AuthenticationChoice(
+              title = "Codex",
+              selected = launchKind == ProfileLaunchKind.Codex,
+              modifier = Modifier.weight(1f),
+            ) { launchKind = ProfileLaunchKind.Codex }
+          }
+          Text(
+            if (launchKind == ProfileLaunchKind.Terminal) {
+              "Open a remote shell and persistent workspaces"
+            } else {
+              "Open remote coding conversations"
+            },
+            color = ShellowColors.TerminalMuted,
+            style = MaterialTheme.typography.labelSmall,
+          )
+        }
+
+        if (launchKind == ProfileLaunchKind.Terminal) Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
           Row(
             modifier = Modifier.fillMaxWidth(),
             verticalAlignment = Alignment.CenterVertically,
@@ -5310,12 +6039,13 @@ private fun HostConnectionDialog(
               Text(capability.featureSummary, color = ShellowColors.Warning, style = MaterialTheme.typography.labelSmall)
             }
           }
-          TextButton(
-            enabled = persistentConfigurationValid,
-            onClick = { onSaveProfile(workingProfile) },
-          ) {
-            Text("Save terminal settings")
-          }
+        }
+
+        TextButton(
+          enabled = launchKind == ProfileLaunchKind.Codex || persistentConfigurationValid,
+          onClick = { onSaveProfile(workingProfile) },
+        ) {
+          Text("Save profile")
         }
 
         RemoteCapabilityCard(
@@ -5325,21 +6055,23 @@ private fun HostConnectionDialog(
           onRefresh = { refreshCapabilities() },
         )
 
-        Text("Choose a workspace", color = ShellowColors.TerminalText, fontWeight = FontWeight.SemiBold)
-        ConnectionModeOption(
-          title = "Terminal",
-          subtitle = "Interactive shell with keyboard tools",
-          detail = "Commands, processes, and remote files",
-          enabled = persistentConfigurationValid,
-          onClick = { onConnectTerminal(workingProfile) },
-        )
-        ConnectionModeOption(
-          title = "Codex",
-          subtitle = "Remote coding sessions and conversations",
-          detail = "Projects, threads, and approvals",
-          enabled = persistentConfigurationValid,
-          onClick = { onConnectCodex(workingProfile) },
-        )
+        Text("Open profile", color = ShellowColors.TerminalText, fontWeight = FontWeight.SemiBold)
+        if (launchKind == ProfileLaunchKind.Terminal) {
+          ConnectionModeOption(
+            title = if (persistentEnabled) "Resume Terminal" else "Terminal",
+            subtitle = if (persistentEnabled) "Persistent ${persistentBackend.displayTitle} workspaces" else "Interactive shell with keyboard tools",
+            detail = if (persistentEnabled) "Restore $persistentName, then switch sessions" else "Commands, processes, and remote files",
+            enabled = persistentConfigurationValid,
+            onClick = { onConnectTerminal(workingProfile) },
+          )
+        } else {
+          ConnectionModeOption(
+            title = "Codex",
+            subtitle = "Remote coding sessions and conversations",
+            detail = "Projects, threads, and approvals",
+            onClick = { onConnectCodex(workingProfile) },
+          )
+        }
       }
     },
     confirmButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
@@ -5456,6 +6188,7 @@ private fun AddHostDialog(
   var port by remember { mutableStateOf("22") }
   var username by remember { mutableStateOf("") }
   var authentication by remember { mutableStateOf(AuthenticationKind.Password) }
+  var launchKind by remember { mutableStateOf(ProfileLaunchKind.Terminal) }
   var persistentEnabled by remember { mutableStateOf(false) }
   var persistentBackend by remember { mutableStateOf(PersistentTerminalBackend.Tmux) }
   var persistentName by remember { mutableStateOf("shellow-session") }
@@ -5467,7 +6200,7 @@ private fun AddHostDialog(
       host.isBlank() -> "Enter a hostname or IP address."
       username.isBlank() -> "Enter the SSH username."
       parsedPort == null || parsedPort !in 1..65535 -> "Port must be a number from 1 to 65535."
-      persistentEnabled && validatedPersistentName == null -> "Session names use 1–48 ASCII letters, numbers, - or _."
+      launchKind == ProfileLaunchKind.Terminal && persistentEnabled && validatedPersistentName == null -> "Session names use 1–48 ASCII letters, numbers, - or _."
       else -> null
     }
   val canAdd = addHostRequirement == null
@@ -5477,7 +6210,7 @@ private fun AddHostDialog(
     containerColor = ShellowColors.PanelBackground,
     titleContentColor = ShellowColors.TerminalText,
     textContentColor = ShellowColors.TerminalText,
-    title = { Text("Add Host") },
+    title = { Text("Add Profile") },
     text = {
       Column(
         modifier =
@@ -5487,6 +6220,19 @@ private fun AddHostDialog(
             .verticalScroll(rememberScrollState()),
         verticalArrangement = Arrangement.spacedBy(10.dp),
       ) {
+        Text("Open with", color = ShellowColors.TerminalMuted, style = MaterialTheme.typography.labelMedium)
+        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+          AuthenticationChoice(
+            title = "Terminal",
+            selected = launchKind == ProfileLaunchKind.Terminal,
+            modifier = Modifier.weight(1f),
+          ) { launchKind = ProfileLaunchKind.Terminal }
+          AuthenticationChoice(
+            title = "Codex",
+            selected = launchKind == ProfileLaunchKind.Codex,
+            modifier = Modifier.weight(1f),
+          ) { launchKind = ProfileLaunchKind.Codex }
+        }
         OutlinedTextField(
           value = name,
           onValueChange = { name = it },
@@ -5529,7 +6275,7 @@ private fun AddHostDialog(
             modifier = Modifier.weight(1f),
           ) { authentication = AuthenticationKind.PrivateKey }
         }
-        Row(
+        if (launchKind == ProfileLaunchKind.Terminal) Row(
           modifier = Modifier.fillMaxWidth(),
           verticalAlignment = Alignment.CenterVertically,
         ) {
@@ -5547,7 +6293,7 @@ private fun AddHostDialog(
             },
           )
         }
-        if (persistentEnabled) {
+        if (launchKind == ProfileLaunchKind.Terminal && persistentEnabled) {
           Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
             PersistentTerminalBackend.entries.forEach { backend ->
               AuthenticationChoice(
@@ -5582,9 +6328,10 @@ private fun AddHostDialog(
               port = parsedPort ?: 22,
               username = username.trim(),
               authentication = authentication,
+              launchKind = launchKind,
               trustedHostKeySha256 = null,
               persistentTerminal =
-                if (persistentEnabled && validatedPersistentName != null) {
+                if (launchKind == ProfileLaunchKind.Terminal && persistentEnabled && validatedPersistentName != null) {
                   PersistentTerminalConfiguration(validatedPersistentName, persistentBackend)
                 } else {
                   null
@@ -5875,6 +6622,11 @@ private fun SettingsScreen(
     }
     SettingsSectionLabel("Display")
     SettingsGroup {
+      TerminalThemeSelector(
+        value = displaySettings.terminalTheme,
+        onValueChange = { onDisplaySettingsChange(displaySettings.copy(terminalTheme = it)) },
+      )
+      PanelDivider()
       ThemeSelector(
         value = displaySettings.colorScheme,
         onValueChange = { onDisplaySettingsChange(displaySettings.copy(colorScheme = it)) },
@@ -5947,7 +6699,7 @@ private fun ThemeSelector(
   var expanded by remember { mutableStateOf(false) }
   Box {
     SettingsValueRow(
-      title = "Theme",
+      title = "App Appearance",
       value = value.title,
       onClick = { expanded = true },
     )
@@ -5966,6 +6718,40 @@ private fun ThemeSelector(
           onClick = {
             expanded = false
             onValueChange(scheme)
+          },
+        )
+      }
+    }
+  }
+}
+
+@Composable
+private fun TerminalThemeSelector(
+  value: TerminalThemeSelection,
+  onValueChange: (TerminalThemeSelection) -> Unit,
+) {
+  var expanded by remember { mutableStateOf(false) }
+  Box {
+    SettingsValueRow(
+      title = "Terminal Theme",
+      value = value.title,
+      onClick = { expanded = true },
+    )
+    DropdownMenu(
+      expanded = expanded,
+      onDismissRequest = { expanded = false },
+    ) {
+      TerminalThemeSelection.entries.forEach { theme ->
+        DropdownMenuItem(
+          text = {
+            Text(
+              theme.title,
+              color = if (value == theme) ShellowColors.Accent else ShellowColors.TerminalText,
+            )
+          },
+          onClick = {
+            expanded = false
+            onValueChange(theme)
           },
         )
       }
@@ -6041,6 +6827,7 @@ private const val DisplaySettingsPrefs = "shellow.displaySettings"
 private const val DisplayFontSizeKey = "fontSizeSp.v1"
 private const val DisplayLineHeightKey = "lineHeightScale.v1"
 private const val DisplayColorSchemeKey = "colorScheme.v1"
+private const val DisplayTerminalThemeKey = "terminalTheme.v1"
 
 private fun loadDisplaySettings(context: Context): AppDisplaySettings {
   val preferences = context.getSharedPreferences(DisplaySettingsPrefs, Context.MODE_PRIVATE)
@@ -6048,6 +6835,7 @@ private fun loadDisplaySettings(context: Context): AppDisplaySettings {
     fontSizeSp = preferences.getFloat(DisplayFontSizeKey, 14f).coerceIn(11f, 22f),
     lineHeightScale = preferences.getFloat(DisplayLineHeightKey, 1f).coerceIn(0.9f, 1.35f),
     colorScheme = ShellowColorScheme.fromWire(preferences.getString(DisplayColorSchemeKey, ShellowColorScheme.System.wire)),
+    terminalTheme = TerminalThemeSelection.fromWire(preferences.getString(DisplayTerminalThemeKey, TerminalThemeSelection.ShellowDark.wire)),
   )
 }
 
@@ -6061,6 +6849,7 @@ private fun saveDisplaySettings(
     .putFloat(DisplayFontSizeKey, settings.fontSizeSp.coerceIn(11f, 22f))
     .putFloat(DisplayLineHeightKey, settings.lineHeightScale.coerceIn(0.9f, 1.35f))
     .putString(DisplayColorSchemeKey, settings.colorScheme.wire)
+    .putString(DisplayTerminalThemeKey, settings.terminalTheme.wire)
     .apply()
 }
 
@@ -6077,11 +6866,20 @@ private fun defaultHostProfiles(): List<HostProfile> =
       22,
       "deploy",
       AuthenticationKind.PrivateKey,
+      launchKind = ProfileLaunchKind.Terminal,
       trustedHostKeySha256 = "SHA256:sample-staging-host-key",
       id = "sample-staging",
     ),
     HostProfile("Build Agent", "build.example.com", 2222, "runner", AuthenticationKind.Password, id = "sample-build-agent"),
-    HostProfile("Workshop", "shell.example.com", 22, "ops", AuthenticationKind.Password, id = "sample-workshop"),
+    HostProfile(
+      "Workshop",
+      "shell.example.com",
+      22,
+      "ops",
+      AuthenticationKind.Password,
+      launchKind = ProfileLaunchKind.Codex,
+      id = "sample-workshop",
+    ),
   )
 
 private fun loadHostProfiles(context: Context): List<HostProfile> {

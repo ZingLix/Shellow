@@ -8,7 +8,13 @@ struct SettingsScreen: View {
         NavigationStack {
             Form {
                 Section("Terminal") {
-                    Picker("Theme", selection: $settings.colorScheme) {
+                    Picker("Terminal Theme", selection: $settings.terminalTheme) {
+                        ForEach(TerminalThemeSelection.allCases) { theme in
+                            Text(theme.title).tag(theme)
+                        }
+                    }
+
+                    Picker("App Appearance", selection: $settings.colorScheme) {
                         ForEach(TerminalColorScheme.allCases) { scheme in
                             Text(scheme.title).tag(scheme)
                         }

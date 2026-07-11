@@ -10,8 +10,10 @@ import xyz.zinglix.shellow.core.AuthenticationKind
 import xyz.zinglix.shellow.core.HostProfile
 import xyz.zinglix.shellow.core.PersistentTerminalBackend
 import xyz.zinglix.shellow.core.PersistentTerminalConfiguration
+import xyz.zinglix.shellow.core.ProfileLaunchKind
 import xyz.zinglix.shellow.core.RemoteComponentSupportLevel
 import xyz.zinglix.shellow.core.RemoteHostCapabilityProbe
+import xyz.zinglix.shellow.core.RemoteTerminalSessionProbe
 
 class PersistentTerminalTest {
   @Test
@@ -63,6 +65,31 @@ class PersistentTerminalTest {
   fun capabilityParser_requiresMarkerAndSystemLine() {
     assertNull(RemoteHostCapabilityProbe.parse("system|Linux|Linux||||"))
     assertNull(RemoteHostCapabilityProbe.parse("__SHELLOW_CAPABILITIES_V1__\ncomponent|tmux|supported|tmux 3.4"))
+  }
+
+  @Test
+  fun sessionCatalogParser_readsAndSortsRemoteWorkspaces() {
+    val catalog =
+      RemoteTerminalSessionProbe.parse(
+        """
+        login banner
+        __SHELLOW_SESSIONS_V1__
+        session|zeta|0|1
+        session|main|1|3
+        session|main|1|3
+        """.trimIndent(),
+      )
+
+    assertNotNull(catalog)
+    assertEquals(listOf("main", "zeta"), catalog?.sessions?.map { it.name })
+    assertTrue(catalog?.sessions?.first()?.isAttached == true)
+    assertEquals(3, catalog?.sessions?.first()?.windowCount)
+  }
+
+  @Test
+  fun missingLaunchKindDefaultsToTerminal() {
+    assertEquals(ProfileLaunchKind.Terminal, ProfileLaunchKind.fromWire(null))
+    assertEquals(ProfileLaunchKind.Terminal, ProfileLaunchKind.fromWire(""))
   }
 
   private fun profile(backend: PersistentTerminalBackend) =

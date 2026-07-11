@@ -20,6 +20,7 @@ bool shellow_engine_render_surface_frame_presented(const ShellowEngine *engine, 
 char *shellow_engine_renderer_info_json(const ShellowEngine *engine);
 uint64_t shellow_engine_live_shell_event_revision(const ShellowEngine *engine);
 char *shellow_engine_set_renderer_overlay_json(ShellowEngine *engine, const char *overlay_json);
+char *shellow_engine_set_terminal_theme_json(ShellowEngine *engine, const char *theme_id);
 char *shellow_engine_attach_core_animation_layer_json(ShellowEngine *engine, uint64_t raw_handle, uint32_t width_px, uint32_t height_px);
 char *shellow_engine_attach_android_native_window_json(ShellowEngine *engine, uint64_t raw_handle, uint32_t width_px, uint32_t height_px);
 char *shellow_engine_detach_renderer_surface_json(ShellowEngine *engine);
@@ -104,7 +105,7 @@ char *shellow_engine_start_codex_private_key_json(
 );
 char *shellow_engine_poll_codex_json(ShellowEngine *engine);
 char *shellow_engine_send_codex_message_json(ShellowEngine *engine, const char *message);
-char *shellow_engine_update_codex_settings_json(ShellowEngine *engine, const char *model, const char *approval_policy, const char *sandbox);
+char *shellow_engine_update_codex_settings_json(ShellowEngine *engine, const char *model, const char *reasoning_effort, const char *service_tier, const char *approval_policy, const char *sandbox);
 char *shellow_engine_browse_codex_directory_json(ShellowEngine *engine, const char *path);
 char *shellow_engine_list_codex_threads_json(ShellowEngine *engine, const char *cwd, const char *search_term);
 char *shellow_engine_list_codex_threads_page_json(ShellowEngine *engine, const char *cwd, const char *search_term, const char *cursor, bool archived, bool append);

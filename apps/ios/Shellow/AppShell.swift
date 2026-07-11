@@ -120,6 +120,7 @@ struct AppShell: View {
 #if DEBUG
             await handleSimulatorLaunchRequestIfNeeded()
 #endif
+            _ = coreSession.setTerminalTheme(settings.terminalTheme.rawValue)
             updateSession(coreSession.snapshot())
             var lastLiveRevision = coreSession.liveShellEventRevision()
             var lastCodexRevision = coreSession.codexEventRevision()
@@ -160,6 +161,10 @@ struct AppShell: View {
         .onChange(of: settings) {
             ShellowSettingsStore.save(settings)
         }
+        .onChange(of: settings.terminalTheme) {
+            _ = coreSession.setTerminalTheme(settings.terminalTheme.rawValue)
+            advanceTerminalRenderTick()
+        }
     }
 
     private var terminalScreen: some View {
@@ -167,7 +172,9 @@ struct AppShell: View {
             session: $session,
             settings: settings,
             renderTick: terminalRenderTick,
+            profileName: reconnectTarget?.profile.name ?? session.title,
             persistentTerminal: reconnectTarget?.profile.persistentTerminal,
+            loadPersistentSessions: terminalSessionLoader,
             onTerminalInput: { input in
                 updateSession(coreSession.sendTerminalInput(input))
             },
@@ -212,15 +219,32 @@ struct AppShell: View {
         .toolbar(.hidden, for: .navigationBar)
     }
 
+    private var terminalSessionLoader: (() async -> RemoteTerminalSessionCatalog)? {
+        guard
+            let profile = reconnectTarget?.profile,
+            let configuration = profile.persistentTerminal
+        else {
+            return nil
+        }
+        return {
+            await loadRemoteTerminalSessions(
+                profile: profile,
+                configuration: configuration
+            )
+        }
+    }
+
     private var codexScreen: some View {
         CodexScreen(
             snapshot: codexSession,
             onSendMessage: { message in
                 updateCodexSession(coreSession.sendCodexMessage(message))
             },
-            onUpdateSettings: { model, approvalPolicy, sandbox in
+            onUpdateSettings: { model, reasoningEffort, serviceTier, approvalPolicy, sandbox in
                 updateCodexSession(coreSession.updateCodexSettings(
                     model: model,
+                    reasoningEffort: reasoningEffort,
+                    serviceTier: serviceTier,
                     approvalPolicy: approvalPolicy,
                     sandbox: sandbox
                 ))
@@ -555,6 +579,73 @@ struct AppShell: View {
             lastFailure = outcome.errorMessage ?? lastFailure
         }
         return .failure(lastFailure)
+    }
+
+    @MainActor
+    private func loadRemoteTerminalSessions(
+        profile: HostProfile,
+        configuration: PersistentTerminalConfiguration
+    ) async -> RemoteTerminalSessionCatalog {
+        var credentials: [HostProbeCredential] = []
+
+        if let reconnectTarget, reconnectTarget.profile.id == profile.id {
+            switch reconnectTarget {
+            case .preview:
+                break
+            case .password(_, let password, _):
+                credentials.append(.password(password))
+            case .privateKey(_, let privateKeyPEM, let passphrase, _):
+                credentials.append(.privateKey(privateKeyPEM: privateKeyPEM, passphrase: passphrase))
+            }
+        }
+
+        if let savedPassword = secretStore.loadSecret(for: profile, kind: .password) {
+            credentials.append(.password(savedPassword))
+        }
+        credentials.append(contentsOf: storedPrivateKeyAuths().map {
+            .privateKey(privateKeyPEM: $0.privateKeyPEM, passphrase: $0.passphrase)
+        })
+
+        guard !credentials.isEmpty else {
+            return RemoteTerminalSessionCatalog(
+                sessions: [],
+                errorMessage: "Save an SSH credential to load remote sessions."
+            )
+        }
+
+        let command = RemoteTerminalSessionProbe.command(for: configuration.backend)
+        var lastError = "The host did not return a recognizable session list."
+        for credential in credentials {
+            let probeSession = ShellowCoreSession()
+            let result: TerminalSession
+            switch credential {
+            case .password(let password):
+                result = await probeSession.connectPasswordExec(
+                    to: profile,
+                    password: password,
+                    command: command
+                )
+            case .privateKey(let privateKeyPEM, let passphrase):
+                result = await probeSession.connectPrivateKeyExec(
+                    to: profile,
+                    privateKeyPEM: privateKeyPEM,
+                    passphrase: passphrase,
+                    command: command
+                )
+            }
+
+            let output = result.rows.map(\.text).joined(separator: "\n")
+            if let catalog = RemoteTerminalSessionProbe.parse(output) {
+                return catalog
+            }
+            if let detail = result.rows.reversed()
+                .map(\.text)
+                .first(where: { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }) {
+                lastError = detail
+            }
+        }
+
+        return RemoteTerminalSessionCatalog(sessions: [], errorMessage: lastError)
     }
 
     private func runHostCapabilityProbe(

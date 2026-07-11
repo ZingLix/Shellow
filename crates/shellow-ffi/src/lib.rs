@@ -105,6 +105,17 @@ pub extern "C" fn shellow_engine_set_renderer_overlay_json(
 }
 
 #[unsafe(no_mangle)]
+pub extern "C" fn shellow_engine_set_terminal_theme_json(
+    engine: *mut ShellowEngine,
+    theme_id: *const c_char,
+) -> *mut c_char {
+    with_engine_mut(engine, |engine| {
+        let theme_id = read_c_string(theme_id);
+        encode_json(&engine.set_terminal_theme(&theme_id))
+    })
+}
+
+#[unsafe(no_mangle)]
 pub extern "C" fn shellow_engine_attach_core_animation_layer_json(
     engine: *mut ShellowEngine,
     raw_handle: u64,
@@ -448,6 +459,8 @@ pub extern "C" fn shellow_engine_send_codex_message_json(
 pub extern "C" fn shellow_engine_update_codex_settings_json(
     engine: *mut ShellowEngine,
     model: *const c_char,
+    reasoning_effort: *const c_char,
+    service_tier: *const c_char,
     approval_policy: *const c_char,
     sandbox: *const c_char,
 ) -> *mut c_char {
@@ -458,6 +471,8 @@ pub extern "C" fn shellow_engine_update_codex_settings_json(
             started,
             &engine.update_codex_settings(
                 read_optional_c_string(model).as_deref(),
+                read_optional_c_string(reasoning_effort).as_deref(),
+                read_optional_c_string(service_tier).as_deref(),
                 read_optional_c_string(approval_policy).as_deref(),
                 read_optional_c_string(sandbox).as_deref(),
             ),

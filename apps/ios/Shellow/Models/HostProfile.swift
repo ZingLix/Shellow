@@ -7,6 +7,7 @@ struct HostProfile: Identifiable, Hashable, Codable {
     var port: Int
     var username: String
     var authentication: AuthenticationKind
+    var launchKind: ProfileLaunchKind? = nil
     var trustedHostKeySHA256: String?
     // Keep the v1 JSON key for backward compatibility. New code reads and
     // writes this through `persistentTerminal` so existing tmux hosts migrate
@@ -17,6 +18,10 @@ struct HostProfile: Identifiable, Hashable, Codable {
 
     var endpoint: String {
         "\(username)@\(host):\(port)"
+    }
+
+    var resolvedLaunchKind: ProfileLaunchKind {
+        launchKind ?? .terminal
     }
 
     var hostKeyTrustTitle: String {
@@ -47,6 +52,34 @@ struct HostProfile: Identifiable, Hashable, Codable {
         guard let configuration = persistentTerminal else { return "" }
         let backend = configuration.backend
         return "if command -v \(backend.executable) >/dev/null 2>&1; then \(backend.attachCommand(sessionName: configuration.name)); else echo 'Shellow: \(backend.displayTitle) is not installed; continuing with the regular shell.'; fi"
+    }
+}
+
+enum ProfileLaunchKind: String, CaseIterable, Identifiable, Codable {
+    case terminal
+    case codex
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .terminal: "Terminal"
+        case .codex: "Codex"
+        }
+    }
+
+    var systemImage: String {
+        switch self {
+        case .terminal: "terminal"
+        case .codex: "sparkles"
+        }
+    }
+
+    var detail: String {
+        switch self {
+        case .terminal: "Open a remote shell and persistent workspaces"
+        case .codex: "Open remote coding conversations"
+        }
     }
 }
 
@@ -183,6 +216,102 @@ struct PersistentTerminalConfiguration: Hashable, Codable {
         (48...57).contains(scalar.value)
             || (65...90).contains(scalar.value)
             || (97...122).contains(scalar.value)
+    }
+}
+
+struct RemoteTerminalSessionSummary: Identifiable, Hashable {
+    var name: String
+    var isAttached: Bool
+    var windowCount: Int?
+
+    var id: String { name }
+}
+
+struct RemoteTerminalSessionCatalog: Equatable {
+    var sessions: [RemoteTerminalSessionSummary]
+    var errorMessage: String?
+
+    static let empty = Self(sessions: [], errorMessage: nil)
+}
+
+enum RemoteTerminalSessionProbe {
+    private static let marker = "__SHELLOW_SESSIONS_V1__"
+
+    static func command(for backend: PersistentTerminalBackend) -> String {
+        let body: String
+        switch backend {
+        case .tmux:
+            body = """
+            tmux list-sessions -F 'session|#{session_name}|#{session_attached}|#{session_windows}' 2>/dev/null || true
+            """
+        case .screen:
+            body = """
+            screen -ls 2>/dev/null | awk '
+              /^[[:space:]]*[0-9]+[.]/ {
+                name=$1; sub(/^[0-9]+[.]/, "", name);
+                attached=(index($0, "(Attached)") > 0 ? 1 : 0);
+                printf "session|%s|%d|\\n", name, attached;
+              }
+            ' || true
+            """
+        case .zellij:
+            body = """
+            zellij list-sessions --no-formatting 2>/dev/null | awk '
+              NF {
+                name=$1;
+                if (name ~ /^[A-Za-z0-9][A-Za-z0-9_-]*$/) {
+                  attached=(index(tolower($0), "current") > 0 || index(tolower($0), "attached") > 0 ? 1 : 0);
+                  printf "session|%s|%d|\\n", name, attached;
+                }
+              }
+            ' || true
+            """
+        }
+
+        return """
+        LC_ALL=C
+        PATH="$PATH:/opt/homebrew/bin:/usr/local/bin:/home/linuxbrew/.linuxbrew/bin:$HOME/.local/bin:$HOME/bin"
+        export PATH
+        printf '__SHELLOW_SESSIONS_V1__\n'
+        if command -v \(backend.executable) >/dev/null 2>&1; then
+        \(body)
+        else
+          printf 'error|\(backend.displayTitle) is not installed on this host.\n'
+        fi
+        """
+    }
+
+    static func parse(_ output: String) -> RemoteTerminalSessionCatalog? {
+        let lines = output
+            .replacingOccurrences(of: "\r", with: "")
+            .split(separator: "\n", omittingEmptySubsequences: false)
+            .map(String.init)
+        guard lines.contains(marker) else { return nil }
+
+        var sessions: [RemoteTerminalSessionSummary] = []
+        var errorMessage: String?
+        for line in lines {
+            let fields = line.split(separator: "|", omittingEmptySubsequences: false).map(String.init)
+            if fields.first == "session", fields.count >= 4,
+               let name = PersistentTerminalConfiguration.validatedName(fields[1]) {
+                let attached = Int(fields[2]).map { $0 > 0 } ?? false
+                let windowCount = Int(fields[3])
+                if !sessions.contains(where: { $0.name == name }) {
+                    sessions.append(RemoteTerminalSessionSummary(
+                        name: name,
+                        isAttached: attached,
+                        windowCount: windowCount
+                    ))
+                }
+            } else if fields.first == "error", fields.count >= 2 {
+                errorMessage = fields.dropFirst().joined(separator: "|")
+            }
+        }
+
+        return RemoteTerminalSessionCatalog(
+            sessions: sessions.sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending },
+            errorMessage: errorMessage
+        )
     }
 }
 
@@ -412,6 +541,7 @@ extension HostProfile {
             port: 22,
             username: "deploy",
             authentication: .privateKey,
+            launchKind: .terminal,
             trustedHostKeySHA256: "SHA256:sample-staging-host-key",
             lastConnected: .now.addingTimeInterval(-1_800)
         ),
@@ -421,6 +551,7 @@ extension HostProfile {
             port: 22,
             username: "ops",
             authentication: .password,
+            launchKind: .codex,
             trustedHostKeySHA256: nil,
             lastConnected: .now.addingTimeInterval(-86_400)
         )

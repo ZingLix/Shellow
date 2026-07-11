@@ -14,6 +14,7 @@ use std::sync::{
 use crate::{
     TerminalCursorShape, TerminalGridColor, TerminalGridSnapshot, TerminalGridStyle, TerminalRow,
     TerminalRowStyle, TerminalScreenKind,
+    terminal_theme::{TerminalTheme, TerminalThemeId, TerminalThemeRgba, default_terminal_theme},
 };
 
 static NEXT_RENDERER_ID: AtomicU64 = AtomicU64::new(1);
@@ -191,11 +192,11 @@ impl RendererOverlayState {
 }
 
 impl RendererOverlayKind {
-    fn surface_color(self) -> SurfaceColor {
+    fn surface_color(self, theme: &TerminalTheme) -> SurfaceColor {
         match self {
-            Self::Selection => SurfaceColor::new(0.18, 0.45, 0.38, 0.72),
-            Self::Search => SurfaceColor::new(0.52, 0.44, 0.15, 0.44),
-            Self::ActiveSearch => SurfaceColor::new(0.79, 0.62, 0.18, 0.72),
+            Self::Selection => SurfaceColor::from_theme_rgba(theme.selection),
+            Self::Search => SurfaceColor::from_theme_rgba(theme.search),
+            Self::ActiveSearch => SurfaceColor::from_theme_rgba(theme.active_search),
         }
     }
 }
@@ -345,6 +346,7 @@ pub struct TerminalRenderer {
     layout_cache: GlyphLayoutCache,
     runtime: RendererRuntime,
     overlay_state: RendererOverlayState,
+    theme: TerminalTheme,
     surface_attachment: Option<RendererSurfaceAttachment>,
     surface_generation: u64,
 }
@@ -365,6 +367,7 @@ impl TerminalRenderer {
             layout_cache: GlyphLayoutCache::new(),
             runtime: RendererRuntime::new(),
             overlay_state: RendererOverlayState::default(),
+            theme: default_terminal_theme(),
             surface_attachment: None,
             surface_generation: 0,
         }
@@ -608,6 +611,17 @@ impl TerminalRenderer {
         self.last_frame_signature = None;
     }
 
+    pub fn set_theme(&mut self, theme: TerminalTheme) {
+        if self.theme != theme {
+            self.theme = theme;
+            self.invalidate();
+        }
+    }
+
+    pub fn theme_id(&self) -> TerminalThemeId {
+        self.theme.id
+    }
+
     pub fn set_overlay_state(&mut self, state: RendererOverlayState) -> RendererOverlayUpdate {
         let (state, mut notes) = state.normalized();
         let changed = self.overlay_state != state;
@@ -708,6 +722,7 @@ impl TerminalRenderer {
             &self.glyph_atlas,
             &mut self.layout_cache,
             &self.overlay_state,
+            &self.theme,
         );
         let gpu_pass = self.runtime.render_frame(
             width_px,
@@ -715,6 +730,7 @@ impl TerminalRenderer {
             &self.glyph_atlas,
             &dirty_row_upload,
             &surface_frame_upload,
+            SurfaceColor::from_grid(self.theme.background),
         );
         if let Some(surface) = self.surface_attachment.as_mut() {
             surface.wgpu_surface_configured = gpu_pass.native_surface_configured;
@@ -944,10 +960,11 @@ impl SurfaceFrameUpload {
         glyph_atlas: &GlyphAtlas,
         layout_cache: &mut GlyphLayoutCache,
         overlay_state: &RendererOverlayState,
+        theme: &TerminalTheme,
     ) -> Self {
         let width = width_px.max(1) as f32;
         let height = height_px.max(1) as f32;
-        let mut builder = SurfaceFrameBuilder::new(width, height, glyph_atlas, layout_cache);
+        let mut builder = SurfaceFrameBuilder::new(width, height, glyph_atlas, layout_cache, theme);
 
         match grid {
             Some(grid) => builder.push_grid(grid, overlay_state),
@@ -1087,6 +1104,7 @@ struct SurfaceFrameBuilder<'a> {
     height: f32,
     glyph_atlas: &'a GlyphAtlas,
     layout_cache: &'a mut GlyphLayoutCache,
+    theme: &'a TerminalTheme,
     atlas_extent: GlyphAtlasExtent,
     vertices: Vec<SurfaceVertex>,
     cell_count: usize,
@@ -1103,12 +1121,14 @@ impl<'a> SurfaceFrameBuilder<'a> {
         height: f32,
         glyph_atlas: &'a GlyphAtlas,
         layout_cache: &'a mut GlyphLayoutCache,
+        theme: &'a TerminalTheme,
     ) -> Self {
         Self {
             width,
             height,
             glyph_atlas,
             layout_cache,
+            theme,
             atlas_extent: glyph_atlas.extent(),
             vertices: Vec::new(),
             cell_count: 0,
@@ -1184,7 +1204,13 @@ impl<'a> SurfaceFrameBuilder<'a> {
             }
             let x = start_col as f32 * cell_width;
             let width = (end_col - start_col) as f32 * cell_width;
-            self.push_solid_rect(x, row_y, width, row_height, range.kind.surface_color());
+            self.push_solid_rect(
+                x,
+                row_y,
+                width,
+                row_height,
+                range.kind.surface_color(self.theme),
+            );
             self.overlay_range_count = self.overlay_range_count.saturating_add(1);
         }
     }
@@ -1210,7 +1236,7 @@ impl<'a> SurfaceFrameBuilder<'a> {
             let y = terminal_surface_row_y(row_index as u32, row_slot_height, row_height);
             self.push_run(
                 &history_row_text(row),
-                row_style_to_grid_style(row.style),
+                row_style_to_grid_style(row.style, self.theme),
                 0,
                 cols,
                 y,
@@ -1234,7 +1260,7 @@ impl<'a> SurfaceFrameBuilder<'a> {
             return consumed_cells;
         }
 
-        let (foreground, background) = style_colors(style);
+        let (foreground, background) = style_colors(style, self.theme);
         let layout = self.layout_cache.layout_for_text(
             text,
             cols.saturating_sub(consumed_cells),
@@ -1327,7 +1353,7 @@ impl<'a> SurfaceFrameBuilder<'a> {
         let column = grid.cursor_column.min(grid.cols.saturating_sub(1));
         let x = column as f32 * cell_width;
         let y = terminal_surface_row_y(row as u32, row_slot_height, row_height);
-        let color = SurfaceColor::new(0.46, 0.86, 0.67, 0.92);
+        let color = SurfaceColor::from_grid(self.theme.cursor).with_alpha(0.92);
         match grid.cursor_shape {
             TerminalCursorShape::Block => {
                 self.push_solid_rect(x, y + 2.0, cell_width, (row_height - 4.0).max(1.0), color);
@@ -1581,6 +1607,15 @@ impl SurfaceColor {
         )
     }
 
+    fn from_theme_rgba(color: TerminalThemeRgba) -> Self {
+        Self::new(
+            color.r as f32 / 255.0,
+            color.g as f32 / 255.0,
+            color.b as f32 / 255.0,
+            color.a as f32 / 255.0,
+        )
+    }
+
     fn with_alpha(self, a: f32) -> Self {
         Self { a, ..self }
     }
@@ -1591,28 +1626,26 @@ impl SurfaceColor {
 }
 
 const SURFACE_VERTEX_STRIDE: u64 = 36;
-const SURFACE_BACKGROUND: SurfaceColor = SurfaceColor::new(0.05, 0.06, 0.06, 1.0);
-const SURFACE_FOREGROUND: SurfaceColor = SurfaceColor::new(0.88, 0.91, 0.86, 1.0);
-const SURFACE_MUTED: SurfaceColor = SurfaceColor::new(0.55, 0.60, 0.58, 1.0);
-const SURFACE_ACCENT: SurfaceColor = SurfaceColor::new(0.11, 0.62, 0.44, 1.0);
-const SURFACE_WARNING: SurfaceColor = SurfaceColor::new(0.83, 0.69, 0.28, 1.0);
-const SURFACE_SUCCESS: SurfaceColor = SurfaceColor::new(0.46, 0.86, 0.67, 1.0);
-
-fn style_colors(style: TerminalGridStyle) -> (SurfaceColor, Option<SurfaceColor>) {
+fn style_colors(
+    style: TerminalGridStyle,
+    theme: &TerminalTheme,
+) -> (SurfaceColor, Option<SurfaceColor>) {
+    let theme_foreground = SurfaceColor::from_grid(theme.foreground);
+    let theme_background = SurfaceColor::from_grid(theme.background);
     let default_fg = if style.faint {
-        SURFACE_FOREGROUND.with_alpha(0.7)
+        theme_foreground.with_alpha(0.7)
     } else {
-        SURFACE_FOREGROUND
+        theme_foreground
     };
     if style.inverse {
         let foreground = style
             .bg
             .map(SurfaceColor::from_grid)
-            .unwrap_or(SURFACE_BACKGROUND);
+            .unwrap_or(theme_background);
         let background = style
             .fg
             .map(SurfaceColor::from_grid)
-            .unwrap_or(SURFACE_FOREGROUND);
+            .unwrap_or(theme_foreground);
         return (foreground, Some(background));
     }
 
@@ -1622,25 +1655,17 @@ fn style_colors(style: TerminalGridStyle) -> (SurfaceColor, Option<SurfaceColor>
     )
 }
 
-fn row_style_to_grid_style(style: TerminalRowStyle) -> TerminalGridStyle {
+fn row_style_to_grid_style(style: TerminalRowStyle, theme: &TerminalTheme) -> TerminalGridStyle {
     let fg = match style {
-        TerminalRowStyle::Command => Some(grid_color_from_surface(SURFACE_ACCENT)),
-        TerminalRowStyle::Muted => Some(grid_color_from_surface(SURFACE_MUTED)),
-        TerminalRowStyle::Success => Some(grid_color_from_surface(SURFACE_SUCCESS)),
-        TerminalRowStyle::Prompt => Some(grid_color_from_surface(SURFACE_ACCENT)),
-        TerminalRowStyle::Warning => Some(grid_color_from_surface(SURFACE_WARNING)),
+        TerminalRowStyle::Command => Some(theme.accent),
+        TerminalRowStyle::Muted => Some(theme.muted),
+        TerminalRowStyle::Success => Some(theme.success),
+        TerminalRowStyle::Prompt => Some(theme.accent),
+        TerminalRowStyle::Warning => Some(theme.warning),
     };
     TerminalGridStyle {
         fg,
         ..Default::default()
-    }
-}
-
-fn grid_color_from_surface(color: SurfaceColor) -> TerminalGridColor {
-    TerminalGridColor {
-        r: (color.r * 255.0).round() as u8,
-        g: (color.g * 255.0).round() as u8,
-        b: (color.b * 255.0).round() as u8,
     }
 }
 
@@ -2873,6 +2898,7 @@ impl RendererRuntime {
         glyph_atlas: &GlyphAtlas,
         dirty_rows: &DirtyRowUpload,
         surface_frame: &SurfaceFrameUpload,
+        background: SurfaceColor,
     ) -> GpuPassResult {
         let reused_gpu_device = self.persistent_device_ready();
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -2882,10 +2908,10 @@ impl RendererRuntime {
             let offscreen_gpu_pass = if native_surface_configured {
                 false
             } else {
-                runtime.render_offscreen(width_px, height_px)?;
+                runtime.render_offscreen(width_px, height_px, background)?;
                 true
             };
-            let surface_render = runtime.render_surface_frame(Some(surface_frame))?;
+            let surface_render = runtime.render_surface_frame(Some(surface_frame), background)?;
             Ok::<_, String>((
                 runtime.backend.clone(),
                 runtime.adapter.clone(),
@@ -3029,7 +3055,9 @@ impl RendererRuntime {
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let runtime = self.ensure_ready()?;
             runtime.attach_surface(request, generation)?;
-            let presented = runtime.render_surface_frame(None)?.presented;
+            let presented = runtime
+                .render_surface_frame(None, SurfaceColor::new(0.05, 0.06, 0.06, 1.0))?
+                .presented;
             Ok::<_, String>((presented, runtime.surface_present_count()))
         }));
 
@@ -3582,6 +3610,7 @@ impl GpuRuntime {
     fn render_surface_frame(
         &mut self,
         surface_frame: Option<&SurfaceFrameUpload>,
+        background: SurfaceColor,
     ) -> Result<GpuSurfaceRenderResult, String> {
         let Some(surface_runtime) = self.surface.as_ref() else {
             return Ok(GpuSurfaceRenderResult {
@@ -3645,10 +3674,10 @@ impl GpuRuntime {
                 resolve_target: None,
                 ops: wgpu::Operations {
                     load: wgpu::LoadOp::Clear(wgpu::Color {
-                        r: 0.035,
-                        g: 0.045,
-                        b: 0.045,
-                        a: 1.0,
+                        r: background.r as f64,
+                        g: background.g as f64,
+                        b: background.b as f64,
+                        a: background.a as f64,
                     }),
                     store: wgpu::StoreOp::Store,
                 },
@@ -3700,7 +3729,12 @@ impl GpuRuntime {
         })
     }
 
-    fn render_offscreen(&self, width_px: u32, height_px: u32) -> Result<(), String> {
+    fn render_offscreen(
+        &self,
+        width_px: u32,
+        height_px: u32,
+        background: SurfaceColor,
+    ) -> Result<(), String> {
         let size = wgpu::Extent3d {
             width: width_px.max(1),
             height: height_px.max(1),
@@ -3730,10 +3764,10 @@ impl GpuRuntime {
                 resolve_target: None,
                 ops: wgpu::Operations {
                     load: wgpu::LoadOp::Clear(wgpu::Color {
-                        r: 0.04,
-                        g: 0.05,
-                        b: 0.05,
-                        a: 1.0,
+                        r: background.r as f64,
+                        g: background.g as f64,
+                        b: background.b as f64,
+                        a: background.a as f64,
                     }),
                     store: wgpu::StoreOp::Store,
                 },
@@ -3864,6 +3898,7 @@ impl RendererRuntime {
         _glyph_atlas: &GlyphAtlas,
         _dirty_rows: &DirtyRowUpload,
         _surface_frame: &SurfaceFrameUpload,
+        _background: SurfaceColor,
     ) -> GpuPassResult {
         GpuPassResult {
             offscreen_gpu_pass: false,
@@ -3899,6 +3934,37 @@ fn native_backends() -> wgpu::Backends {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn renderer_theme_controls_default_inverse_and_overlay_colors() {
+        let theme = crate::terminal_theme::built_in_theme(TerminalThemeId::PaperLight);
+        let (foreground, background) = style_colors(TerminalGridStyle::default(), &theme);
+        assert_eq!(
+            foreground.components(),
+            SurfaceColor::from_grid(theme.foreground).components()
+        );
+        assert!(background.is_none());
+
+        let inverse = TerminalGridStyle {
+            inverse: true,
+            ..Default::default()
+        };
+        let (foreground, background) = style_colors(inverse, &theme);
+        assert_eq!(
+            foreground.components(),
+            SurfaceColor::from_grid(theme.background).components()
+        );
+        assert_eq!(
+            background.expect("inverse background").components(),
+            SurfaceColor::from_grid(theme.foreground).components()
+        );
+        assert_eq!(
+            RendererOverlayKind::Selection
+                .surface_color(&theme)
+                .components(),
+            SurfaceColor::from_theme_rgba(theme.selection).components(),
+        );
+    }
 
     #[test]
     fn terminal_surface_row_height_does_not_fill_tall_surface_rows() {

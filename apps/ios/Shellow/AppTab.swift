@@ -10,7 +10,7 @@ enum AppTab: String, CaseIterable, Identifiable {
     var title: String {
         switch self {
         case .terminal: "Terminal"
-        case .hosts: "Hosts"
+        case .hosts: "Profiles"
         case .settings: "Settings"
         }
     }
@@ -18,7 +18,7 @@ enum AppTab: String, CaseIterable, Identifiable {
     var systemImage: String {
         switch self {
         case .terminal: "terminal"
-        case .hosts: "server.rack"
+        case .hosts: "rectangle.stack"
         case .settings: "gearshape"
         }
     }

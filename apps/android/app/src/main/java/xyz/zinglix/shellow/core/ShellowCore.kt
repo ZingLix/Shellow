@@ -19,6 +19,7 @@ data class HostProfile(
   val port: Int,
   val username: String,
   val authentication: AuthenticationKind,
+  val launchKind: ProfileLaunchKind = ProfileLaunchKind.Terminal,
   val trustedHostKeySha256: String? = null,
   val persistentTerminal: PersistentTerminalConfiguration? = null,
   val capabilityReport: RemoteHostCapabilityReport? = null,
@@ -46,6 +47,7 @@ data class HostProfile(
       .put("port", port)
       .put("username", username)
       .put("authentication", authentication.wire)
+      .put("launchKind", launchKind.wire)
       .put("trustedHostKeySha256", trustedHostKeySha256.orEmpty())
       .put("persistentTerminal", persistentTerminal?.toJson())
       .put("capabilityReport", capabilityReport?.toJson())
@@ -70,6 +72,7 @@ data class HostProfile(
         port = port,
         username = username,
         authentication = authentication,
+        launchKind = ProfileLaunchKind.fromWire(json.optString("launchKind")),
         trustedHostKeySha256 = json.optNullableString("trustedHostKeySha256"),
         persistentTerminal =
           PersistentTerminalConfiguration.fromJson(
@@ -81,6 +84,19 @@ data class HostProfile(
             ?: legacyProfileId(name, host, port, username, authentication),
       )
     }
+  }
+}
+
+enum class ProfileLaunchKind(
+  val wire: String,
+  val title: String,
+) {
+  Terminal("terminal", "Terminal"),
+  Codex("codex", "Codex");
+
+  companion object {
+    fun fromWire(value: String?): ProfileLaunchKind =
+      entries.firstOrNull { it.wire == value } ?: Terminal
   }
 }
 
@@ -409,6 +425,10 @@ data class CodexThreadSummary(
   val preview: String,
   val cwd: String,
   val status: String,
+  val activeFlags: List<String>,
+  val pendingApprovalCount: Int,
+  val lastTurnStatus: String?,
+  val lastTurnError: String?,
   val updatedAt: Long,
   val createdAt: Long,
   val source: String,
@@ -424,6 +444,10 @@ data class CodexThreadSummary(
         preview = json.optString("preview"),
         cwd = json.optString("cwd"),
         status = json.optString("status"),
+        activeFlags = json.optJSONArray("active_flags")?.mapStrings().orEmpty(),
+        pendingApprovalCount = json.optInt("pending_approval_count"),
+        lastTurnStatus = json.optNullableString("last_turn_status"),
+        lastTurnError = json.optNullableString("last_turn_error"),
         updatedAt = json.optLong("updated_at"),
         createdAt = json.optLong("created_at"),
         source = json.optString("source"),
@@ -493,6 +517,8 @@ data class CodexOperationState(
 
 data class CodexSettingsState(
   val model: String?,
+  val reasoningEffort: String?,
+  val serviceTier: String?,
   val approvalPolicy: String?,
   val sandbox: String?,
   val availableModels: List<CodexModelOption>,
@@ -500,11 +526,13 @@ data class CodexSettingsState(
   val modelsError: String?,
 ) {
   companion object {
-    val Empty = CodexSettingsState(null, null, null, emptyList(), false, null)
+    val Empty = CodexSettingsState(null, null, null, null, null, emptyList(), false, null)
 
     fun fromJson(json: JSONObject) =
       CodexSettingsState(
         model = json.optNullableString("model"),
+        reasoningEffort = json.optNullableString("reasoning_effort"),
+        serviceTier = json.optNullableString("service_tier"),
         approvalPolicy = json.optNullableString("approval_policy"),
         sandbox = json.optNullableString("sandbox"),
         availableModels = json.optJSONArray("available_models")?.mapObjects(CodexModelOption::fromJson).orEmpty(),
@@ -517,12 +545,35 @@ data class CodexSettingsState(
 data class CodexModelOption(
   val id: String,
   val name: String,
+  val reasoningEfforts: List<CodexSettingOption> = emptyList(),
+  val defaultReasoningEffort: String? = null,
+  val serviceTiers: List<CodexSettingOption> = emptyList(),
+  val defaultServiceTier: String? = null,
 ) {
   companion object {
     fun fromJson(json: JSONObject) =
       CodexModelOption(
         id = json.optString("id"),
         name = json.optString("name"),
+        reasoningEfforts = json.optJSONArray("reasoning_efforts")?.mapObjects(CodexSettingOption::fromJson).orEmpty(),
+        defaultReasoningEffort = json.optNullableString("default_reasoning_effort"),
+        serviceTiers = json.optJSONArray("service_tiers")?.mapObjects(CodexSettingOption::fromJson).orEmpty(),
+        defaultServiceTier = json.optNullableString("default_service_tier"),
+      )
+  }
+}
+
+data class CodexSettingOption(
+  val id: String,
+  val name: String,
+  val description: String?,
+) {
+  companion object {
+    fun fromJson(json: JSONObject) =
+      CodexSettingOption(
+        id = json.optString("id"),
+        name = json.optString("name"),
+        description = json.optNullableString("description"),
       )
   }
 }
@@ -1046,6 +1097,9 @@ class ShellowCoreSession : Closeable {
   fun setRendererOverlayJson(overlayJson: String): String =
     nativeJson { current -> ShellowNative.nativeSetRendererOverlayJson(current, overlayJson) }
 
+  fun setTerminalTheme(themeId: String): String =
+    nativeJson { current -> ShellowNative.nativeSetTerminalThemeJson(current, themeId) }
+
   fun attachAndroidNativeWindow(
     rawHandle: Long,
     widthPx: Int,
@@ -1239,10 +1293,21 @@ class ShellowCoreSession : Closeable {
 
   fun updateCodexSettings(
     model: String,
+    reasoningEffort: String,
+    serviceTier: String,
     approvalPolicy: String,
     sandbox: String,
   ) =
-    decodeCodex { current -> ShellowNative.nativeUpdateCodexSettingsJson(current, model, approvalPolicy, sandbox) }
+    decodeCodex {
+      current -> ShellowNative.nativeUpdateCodexSettingsJson(
+        current,
+        model,
+        reasoningEffort,
+        serviceTier,
+        approvalPolicy,
+        sandbox,
+      )
+    }
 
   fun browseCodexDirectory(path: String) =
     decodeCodex { current -> ShellowNative.nativeBrowseCodexDirectoryJson(current, path) }
@@ -1369,6 +1434,7 @@ internal object ShellowNative {
   external fun nativeLiveShellEventRevision(handle: Long): Long
   external fun nativeCodexEventRevision(handle: Long): Long
   external fun nativeSetRendererOverlayJson(handle: Long, overlayJson: String): String
+  external fun nativeSetTerminalThemeJson(handle: Long, themeId: String): String
   external fun nativeAttachAndroidNativeWindowJson(handle: Long, rawHandle: Long, widthPx: Int, heightPx: Int): String
   external fun nativeAttachAndroidSurfaceJson(handle: Long, surface: Surface, widthPx: Int, heightPx: Int): String
   external fun nativeDetachRendererSurfaceJson(handle: Long): String
@@ -1460,7 +1526,7 @@ internal object ShellowNative {
 
   external fun nativePollCodexJson(handle: Long): String
   external fun nativeSendCodexMessageJson(handle: Long, message: String): String
-  external fun nativeUpdateCodexSettingsJson(handle: Long, model: String, approvalPolicy: String, sandbox: String): String
+  external fun nativeUpdateCodexSettingsJson(handle: Long, model: String, reasoningEffort: String, serviceTier: String, approvalPolicy: String, sandbox: String): String
   external fun nativeBrowseCodexDirectoryJson(handle: Long, path: String): String
   external fun nativeListCodexThreadsJson(handle: Long, cwd: String, searchTerm: String): String
   external fun nativeListCodexThreadsPageJson(

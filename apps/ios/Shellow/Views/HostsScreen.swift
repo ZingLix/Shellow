@@ -14,6 +14,7 @@ struct HostsScreen: View {
     @State private var draftPort = "22"
     @State private var draftUser = ""
     @State private var draftAuthentication: AuthenticationKind = .password
+    @State private var draftLaunchKind: ProfileLaunchKind = .terminal
     @State private var draftUsesPersistentTerminal = false
     @State private var draftPersistentTerminalBackend: PersistentTerminalBackend = .tmux
     @State private var draftPersistentSessionName = ""
@@ -25,14 +26,14 @@ struct HostsScreen: View {
 
     var body: some View {
         List {
-            Section("Hosts") {
+            Section("Profiles") {
                 if profiles.isEmpty {
                     ContentUnavailableView {
-                        Label("No Hosts", systemImage: "server.rack")
+                        Label("No Profiles", systemImage: "rectangle.stack.badge.plus")
                     } description: {
-                        Text("Add a host to start a Terminal or Codex session.")
+                        Text("Add a profile to open a host directly in Terminal or Codex.")
                     } actions: {
-                        Button("Add Host") {
+                        Button("Add Profile") {
                             isAddingProfile = true
                         }
                     }
@@ -41,6 +42,9 @@ struct HostsScreen: View {
                         HostProfileRow(
                             profile: profile,
                             open: {
+                                openProfile(profile)
+                            },
+                            edit: {
                                 selectedProfile = profile
                             }
                         )
@@ -59,7 +63,7 @@ struct HostsScreen: View {
                     } label: {
                         Image(systemName: "plus")
                     }
-                    .accessibilityLabel("Add Host")
+                    .accessibilityLabel("Add Profile")
 
                     Menu {
                         Button(action: onOpenSettings) {
@@ -94,7 +98,7 @@ struct HostsScreen: View {
                 },
                 connectCodex: {
                     selectedProfile = nil
-                    connectCodex(profile)
+                    connectCodex($0)
                 },
                 probeCapabilities: probeCapabilities
             )
@@ -108,6 +112,7 @@ struct HostsScreen: View {
                 draftPort: $draftPort,
                 draftUser: $draftUser,
                 draftAuthentication: $draftAuthentication,
+                draftLaunchKind: $draftLaunchKind,
                 draftUsesPersistentTerminal: $draftUsesPersistentTerminal,
                 draftPersistentTerminalBackend: $draftPersistentTerminalBackend,
                 draftPersistentSessionName: $draftPersistentSessionName,
@@ -132,7 +137,8 @@ struct HostsScreen: View {
             && !draftHost.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             && !draftUser.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             && validDraftPort != nil
-            && (!draftUsesPersistentTerminal
+            && (draftLaunchKind != .terminal
+                || !draftUsesPersistentTerminal
                 || PersistentTerminalConfiguration.validatedName(draftPersistentSessionName) != nil)
     }
 
@@ -148,8 +154,9 @@ struct HostsScreen: View {
                 port: port,
                 username: draftUser,
                 authentication: draftAuthentication,
+                launchKind: draftLaunchKind,
                 trustedHostKeySHA256: nil,
-                tmuxSession: draftUsesPersistentTerminal
+                tmuxSession: draftLaunchKind == .terminal && draftUsesPersistentTerminal
                     ? PersistentTerminalConfiguration(
                         name: draftPersistentSessionName,
                         backend: draftPersistentTerminalBackend
@@ -164,6 +171,7 @@ struct HostsScreen: View {
         draftPort = "22"
         draftUser = ""
         draftAuthentication = .password
+        draftLaunchKind = .terminal
         draftUsesPersistentTerminal = false
         draftPersistentTerminalBackend = .tmux
         draftPersistentSessionName = ""
@@ -181,6 +189,15 @@ struct HostsScreen: View {
         profiles[index] = profile
     }
 
+    private func openProfile(_ profile: HostProfile) {
+        switch profile.resolvedLaunchKind {
+        case .terminal:
+            connectTerminal(profile)
+        case .codex:
+            connectCodex(profile)
+        }
+    }
+
 }
 
 private struct HostConnectionSheet: View {
@@ -189,10 +206,11 @@ private struct HostConnectionSheet: View {
     let hasSavedPrivateKey: Bool
     let updateProfile: (HostProfile) -> Void
     let connectTerminal: (HostProfile) -> Void
-    let connectCodex: () -> Void
+    let connectCodex: (HostProfile) -> Void
     let probeCapabilities: (HostProfile) async -> RemoteHostProbeOutcome
 
     @Environment(\.dismiss) private var dismiss
+    @State private var launchKind: ProfileLaunchKind
     @State private var usesPersistentTerminal: Bool
     @State private var persistentTerminalBackend: PersistentTerminalBackend
     @State private var persistentSessionName: String
@@ -206,7 +224,7 @@ private struct HostConnectionSheet: View {
         hasSavedPrivateKey: Bool,
         updateProfile: @escaping (HostProfile) -> Void,
         connectTerminal: @escaping (HostProfile) -> Void,
-        connectCodex: @escaping () -> Void,
+        connectCodex: @escaping (HostProfile) -> Void,
         probeCapabilities: @escaping (HostProfile) async -> RemoteHostProbeOutcome
     ) {
         self.profile = profile
@@ -218,6 +236,7 @@ private struct HostConnectionSheet: View {
         self.probeCapabilities = probeCapabilities
 
         let savedConfiguration = profile.persistentTerminal
+        _launchKind = State(initialValue: profile.resolvedLaunchKind)
         _usesPersistentTerminal = State(initialValue: savedConfiguration != nil)
         _persistentTerminalBackend = State(initialValue: savedConfiguration?.backend ?? .tmux)
         _persistentSessionName = State(
@@ -238,6 +257,8 @@ private struct HostConnectionSheet: View {
                         credentialStatus: credentialStatus
                     )
 
+                    ProfileLaunchCard(launchKind: $launchKind)
+
                     HostCapabilityCard(
                         report: capabilityReport,
                         isLoading: isProbingCapabilities,
@@ -248,38 +269,42 @@ private struct HostConnectionSheet: View {
                         }
                     )
 
-                    PersistentTerminalCard(
-                        isEnabled: $usesPersistentTerminal,
-                        backend: $persistentTerminalBackend,
-                        sessionName: $persistentSessionName,
-                        suggestedName: suggestedPersistentSessionName,
-                        capability: capabilityReport?.capability(for: persistentTerminalBackend)
-                    )
+                    if launchKind == .terminal {
+                        PersistentTerminalCard(
+                            isEnabled: $usesPersistentTerminal,
+                            backend: $persistentTerminalBackend,
+                            sessionName: $persistentSessionName,
+                            suggestedName: suggestedPersistentSessionName,
+                            capability: capabilityReport?.capability(for: persistentTerminalBackend)
+                        )
+                    }
 
                     VStack(alignment: .leading, spacing: 10) {
-                        Text("Choose a workspace")
+                        Text("Open profile")
                             .font(.headline)
 
-                        ConnectionModeButton(
-                            title: usesPersistentTerminal ? "Resume Terminal" : "Terminal",
-                            subtitle: usesPersistentTerminal
-                                ? "Persistent \(persistentTerminalBackend.displayTitle) session"
-                                : "Interactive shell with keyboard tools",
-                            detail: usesPersistentTerminal
-                                ? "Restores or creates \(persistentSessionName)"
-                                : "Commands, processes, and remote files",
-                            systemImage: "terminal",
-                            isEnabled: canConnectTerminal,
-                            action: connectTerminalProfile
-                        )
-
-                        ConnectionModeButton(
-                            title: "Codex",
-                            subtitle: "Remote coding sessions and conversations",
-                            detail: "Projects, threads, and approvals",
-                            systemImage: "sparkles",
-                            action: connect(using: connectCodex)
-                        )
+                        if launchKind == .terminal {
+                            ConnectionModeButton(
+                                title: usesPersistentTerminal ? "Resume Terminal" : "Terminal",
+                                subtitle: usesPersistentTerminal
+                                    ? "Persistent \(persistentTerminalBackend.displayTitle) workspaces"
+                                    : "Interactive shell with keyboard tools",
+                                detail: usesPersistentTerminal
+                                    ? "Restores \(persistentSessionName), then lets you switch sessions"
+                                    : "Commands, processes, and remote files",
+                                systemImage: "terminal",
+                                isEnabled: canConnectTerminal,
+                                action: connectTerminalProfile
+                            )
+                        } else {
+                            ConnectionModeButton(
+                                title: "Codex",
+                                subtitle: "Remote coding sessions and conversations",
+                                detail: "Projects, threads, and approvals",
+                                systemImage: "sparkles",
+                                action: connectCodexProfile
+                            )
+                        }
                     }
                 }
                 .padding(.horizontal, 20)
@@ -294,6 +319,13 @@ private struct HostConnectionSheet: View {
                     Button("Cancel") {
                         dismiss()
                     }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Save") {
+                        updateProfile(configuredProfile)
+                        dismiss()
+                    }
+                    .disabled(!configurationIsValid)
                 }
             }
         }
@@ -327,7 +359,7 @@ private struct HostConnectionSheet: View {
         let title = profile.authentication == .password ? "Password required" : "SSH key required"
         return HostCredentialStatus(
             title: title,
-            detail: "You’ll authenticate after choosing a workspace",
+            detail: "You’ll authenticate when opening this profile",
             systemImage: "key",
             tint: .secondary
         )
@@ -340,6 +372,23 @@ private struct HostConnectionSheet: View {
     private var canConnectTerminal: Bool {
         !usesPersistentTerminal
             || PersistentTerminalConfiguration.validatedName(persistentSessionName) != nil
+    }
+
+    private var configurationIsValid: Bool {
+        launchKind == .codex || canConnectTerminal
+    }
+
+    private var configuredProfile: HostProfile {
+        var configuredProfile = profile
+        configuredProfile.launchKind = launchKind
+        configuredProfile.capabilityReport = capabilityReport
+        configuredProfile.persistentTerminal = usesPersistentTerminal
+            ? PersistentTerminalConfiguration(
+                name: persistentSessionName,
+                backend: persistentTerminalBackend
+            )
+            : nil
+        return configuredProfile
     }
 
     private var canProbeCapabilities: Bool {
@@ -367,24 +416,41 @@ private struct HostConnectionSheet: View {
 
     private func connectTerminalProfile() {
         guard canConnectTerminal else { return }
-        var configuredProfile = profile
-        configuredProfile.capabilityReport = capabilityReport
-        configuredProfile.persistentTerminal = usesPersistentTerminal
-            ? PersistentTerminalConfiguration(
-                name: persistentSessionName,
-                backend: persistentTerminalBackend
-            )
-            : nil
+        let configuredProfile = configuredProfile
         updateProfile(configuredProfile)
         dismiss()
         connectTerminal(configuredProfile)
     }
 
-    private func connect(using action: @escaping () -> Void) -> () -> Void {
-        {
-            dismiss()
-            action()
+    private func connectCodexProfile() {
+        let configuredProfile = configuredProfile
+        updateProfile(configuredProfile)
+        dismiss()
+        connectCodex(configuredProfile)
+    }
+}
+
+private struct ProfileLaunchCard: View {
+    @Binding var launchKind: ProfileLaunchKind
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Label("Default workspace", systemImage: launchKind.systemImage)
+                .font(.subheadline.weight(.semibold))
+
+            Picker("Default workspace", selection: $launchKind) {
+                ForEach(ProfileLaunchKind.allCases) { kind in
+                    Text(kind.title).tag(kind)
+                }
+            }
+            .pickerStyle(.segmented)
+
+            Text(launchKind.detail)
+                .font(.caption)
+                .foregroundStyle(.secondary)
         }
+        .padding(16)
+        .background(Color(.secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 16))
     }
 }
 
@@ -714,6 +780,7 @@ private struct NewHostProfileSheet: View {
     @Binding var draftPort: String
     @Binding var draftUser: String
     @Binding var draftAuthentication: AuthenticationKind
+    @Binding var draftLaunchKind: ProfileLaunchKind
     @Binding var draftUsesPersistentTerminal: Bool
     @Binding var draftPersistentTerminalBackend: PersistentTerminalBackend
     @Binding var draftPersistentSessionName: String
@@ -724,6 +791,17 @@ private struct NewHostProfileSheet: View {
     var body: some View {
         NavigationStack {
             Form {
+                Section("Profile") {
+                    Picker("Open with", selection: $draftLaunchKind) {
+                        ForEach(ProfileLaunchKind.allCases) { kind in
+                            Label(kind.title, systemImage: kind.systemImage).tag(kind)
+                        }
+                    }
+                    Text(draftLaunchKind.detail)
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
+
                 Section("Connection") {
                     TextField("Name", text: $draftName)
                     TextField("Host", text: $draftHost)
@@ -749,7 +827,8 @@ private struct NewHostProfileSheet: View {
                     }
                 }
 
-                Section("Persistent Terminal") {
+                if draftLaunchKind == .terminal {
+                    Section("Persistent Terminal") {
                     Toggle("Restore a named session", isOn: $draftUsesPersistentTerminal)
                         .onChange(of: draftUsesPersistentTerminal) {
                             if draftUsesPersistentTerminal,
@@ -779,9 +858,10 @@ private struct NewHostProfileSheet: View {
                             .font(.footnote)
                             .foregroundStyle(.secondary)
                     }
+                    }
                 }
             }
-            .navigationTitle("New Host")
+            .navigationTitle("New Profile")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
@@ -829,7 +909,7 @@ private struct NewHostProfileSheet: View {
     }
 
     private var persistentTerminalRequirement: String? {
-        guard draftUsesPersistentTerminal else { return nil }
+        guard draftLaunchKind == .terminal, draftUsesPersistentTerminal else { return nil }
         guard PersistentTerminalConfiguration.validatedName(draftPersistentSessionName) != nil else {
             return "Use 1–48 ASCII letters, numbers, hyphens, or underscores; start with a letter or number."
         }
@@ -1137,7 +1217,7 @@ struct CodexScreen: View {
 
     let snapshot: CodexSnapshot
     let onSendMessage: (String) -> Void
-    let onUpdateSettings: (String, String, String) -> Void
+    let onUpdateSettings: (String, String, String, String, String) -> Void
     let onBrowseDirectory: (String) async -> Void
     let onListThreads: (String, String, String, Bool, Bool) async -> Void
     let onStartThread: (String) async -> Void
@@ -1159,7 +1239,7 @@ struct CodexScreen: View {
     @State private var draft = ""
     @State private var selectedPath = ""
     @State private var historySearch = ""
-    @State private var homeRoute = CodexHomeRoute.overview
+    @State private var homeRoute = CodexHomeRoute.draft
     @State private var draftReturnRoute = CodexHomeRoute.overview
     @State private var threadReturnRoute = CodexHomeRoute.overview
     @State private var threadReturnScope = CodexHistoryScope.allProjects
@@ -1168,7 +1248,11 @@ struct CodexScreen: View {
     @State private var historyScope = CodexHistoryScope.allProjects
     @State private var showArchivedThreads = false
     @State private var showingSettings = false
+    @State private var showingSessionSwitcher = false
+    @State private var showingDirectoryPicker = false
     @State private var settingsModel = ""
+    @State private var settingsReasoningEffort = ""
+    @State private var settingsServiceTier = ""
     @State private var settingsApprovalPolicy = ""
     @State private var settingsSandbox = ""
     @State private var renameTarget: CodexThreadSummary?
@@ -1205,6 +1289,8 @@ struct CodexScreen: View {
         }
         .task(id: snapshot.endpoint) {
             settingsModel = snapshot.settings.model ?? ""
+            settingsReasoningEffort = snapshot.settings.reasoningEffort ?? ""
+            settingsServiceTier = snapshot.settings.serviceTier ?? ""
             settingsApprovalPolicy = snapshot.settings.approvalPolicy ?? ""
             settingsSandbox = snapshot.settings.sandbox ?? ""
         }
@@ -1225,12 +1311,14 @@ struct CodexScreen: View {
             isChatAutoFollowEnabled = true
             if snapshot.threadId != nil {
                 isShowingThread = true
-            } else {
+            } else if snapshot.status == .connected {
                 isShowingThread = false
             }
         }
         .onChange(of: snapshot.settings) {
             settingsModel = snapshot.settings.model ?? ""
+            settingsReasoningEffort = snapshot.settings.reasoningEffort ?? ""
+            settingsServiceTier = snapshot.settings.serviceTier ?? ""
             settingsApprovalPolicy = snapshot.settings.approvalPolicy ?? ""
             settingsSandbox = snapshot.settings.sandbox ?? ""
         }
@@ -1243,17 +1331,50 @@ struct CodexScreen: View {
                 modelOptions: modelOptions,
                 isLoadingModels: snapshot.settings.isLoadingModels,
                 modelsError: snapshot.settings.modelsError,
+                reasoningEffort: $settingsReasoningEffort,
+                serviceTier: $settingsServiceTier,
                 approvalPolicy: $settingsApprovalPolicy,
                 sandbox: $settingsSandbox,
                 canApply: settingsCanApply,
                 apply: {
                     onUpdateSettings(
                         settingsModel.trimmingCharacters(in: .whitespacesAndNewlines),
+                        settingsReasoningEffort,
+                        settingsServiceTier,
                         settingsApprovalPolicy,
                         settingsSandbox
                     )
                 }
             )
+        }
+        .sheet(isPresented: $showingSessionSwitcher) {
+            CodexSessionSwitcherSheet(
+                profileName: snapshot.title,
+                threads: codexSessionThreads,
+                selectedThreadID: snapshot.threadId,
+                pendingApprovalCount: snapshot.pendingApprovals.count,
+                isLoading: snapshot.threads.isLoading,
+                errorMessage: snapshot.threads.error,
+                refresh: {
+                    Task { await refreshSessionSwitcher() }
+                },
+                newConversation: beginSessionSwitcherDraft,
+                resume: openSessionSwitcherThread
+            )
+            .presentationDetents([.medium, .large])
+        }
+        .sheet(isPresented: $showingDirectoryPicker) {
+            CodexDirectoryPicker(
+                directory: snapshot.directory,
+                selectedPath: selectedProjectPath,
+                openDirectory: { path in
+                    Task { await onBrowseDirectory(path) }
+                },
+                selectDirectory: { path in
+                    selectedPath = path
+                }
+            )
+            .presentationDetents([.medium, .large])
         }
         .alert("Rename Thread", isPresented: Binding(
             get: { renameTarget != nil },
@@ -1313,16 +1434,29 @@ struct CodexScreen: View {
                 goBack()
             }
 
-            VStack(alignment: .leading, spacing: 2) {
-                Text(headerTitle)
-                    .font(.headline)
-                    .lineLimit(1)
-                    .truncationMode(.tail)
-                Text(headerSubtitle)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
+            Button {
+                showingSessionSwitcher = true
+                Task { await refreshSessionSwitcher() }
+            } label: {
+                HStack(spacing: 7) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(headerTitle)
+                            .font(.headline)
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                        Text(sessionHeaderSubtitle)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                    }
+                    Image(systemName: "chevron.down")
+                        .font(.caption2.weight(.bold))
+                        .foregroundStyle(.secondary)
+                }
             }
+            .buttonStyle(.plain)
+            .disabled(snapshot.status != .connected)
+            .accessibilityLabel("Switch Codex session")
 
             Spacer()
 
@@ -1407,6 +1541,52 @@ struct CodexScreen: View {
             location = snapshot.cwd.map(lastPathComponent) ?? snapshot.endpoint
         }
         return "\(snapshot.status.title) · \(location)"
+    }
+
+    private var sessionHeaderSubtitle: String {
+        guard snapshot.status == .connected else { return headerSubtitle }
+        let count = codexSessionThreads.count
+        return "\(headerSubtitle) · \(count) \(count == 1 ? "session" : "sessions")"
+    }
+
+    private var codexSessionThreads: [CodexThreadSummary] {
+        var threads = snapshot.threads.threads
+        if let current = snapshot.threadDetail.thread,
+           !threads.contains(where: { $0.id == current.id }) {
+            threads.insert(current, at: 0)
+        }
+        return threads
+    }
+
+    private func refreshSessionSwitcher() async {
+        guard snapshot.status == .connected else { return }
+        let cwd = selectedProjectPath.isEmpty ? (snapshot.cwd ?? "") : selectedProjectPath
+        await onListThreads(cwd, "", "", false, false)
+    }
+
+    private func openSessionSwitcherThread(_ thread: CodexThreadSummary) {
+        showingSessionSwitcher = false
+        threadReturnRoute = homeRoute
+        threadReturnScope = historyScope
+        openingThreadId = thread.id
+        draft = ""
+        isChatAutoFollowEnabled = true
+        Task {
+            await onResumeThread(thread.id)
+            isShowingThread = true
+            if openingThreadId == thread.id {
+                openingThreadId = nil
+            }
+        }
+    }
+
+    private func beginSessionSwitcherDraft() {
+        showingSessionSwitcher = false
+        draftReturnRoute = homeRoute
+        draft = ""
+        isChatAutoFollowEnabled = true
+        homeRoute = .draft
+        isShowingThread = false
     }
 
     private var headerTitle: String {
@@ -1600,55 +1780,14 @@ struct CodexScreen: View {
 
     private var draftChatView: some View {
         VStack(spacing: 0) {
-            ScrollView {
-                LazyVStack(alignment: .leading, spacing: 14) {
-                    draftWorkspaceSection
-                }
-                .padding(14)
-            }
+            CodexNewConversationPrompt(
+                directoryName: selectedProjectPath.isEmpty ? nil : lastPathComponent(selectedProjectPath),
+                chooseDirectory: presentDirectoryPicker
+            )
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
 
             Divider()
             draftComposer
-        }
-    }
-
-    private var draftWorkspaceSection: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack(alignment: .center, spacing: 10) {
-                CodexInlineTextField(
-                    systemImage: "folder",
-                    placeholder: "Workspace path",
-                    text: $selectedPath,
-                    submitLabel: .go
-                ) {
-                    guard canUseProjectActions else { return }
-                    homeRoute = .project
-                    Task { await selectTypedProject() }
-                }
-
-                CodexActionIconButton(
-                    systemImage: "arrow.right",
-                    accessibilityLabel: "Show Workspace Conversations",
-                    isEnabled: canUseProjectActions
-                ) {
-                    homeRoute = .project
-                    Task { await selectTypedProject() }
-                }
-            }
-
-            if !knownProjectPaths.isEmpty {
-                VStack(alignment: .leading, spacing: 8) {
-                    ForEach(knownProjectPaths, id: \.self) { path in
-                        CodexDirectoryRow(
-                            title: lastPathComponent(path),
-                            subtitle: path,
-                            systemImage: "folder"
-                        ) {
-                            selectedPath = path
-                        }
-                    }
-                }
-            }
         }
     }
 
@@ -1957,15 +2096,25 @@ struct CodexScreen: View {
 
     private var settingsCanApply: Bool {
         settingsModel.trimmingCharacters(in: .whitespacesAndNewlines) != (snapshot.settings.model ?? "").trimmingCharacters(in: .whitespacesAndNewlines) ||
+            settingsReasoningEffort != (snapshot.settings.reasoningEffort ?? "") ||
+            settingsServiceTier != (snapshot.settings.serviceTier ?? "") ||
             settingsApprovalPolicy != (snapshot.settings.approvalPolicy ?? "") ||
             settingsSandbox != (snapshot.settings.sandbox ?? "")
     }
 
     private func presentCodexSettings() {
         settingsModel = snapshot.settings.model ?? ""
+        settingsReasoningEffort = snapshot.settings.reasoningEffort ?? ""
+        settingsServiceTier = snapshot.settings.serviceTier ?? ""
         settingsApprovalPolicy = snapshot.settings.approvalPolicy ?? ""
         settingsSandbox = snapshot.settings.sandbox ?? ""
         showingSettings = true
+    }
+
+    private func presentDirectoryPicker() {
+        guard snapshot.status == .connected, !selectedProjectPath.isEmpty else { return }
+        showingDirectoryPicker = true
+        Task { await onBrowseDirectory(selectedProjectPath) }
     }
 
     private var selectedProjectPath: String {
@@ -2020,7 +2169,7 @@ struct CodexScreen: View {
     }
 
     private func goBack() {
-        if isShowingThread && snapshot.threadId != nil {
+        if isShowingThread {
             returnToThreadOrigin()
             return
         }
@@ -2166,6 +2315,162 @@ private enum CodexHistoryScope: Hashable {
     case allProjects
 }
 
+private struct CodexNewConversationPrompt: View {
+    let directoryName: String?
+    let chooseDirectory: () -> Void
+
+    var body: some View {
+        Group {
+            if let directoryName, !directoryName.isEmpty {
+                HStack(alignment: .firstTextBaseline, spacing: 0) {
+                    Text("What should we build in ")
+                    Button(action: chooseDirectory) {
+                        Text(directoryName)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                            .underline()
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(ShellowTheme.accent)
+                    .accessibilityLabel("Choose directory, current directory \(directoryName)")
+                    Text("?")
+                }
+            } else {
+                Text("What should we build?")
+            }
+        }
+        .font(.title2.weight(.semibold))
+        .foregroundStyle(.primary)
+        .multilineTextAlignment(.center)
+        .padding(.horizontal, 24)
+    }
+}
+
+private struct CodexDirectoryPicker: View {
+    @Environment(\.dismiss) private var dismiss
+
+    let directory: CodexDirectoryState
+    let selectedPath: String
+    let openDirectory: (String) -> Void
+    let selectDirectory: (String) -> Void
+
+    private var currentPath: String {
+        let browsedPath = directory.path?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return browsedPath.isEmpty ? selectedPath : browsedPath
+    }
+
+    private var folders: [CodexDirectoryEntry] {
+        directory.entries.filter(\.isDirectory)
+    }
+
+    var body: some View {
+        NavigationStack {
+            List {
+                if !currentPath.isEmpty {
+                    Section {
+                        Text(currentPath)
+                            .font(.footnote.monospaced())
+                            .foregroundStyle(.secondary)
+                            .lineLimit(2)
+                            .truncationMode(.middle)
+                            .textSelection(.enabled)
+                    }
+                }
+
+                Section {
+                    if directory.isLoading {
+                        HStack(spacing: 10) {
+                            ProgressView()
+                                .controlSize(.small)
+                            Text("Loading folders")
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+
+                    if let error = directory.error {
+                        Label(error, systemImage: "exclamationmark.triangle")
+                            .foregroundStyle(.orange)
+                    }
+
+                    if let parent = directory.parent {
+                        CodexDirectoryPickerRow(
+                            title: "Parent Directory",
+                            path: parent,
+                            systemImage: "arrow.up"
+                        ) {
+                            openDirectory(parent)
+                        }
+                    }
+
+                    ForEach(folders) { folder in
+                        CodexDirectoryPickerRow(
+                            title: folder.name,
+                            path: folder.path,
+                            systemImage: "folder"
+                        ) {
+                            openDirectory(folder.path)
+                        }
+                    }
+
+                    if folders.isEmpty, !directory.isLoading, directory.error == nil {
+                        Text("No folders")
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            }
+            .listStyle(.plain)
+            .navigationTitle("Choose Directory")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") {
+                        dismiss()
+                    }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Choose") {
+                        selectDirectory(currentPath)
+                        dismiss()
+                    }
+                    .disabled(currentPath.isEmpty || directory.isLoading)
+                }
+            }
+        }
+    }
+}
+
+private struct CodexDirectoryPickerRow: View {
+    let title: String
+    let path: String
+    let systemImage: String
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 10) {
+                Image(systemName: systemImage)
+                    .frame(width: 22)
+                    .foregroundStyle(.secondary)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(title)
+                        .foregroundStyle(.primary)
+                    Text(codexCompactPath(path))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+                Spacer()
+                Image(systemName: "chevron.right")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.tertiary)
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+}
+
 private struct CodexSectionHeader: View {
     let title: String
     var detail: String?
@@ -2192,6 +2497,96 @@ private struct CodexOverflowMenuLabel: View {
             .frame(width: 30, height: 30)
             .foregroundStyle(.secondary)
             .contentShape(Circle())
+    }
+}
+
+private struct CodexSessionSwitcherSheet: View {
+    @Environment(\.dismiss) private var dismiss
+
+    let profileName: String
+    let threads: [CodexThreadSummary]
+    let selectedThreadID: String?
+    let pendingApprovalCount: Int
+    let isLoading: Bool
+    let errorMessage: String?
+    let refresh: () -> Void
+    let newConversation: () -> Void
+    let resume: (CodexThreadSummary) -> Void
+
+    var body: some View {
+        NavigationStack {
+            List {
+                Section {
+                    if threads.isEmpty, isLoading {
+                        HStack(spacing: 10) {
+                            ProgressView()
+                                .controlSize(.small)
+                            Text("Loading conversations…")
+                                .foregroundStyle(.secondary)
+                        }
+                    } else if threads.isEmpty {
+                        ContentUnavailableView(
+                            "No Conversations",
+                            systemImage: "bubble.left.and.bubble.right",
+                            description: Text(errorMessage ?? "Start a conversation on \(profileName) to get started.")
+                        )
+                    } else {
+                        ForEach(threads) { thread in
+                            Button {
+                                resume(thread)
+                            } label: {
+                                HStack(spacing: 12) {
+                                    Image(systemName: thread.id == selectedThreadID ? "checkmark.circle.fill" : "circle")
+                                        .foregroundStyle(thread.id == selectedThreadID ? ShellowTheme.accent : .secondary)
+
+                                    VStack(alignment: .leading, spacing: 3) {
+                                        Text(thread.displayTitle)
+                                            .font(.body.weight(.semibold))
+                                            .foregroundStyle(.primary)
+                                            .lineLimit(1)
+                                        Text(codexCompactPath(thread.cwd))
+                                            .font(.caption)
+                                            .foregroundStyle(.secondary)
+                                            .lineLimit(1)
+                                    }
+
+                                    Spacer()
+
+                                    if let indicator = thread.statusIndicator {
+                                        CodexThreadStatusBadge(indicator: indicator)
+                                    }
+                                }
+                            }
+                            .buttonStyle(.plain)
+                            .disabled(thread.id == selectedThreadID)
+                        }
+                    }
+                } header: {
+                    Text("Codex on \(profileName)")
+                }
+
+                Section {
+                    Button {
+                        dismiss()
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25, execute: newConversation)
+                    } label: {
+                        Label("New Conversation", systemImage: "square.and.pencil")
+                    }
+
+                    Button(action: refresh) {
+                        Label("Refresh", systemImage: "arrow.clockwise")
+                    }
+                    .disabled(isLoading)
+                }
+            }
+            .navigationTitle("Sessions")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Done") { dismiss() }
+                }
+            }
+        }
     }
 }
 
@@ -2482,6 +2877,78 @@ private struct CodexDirectoryRow: View {
     }
 }
 
+private enum CodexThreadStatusIndicator: Equatable {
+    case running
+    case approval(Int)
+    case userInput
+    case failed(String?)
+    case systemError
+
+    var title: String {
+        switch self {
+        case .running: "Running"
+        case let .approval(count): count > 1 ? "Approval \(count)" : "Approval"
+        case .userInput: "Reply needed"
+        case .failed: "Failed"
+        case .systemError: "Error"
+        }
+    }
+
+    var accessibilityLabel: String {
+        switch self {
+        case .running: "Codex is running"
+        case let .approval(count):
+            "\(max(count, 1)) pending Codex approval\(max(count, 1) == 1 ? "" : "s")"
+        case .userInput: "Codex needs a reply"
+        case let .failed(message): message.map { "Codex failed: \($0)" } ?? "Codex failed"
+        case .systemError: "Codex system error"
+        }
+    }
+
+    var icon: String {
+        switch self {
+        case .running: "circle.dotted"
+        case .approval: "checkmark.shield"
+        case .userInput: "questionmark.bubble"
+        case .failed, .systemError: "exclamationmark.triangle.fill"
+        }
+    }
+
+    var tint: Color {
+        switch self {
+        case .running: ShellowTheme.accent
+        case .approval, .userInput: ShellowTheme.warning
+        case .failed, .systemError: .red
+        }
+    }
+}
+
+private struct CodexThreadStatusBadge: View {
+    let indicator: CodexThreadStatusIndicator
+
+    var body: some View {
+        HStack(spacing: 4) {
+            if indicator == .running {
+                ProgressView()
+                    .controlSize(.mini)
+                    .tint(indicator.tint)
+            } else {
+                Image(systemName: indicator.icon)
+                    .font(.system(size: 9, weight: .bold))
+            }
+            Text(indicator.title)
+                .lineLimit(1)
+        }
+        .font(.caption2.weight(.semibold))
+        .foregroundStyle(indicator.tint)
+        .padding(.horizontal, 7)
+        .padding(.vertical, 4)
+        .background(indicator.tint.opacity(0.13), in: Capsule())
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(indicator.accessibilityLabel)
+    }
+}
+
 private struct CodexThreadRow: View {
     let thread: CodexThreadSummary
     let archived: Bool
@@ -2514,6 +2981,8 @@ private struct CodexThreadRow: View {
                     ProgressView()
                         .controlSize(.mini)
                         .frame(width: 30, height: 30)
+                } else if let indicator = thread.statusIndicator {
+                    CodexThreadStatusBadge(indicator: indicator)
                 }
             }
             .padding(.horizontal, 4)
@@ -2564,7 +3033,6 @@ private struct CodexThreadRow: View {
             parts.append(lastPathComponent(thread.cwd))
         }
         parts.append(Self.compactDateFormatter.string(from: date))
-        parts.append(thread.status)
         parts = parts.filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
         if thread.forkedFromId != nil {
             parts.append("fork")
@@ -3297,6 +3765,8 @@ private struct CodexSettingsSheet: View {
     let modelOptions: [CodexModelOption]
     let isLoadingModels: Bool
     let modelsError: String?
+    @Binding var reasoningEffort: String
+    @Binding var serviceTier: String
     @Binding var approvalPolicy: String
     @Binding var sandbox: String
     let canApply: Bool
@@ -3313,6 +3783,10 @@ private struct CodexSettingsSheet: View {
         return options
     }
 
+    private var selectedModel: CodexModelOption? {
+        pickerOptions.first(where: { $0.id == model })
+    }
+
     var body: some View {
         NavigationStack {
             Form {
@@ -3327,6 +3801,25 @@ private struct CodexSettingsSheet: View {
                         CodexInlineStatusRow(text: "Loading models", isLoading: true)
                     } else if let modelsError {
                         CodexInlineStatusRow(text: modelsError, tone: .warning)
+                    }
+                }
+
+                Section("Performance") {
+                    Picker("Reasoning", selection: $reasoningEffort) {
+                        Text("Use model default").tag("")
+                        ForEach(selectedModel?.reasoningEfforts ?? []) { option in
+                            Text(option.name).tag(option.id)
+                        }
+                    }
+                    Picker("Speed", selection: $serviceTier) {
+                        Text("Standard").tag("")
+                        ForEach(selectedModel?.serviceTiers ?? []) { option in
+                            Text(option.name).tag(option.id)
+                        }
+                    }
+                    if selectedModel?.serviceTiers.isEmpty != false {
+                        Text("Fast mode is unavailable for this model.")
+                            .foregroundStyle(.secondary)
                     }
                 }
 
@@ -3350,6 +3843,10 @@ private struct CodexSettingsSheet: View {
                 }
             }
             .navigationTitle("Codex Settings")
+            .onChange(of: model) {
+                reasoningEffort = ""
+                serviceTier = ""
+            }
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Cancel") {
@@ -3375,6 +3872,34 @@ private extension CodexThreadSummary {
         }
         let preview = preview.trimmingCharacters(in: .whitespacesAndNewlines)
         return preview.isEmpty ? id : preview
+    }
+
+    var statusIndicator: CodexThreadStatusIndicator? {
+        if status == "systemError" {
+            return .systemError
+        }
+        if status == "active" {
+            if pendingApprovalCount > 0 || activeFlags.contains("waitingOnApproval") {
+                return .approval(pendingApprovalCount)
+            }
+            if activeFlags.contains("waitingOnUserInput") {
+                return .userInput
+            }
+            return .running
+        }
+        if pendingApprovalCount > 0 || activeFlags.contains("waitingOnApproval") {
+            return .approval(pendingApprovalCount)
+        }
+        if activeFlags.contains("waitingOnUserInput") {
+            return .userInput
+        }
+        if lastTurnStatus == "failed" {
+            return .failed(lastTurnError)
+        }
+        if lastTurnStatus == "inProgress" {
+            return .running
+        }
+        return nil
     }
 }
 
@@ -3434,18 +3959,23 @@ func privateKeyLooksUsable(_ value: String) -> Bool {
 private struct HostProfileRow: View {
     let profile: HostProfile
     let open: () -> Void
+    let edit: () -> Void
 
     var body: some View {
-        Button(action: open) {
-            HStack(spacing: 12) {
+        HStack(spacing: 10) {
+            Button(action: open) {
+                HStack(spacing: 12) {
+                    Image(systemName: profile.resolvedLaunchKind.systemImage)
+                        .font(.system(size: 16, weight: .semibold))
+                        .foregroundStyle(ShellowTheme.accent)
+                        .frame(width: 34, height: 34)
+                        .background(ShellowTheme.accent.opacity(0.12), in: RoundedRectangle(cornerRadius: 9))
+
                 VStack(alignment: .leading, spacing: 3) {
                     Text(profile.name)
                         .font(.body.weight(.semibold))
-                    Text(profile.endpoint)
+                    Text("\(profile.resolvedLaunchKind.title) · \(profile.endpoint)")
                         .font(.caption)
-                        .foregroundStyle(.secondary)
-                    Text(profile.hostKeyTrustTitle)
-                        .font(.caption2)
                         .foregroundStyle(.secondary)
                     if let report = profile.capabilityReport {
                         Label(
@@ -3467,14 +3997,25 @@ private struct HostProfileRow: View {
 
                 Spacer()
 
-                Image(systemName: "chevron.right")
+                Image(systemName: "arrow.right")
                     .font(.caption.weight(.semibold))
-                    .foregroundStyle(.tertiary)
+                    .foregroundStyle(ShellowTheme.accent)
+                }
+                .padding(.vertical, 6)
+                .contentShape(Rectangle())
             }
-            .padding(.vertical, 6)
-            .contentShape(Rectangle())
+            .buttonStyle(.plain)
+
+            Button(action: edit) {
+                Image(systemName: "ellipsis")
+                    .font(.system(size: 14, weight: .semibold))
+                    .frame(width: 34, height: 34)
+                    .background(Color(.tertiarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 9))
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(.secondary)
+            .accessibilityLabel("Edit \(profile.name)")
         }
-        .buttonStyle(.plain)
     }
 }
 

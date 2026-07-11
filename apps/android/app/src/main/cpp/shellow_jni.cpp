@@ -303,6 +303,20 @@ Java_xyz_zinglix_shellow_core_ShellowNative_nativeSetRendererOverlayJson(
 }
 
 extern "C" JNIEXPORT jstring JNICALL
+Java_xyz_zinglix_shellow_core_ShellowNative_nativeSetTerminalThemeJson(
+    JNIEnv *env,
+    jobject,
+    jlong handle,
+    jstring themeId
+) {
+    const std::string theme = readString(env, themeId);
+    return takeJson(
+        env,
+        shellow_engine_set_terminal_theme_json(engineFromHandle(handle), theme.c_str())
+    );
+}
+
+extern "C" JNIEXPORT jstring JNICALL
 Java_xyz_zinglix_shellow_core_ShellowNative_nativeAttachAndroidNativeWindowJson(
     JNIEnv *env,
     jobject,
@@ -683,10 +697,14 @@ Java_xyz_zinglix_shellow_core_ShellowNative_nativeUpdateCodexSettingsJson(
     jobject,
     jlong handle,
     jstring model,
+    jstring reasoningEffort,
+    jstring serviceTier,
     jstring approvalPolicy,
     jstring sandbox
 ) {
     std::string modelText = readString(env, model);
+    std::string reasoningEffortText = readString(env, reasoningEffort);
+    std::string serviceTierText = readString(env, serviceTier);
     std::string approvalPolicyText = readString(env, approvalPolicy);
     std::string sandboxText = readString(env, sandbox);
     return takeJson(
@@ -694,6 +712,8 @@ Java_xyz_zinglix_shellow_core_ShellowNative_nativeUpdateCodexSettingsJson(
         shellow_engine_update_codex_settings_json(
             engineFromHandle(handle),
             modelText.c_str(),
+            reasoningEffortText.c_str(),
+            serviceTierText.c_str(),
             approvalPolicyText.c_str(),
             sandboxText.c_str()
         )

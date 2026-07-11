@@ -457,6 +457,10 @@ struct CodexThreadSummary: Identifiable, Equatable, Decodable {
     var preview: String
     var cwd: String
     var status: String
+    var activeFlags: [String]
+    var pendingApprovalCount: Int
+    var lastTurnStatus: String?
+    var lastTurnError: String?
     var updatedAt: UInt64
     var createdAt: UInt64
     var source: String
@@ -504,10 +508,52 @@ struct CodexOperationState: Equatable, Decodable {
 struct CodexModelOption: Identifiable, Equatable, Decodable {
     var id: String
     var name: String
+    var reasoningEfforts: [CodexSettingOption]
+    var defaultReasoningEffort: String?
+    var serviceTiers: [CodexSettingOption]
+    var defaultServiceTier: String?
+
+    init(
+        id: String,
+        name: String,
+        reasoningEfforts: [CodexSettingOption] = [],
+        defaultReasoningEffort: String? = nil,
+        serviceTiers: [CodexSettingOption] = [],
+        defaultServiceTier: String? = nil
+    ) {
+        self.id = id
+        self.name = name
+        self.reasoningEfforts = reasoningEfforts
+        self.defaultReasoningEffort = defaultReasoningEffort
+        self.serviceTiers = serviceTiers
+        self.defaultServiceTier = defaultServiceTier
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id, name, reasoningEfforts, defaultReasoningEffort, serviceTiers, defaultServiceTier
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(String.self, forKey: .id)
+        name = try container.decode(String.self, forKey: .name)
+        reasoningEfforts = try container.decodeIfPresent([CodexSettingOption].self, forKey: .reasoningEfforts) ?? []
+        defaultReasoningEffort = try container.decodeIfPresent(String.self, forKey: .defaultReasoningEffort)
+        serviceTiers = try container.decodeIfPresent([CodexSettingOption].self, forKey: .serviceTiers) ?? []
+        defaultServiceTier = try container.decodeIfPresent(String.self, forKey: .defaultServiceTier)
+    }
+}
+
+struct CodexSettingOption: Identifiable, Equatable, Decodable {
+    var id: String
+    var name: String
+    var description: String?
 }
 
 struct CodexSettingsState: Equatable, Decodable {
     var model: String?
+    var reasoningEffort: String?
+    var serviceTier: String?
     var approvalPolicy: String?
     var sandbox: String?
     var availableModels: [CodexModelOption]
@@ -516,6 +562,8 @@ struct CodexSettingsState: Equatable, Decodable {
 
     static let empty = CodexSettingsState(
         model: nil,
+        reasoningEffort: nil,
+        serviceTier: nil,
         approvalPolicy: nil,
         sandbox: nil,
         availableModels: [],
@@ -525,6 +573,8 @@ struct CodexSettingsState: Equatable, Decodable {
 
     init(
         model: String?,
+        reasoningEffort: String?,
+        serviceTier: String?,
         approvalPolicy: String?,
         sandbox: String?,
         availableModels: [CodexModelOption],
@@ -532,6 +582,8 @@ struct CodexSettingsState: Equatable, Decodable {
         modelsError: String?
     ) {
         self.model = model
+        self.reasoningEffort = reasoningEffort
+        self.serviceTier = serviceTier
         self.approvalPolicy = approvalPolicy
         self.sandbox = sandbox
         self.availableModels = availableModels
@@ -541,6 +593,8 @@ struct CodexSettingsState: Equatable, Decodable {
 
     private enum CodingKeys: String, CodingKey {
         case model
+        case reasoningEffort
+        case serviceTier
         case approvalPolicy
         case sandbox
         case availableModels
@@ -551,6 +605,8 @@ struct CodexSettingsState: Equatable, Decodable {
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         model = try container.decodeIfPresent(String.self, forKey: .model)
+        reasoningEffort = try container.decodeIfPresent(String.self, forKey: .reasoningEffort)
+        serviceTier = try container.decodeIfPresent(String.self, forKey: .serviceTier)
         approvalPolicy = try container.decodeIfPresent(String.self, forKey: .approvalPolicy)
         sandbox = try container.decodeIfPresent(String.self, forKey: .sandbox)
         availableModels = try container.decodeIfPresent([CodexModelOption].self, forKey: .availableModels) ?? []

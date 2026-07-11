@@ -172,13 +172,13 @@ mod libghostty_vt_backend {
         TerminalCursorShape, TerminalGridLine, TerminalGridRun, TerminalGridSnapshot,
         TerminalGridStyle, TerminalScreenKind,
     };
-    use crate::TerminalGridColor;
+    use crate::{TerminalGridColor, terminal_theme::TerminalTheme};
     use libghostty_vt::{
         Error, RenderState, Terminal, TerminalOptions,
         render::{CursorVisualStyle, Dirty, RowIterator},
         screen::{Cell, CellContentTag, CellWide, GridRef, Screen},
         style::{PaletteIndex, RgbColor, Style, StyleColor, Underline},
-        terminal::{Mode, Point, PointCoordinate},
+        terminal::{ColorScheme, Mode, Point, PointCoordinate},
     };
     use std::{
         cell::Cell as CounterCell,
@@ -202,7 +202,12 @@ mod libghostty_vt_backend {
     }
 
     impl LiveTerminalState {
+        #[cfg(test)]
         pub(crate) fn new(cols: u32, rows: u32) -> Option<Self> {
+            Self::new_with_theme(cols, rows, &crate::terminal_theme::default_terminal_theme())
+        }
+
+        pub(crate) fn new_with_theme(cols: u32, rows: u32, theme: &TerminalTheme) -> Option<Self> {
             let cols = clamp_cols(cols);
             let rows = clamp_rows(rows);
             let bell_count = Arc::new(AtomicUsize::new(0));
@@ -216,12 +221,42 @@ mod libghostty_vt_backend {
                 })
                 .ok()?;
 
-            Some(Self {
+            let mut state = Self {
                 terminal,
                 bell_count,
                 cols,
                 rows,
-            })
+            };
+            state.apply_theme(theme).then_some(state)
+        }
+
+        pub(crate) fn apply_theme(&mut self, theme: &TerminalTheme) -> bool {
+            let palette = theme.palette.map(|color| RgbColor {
+                r: color.r,
+                g: color.g,
+                b: color.b,
+            });
+            let foreground = terminal_rgb(theme.foreground);
+            let background = terminal_rgb(theme.background);
+            let cursor = terminal_rgb(theme.cursor);
+            let scheme = if theme.is_dark {
+                ColorScheme::Dark
+            } else {
+                ColorScheme::Light
+            };
+
+            if self
+                .terminal
+                .set_default_fg_color(Some(foreground))
+                .and_then(|terminal| terminal.set_default_bg_color(Some(background)))
+                .and_then(|terminal| terminal.set_default_cursor_color(Some(cursor)))
+                .and_then(|terminal| terminal.set_default_color_palette(Some(palette)))
+                .is_err()
+            {
+                return false;
+            }
+
+            self.terminal.on_color_scheme(move |_| Some(scheme)).is_ok()
         }
 
         pub(crate) fn write(&mut self, bytes: &[u8]) {
@@ -327,6 +362,21 @@ mod libghostty_vt_backend {
         rows: u32,
     ) -> TerminalGridSnapshot {
         terminal_grid_from_vt_bytes_inner(bytes, cols, rows)
+            .unwrap_or_else(|| empty_terminal_grid_snapshot(clamp_cols(cols), clamp_rows(rows)))
+    }
+
+    pub(super) fn terminal_grid_from_vt_bytes_with_theme(
+        bytes: &[u8],
+        cols: u32,
+        rows: u32,
+        theme: &TerminalTheme,
+    ) -> TerminalGridSnapshot {
+        let Some(mut terminal) = LiveTerminalState::new_with_theme(cols, rows, theme) else {
+            return empty_terminal_grid_snapshot(clamp_cols(cols), clamp_rows(rows));
+        };
+        terminal.write(bytes);
+        terminal
+            .snapshot()
             .unwrap_or_else(|| empty_terminal_grid_snapshot(clamp_cols(cols), clamp_rows(rows)))
     }
 
@@ -721,6 +771,14 @@ mod libghostty_vt_backend {
         }
     }
 
+    fn terminal_rgb(color: TerminalGridColor) -> RgbColor {
+        RgbColor {
+            r: color.r,
+            g: color.g,
+            b: color.b,
+        }
+    }
+
     fn cursor_visual_style(style: CursorVisualStyle) -> TerminalCursorShape {
         match style {
             CursorVisualStyle::Bar => TerminalCursorShape::Bar,
@@ -1014,6 +1072,26 @@ pub(crate) fn terminal_grid_from_vt_bytes(
     rows: u32,
 ) -> TerminalGridSnapshot {
     active_backend().terminal_grid_from_vt_bytes(bytes, cols, rows)
+}
+
+pub(crate) fn terminal_grid_from_vt_bytes_with_theme(
+    bytes: &[u8],
+    cols: u32,
+    rows: u32,
+    theme: &crate::terminal_theme::TerminalTheme,
+) -> TerminalGridSnapshot {
+    #[cfg(feature = "official-libghostty-vt-rs")]
+    {
+        return libghostty_vt_backend::terminal_grid_from_vt_bytes_with_theme(
+            bytes, cols, rows, theme,
+        );
+    }
+
+    #[cfg(not(feature = "official-libghostty-vt-rs"))]
+    {
+        let _ = theme;
+        adapter_terminal_grid_from_vt_bytes(bytes, cols, rows)
+    }
 }
 
 #[cfg(not(feature = "official-libghostty-vt-rs"))]

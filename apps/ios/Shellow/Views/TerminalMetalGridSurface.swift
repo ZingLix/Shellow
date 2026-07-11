@@ -12,12 +12,11 @@ private final class TerminalMetalHostView: MTKView {
 }
 
 struct TerminalMetalGridSurface: UIViewRepresentable {
-    @Environment(\.colorScheme) private var colorScheme
-
     static var isAvailable: Bool {
         MTLCreateSystemDefaultDevice() != nil
     }
 
+    let terminalTheme: TerminalThemeSelection
     let viewportFirstRow: Int
     let viewportRowCount: Int
     let renderTick: Int
@@ -38,7 +37,7 @@ struct TerminalMetalGridSurface: UIViewRepresentable {
         view.isPaused = true
         view.enableSetNeedsDisplay = true
         view.autoResizeDrawable = true
-        view.clearColor = metalClearColor(for: colorScheme)
+        view.clearColor = metalClearColor
         view.delegate = context.coordinator
         view.onLayout = { [weak coordinator = context.coordinator] view in
             coordinator?.layoutChanged(view: view)
@@ -49,7 +48,7 @@ struct TerminalMetalGridSurface: UIViewRepresentable {
     }
 
     func updateUIView(_ view: MTKView, context: Context) {
-        view.clearColor = metalClearColor(for: colorScheme)
+        view.clearColor = metalClearColor
         context.coordinator.update(
             TerminalMetalGridState(
                 viewportFirstRow: viewportFirstRow,
@@ -70,15 +69,9 @@ struct TerminalMetalGridSurface: UIViewRepresentable {
         }
     }
 
-    private func metalClearColor(for colorScheme: ColorScheme) -> MTLClearColor {
-        switch colorScheme {
-        case .dark:
-            MTLClearColor(red: 0.05, green: 0.06, blue: 0.06, alpha: 1)
-        case .light:
-            MTLClearColor(red: 0.97, green: 0.98, blue: 0.96, alpha: 1)
-        @unknown default:
-            MTLClearColor(red: 0.05, green: 0.06, blue: 0.06, alpha: 1)
-        }
+    private var metalClearColor: MTLClearColor {
+        let color = terminalTheme.metalBackground
+        return MTLClearColor(red: color.red, green: color.green, blue: color.blue, alpha: 1)
     }
 
     static func dismantleUIView(_ view: MTKView, coordinator: Coordinator) {

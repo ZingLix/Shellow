@@ -98,6 +98,14 @@ final class ShellowCoreSession: @unchecked Sendable {
         }
     }
 
+    func setTerminalTheme(_ themeID: String) -> String {
+        withLockedEngine {
+            themeID.withCString { pointer in
+                takeString(shellow_engine_set_terminal_theme_json(engine, pointer))
+            }
+        }
+    }
+
     func attachCoreAnimationLayer(rawHandle: UInt64, width: Int, height: Int) -> String {
         withLockedEngine {
             takeString(
@@ -446,20 +454,32 @@ final class ShellowCoreSession: @unchecked Sendable {
         }
     }
 
-    func updateCodexSettings(model: String, approvalPolicy: String, sandbox: String) -> CodexSnapshot {
+    func updateCodexSettings(
+        model: String,
+        reasoningEffort: String,
+        serviceTier: String,
+        approvalPolicy: String,
+        sandbox: String
+    ) -> CodexSnapshot {
         withLockedEngine {
             model.withCString { model in
-                approvalPolicy.withCString { approvalPolicy in
-                    sandbox.withCString { sandbox in
-                        decodeCodex(
-                            shellow_engine_update_codex_settings_json(
-                                engine,
-                                model,
-                                approvalPolicy,
-                                sandbox
-                            ),
-                            label: "update_settings"
-                        )
+                reasoningEffort.withCString { reasoningEffort in
+                    serviceTier.withCString { serviceTier in
+                        approvalPolicy.withCString { approvalPolicy in
+                            sandbox.withCString { sandbox in
+                                decodeCodex(
+                                    shellow_engine_update_codex_settings_json(
+                                        engine,
+                                        model,
+                                        reasoningEffort,
+                                        serviceTier,
+                                        approvalPolicy,
+                                        sandbox
+                                    ),
+                                    label: "update_settings"
+                                )
+                            }
+                        }
                     }
                 }
             }

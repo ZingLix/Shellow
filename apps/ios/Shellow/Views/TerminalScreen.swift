@@ -35,11 +35,14 @@ private struct PendingRemoteClipboard: Identifiable {
 }
 
 private enum PersistentTerminalSheetDestination: Identifiable {
+    case sessions(configuration: PersistentTerminalConfiguration)
     case controls(configuration: PersistentTerminalConfiguration)
     case newSession(configuration: PersistentTerminalConfiguration, suggestedName: String)
 
     var id: String {
         switch self {
+        case .sessions:
+            "sessions"
         case .controls:
             "controls"
         case .newSession:
@@ -273,7 +276,9 @@ struct TerminalScreen: View {
     @Binding var session: TerminalSession
     let settings: ShellowSettings
     let renderTick: Int
+    let profileName: String
     let persistentTerminal: PersistentTerminalConfiguration?
+    let loadPersistentSessions: (() async -> RemoteTerminalSessionCatalog)?
     let onTerminalInput: (String) -> Void
     let onReconnect: (() -> Void)?
     let onDisconnect: () -> Void
@@ -300,6 +305,9 @@ struct TerminalScreen: View {
     @State private var keyboardLayoutCommitToken = 0
     @State private var terminalInputRevision = 0
     @State private var persistentTerminalSheetDestination: PersistentTerminalSheetDestination?
+    @State private var persistentSessionCatalog = RemoteTerminalSessionCatalog.empty
+    @State private var activePersistentSessionName: String?
+    @State private var isRefreshingPersistentSessions = false
 
     var body: some View {
         let search = session.searchPresentation(query: searchQuery, focusedIndex: searchIndex)
@@ -341,6 +349,7 @@ struct TerminalScreen: View {
                     session: session,
                     fontSize: settings.fontSize,
                     lineHeightScale: settings.lineHeightScale,
+                    terminalTheme: settings.terminalTheme,
                     search: search,
                     selection: $selection,
                     renderTick: renderTick,
@@ -369,6 +378,13 @@ struct TerminalScreen: View {
                 VStack(spacing: 8) {
                     TerminalFloatingHeader(
                         session: session,
+                        profileName: profileName,
+                        workspaceName: activePersistentSessionName ?? persistentTerminal?.name,
+                        workspaceCount: persistentSessionCatalog.sessions.count,
+                        isRefreshingWorkspaces: isRefreshingPersistentSessions,
+                        openWorkspaceSwitcher: persistentTerminal.map { configuration in
+                            { persistentTerminalSheetDestination = .sessions(configuration: configuration) }
+                        },
                         onBack: { dismiss() },
                         onReconnect: onReconnect,
                         onDisconnect: onDisconnect
@@ -426,11 +442,18 @@ struct TerminalScreen: View {
             .animation(keyboardAvoidance.animation, value: terminalLift)
             .animation(keyboardAvoidance.animation, value: keyboardCursorOverlap)
         }
-        .background(ShellowTheme.terminalBackground.ignoresSafeArea())
+        .background(settings.terminalTheme.backgroundColor.ignoresSafeArea())
         .ignoresSafeArea(.container, edges: [.top, .bottom])
         .ignoresSafeArea(.keyboard, edges: .bottom)
         .onAppear {
             presentRemoteClipboardIfNeeded()
+            if activePersistentSessionName == nil {
+                activePersistentSessionName = persistentTerminal?.name
+            }
+        }
+        .task(id: session.state) {
+            guard session.state == .connected, persistentTerminal != nil else { return }
+            await refreshPersistentSessions()
         }
         .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillChangeFrameNotification)) { notification in
             updateKeyboardAvoidance(TerminalKeyboardAvoidanceState(notification: notification))
@@ -473,6 +496,23 @@ struct TerminalScreen: View {
         }
         .sheet(item: $persistentTerminalSheetDestination) { destination in
             switch destination {
+            case .sessions(let configuration):
+                TerminalSessionSwitcherSheet(
+                    profileName: profileName,
+                    configuration: configuration,
+                    catalog: persistentSessionCatalog,
+                    activeSessionName: activePersistentSessionName ?? configuration.name,
+                    isRefreshing: isRefreshingPersistentSessions,
+                    refresh: {
+                        Task { await refreshPersistentSessions() }
+                    },
+                    switchSession: switchPersistentSession,
+                    newSession: presentNewPersistentSession,
+                    openControls: {
+                        persistentTerminalSheetDestination = .controls(configuration: configuration)
+                    }
+                )
+                .presentationDetents([.medium, .large])
             case .controls(let configuration):
                 PersistentTerminalControlSheet(
                     configuration: configuration,
@@ -697,11 +737,60 @@ struct TerminalScreen: View {
         persistentTerminalSheetDestination = .controls(configuration: persistentTerminal)
     }
 
+    @MainActor
+    private func refreshPersistentSessions() async {
+        guard let loadPersistentSessions, !isRefreshingPersistentSessions else { return }
+        isRefreshingPersistentSessions = true
+        let catalog = await loadPersistentSessions()
+        guard !Task.isCancelled else {
+            isRefreshingPersistentSessions = false
+            return
+        }
+        persistentSessionCatalog = catalog
+        isRefreshingPersistentSessions = false
+    }
+
+    private func switchPersistentSession(_ name: String) {
+        guard
+            let configuration = persistentTerminal,
+            let name = PersistentTerminalConfiguration.validatedName(name)
+        else {
+            return
+        }
+
+        activePersistentSessionName = name
+        persistentTerminalSheetDestination = nil
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
+            switch configuration.backend {
+            case .tmux:
+                sendTmuxCommandSequence(
+                    "switch-client -t \(name)",
+                    using: sendTerminalInput
+                )
+            case .screen, .zellij:
+                sendDetachAndAttachSequence(
+                    configuration: configuration,
+                    targetSessionName: name,
+                    using: sendTerminalInput
+                )
+            }
+        }
+        refreshPersistentSessionsAfterMutation()
+    }
+
+    private func refreshPersistentSessionsAfterMutation() {
+        Task {
+            try? await Task.sleep(nanoseconds: 1_100_000_000)
+            await refreshPersistentSessions()
+        }
+    }
+
     private func createPersistentSession(
         configuration: PersistentTerminalConfiguration,
         name: String
     ) {
         guard let name = PersistentTerminalConfiguration.validatedName(name) else { return }
+        activePersistentSessionName = name
         switch configuration.backend {
         case .tmux:
             sendTmuxCommandSequence("new-session -s \(name)", using: sendTerminalInput)
@@ -712,6 +801,7 @@ struct TerminalScreen: View {
                 using: sendTerminalInput
             )
         }
+        refreshPersistentSessionsAfterMutation()
     }
 
     private func presentRemoteClipboardIfNeeded() {
@@ -752,6 +842,11 @@ struct TerminalScreen: View {
 
 private struct TerminalFloatingHeader: View {
     let session: TerminalSession
+    let profileName: String
+    let workspaceName: String?
+    let workspaceCount: Int
+    let isRefreshingWorkspaces: Bool
+    let openWorkspaceSwitcher: (() -> Void)?
     let onBack: () -> Void
     let onReconnect: (() -> Void)?
     let onDisconnect: () -> Void
@@ -766,26 +861,45 @@ private struct TerminalFloatingHeader: View {
             .buttonStyle(.plain)
             .foregroundStyle(ShellowTheme.terminalText)
             .background(ShellowTheme.keyBackground.opacity(0.92), in: RoundedRectangle(cornerRadius: 8))
-            .accessibilityLabel("Back to Hosts")
+            .accessibilityLabel("Back to Profiles")
 
-            HStack(spacing: 8) {
-                Circle()
-                    .fill(statusColor)
-                    .frame(width: 8, height: 8)
+            Button {
+                openWorkspaceSwitcher?()
+            } label: {
+                HStack(spacing: 8) {
+                    Circle()
+                        .fill(statusColor)
+                        .frame(width: 8, height: 8)
 
-                Text(session.title)
-                    .font(.subheadline.weight(.semibold))
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.82)
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text(workspaceName ?? session.title)
+                            .font(.subheadline.weight(.semibold))
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.82)
+                        Text(workspaceSubtitle)
+                            .font(.caption2)
+                            .foregroundStyle(ShellowTheme.muted)
+                            .lineLimit(1)
+                    }
+
+                    if openWorkspaceSwitcher != nil {
+                        Image(systemName: "chevron.down")
+                            .font(.caption2.weight(.bold))
+                            .foregroundStyle(ShellowTheme.muted)
+                    }
+                }
+                .padding(.horizontal, 12)
+                .frame(height: 34)
+                .frame(maxWidth: .infinity)
+                .background(ShellowTheme.panelBackground.opacity(0.94), in: RoundedRectangle(cornerRadius: 8))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 8)
+                        .stroke(ShellowTheme.keyBackground.opacity(0.7), lineWidth: 1)
+                )
             }
-            .padding(.horizontal, 12)
-            .frame(height: 34)
-            .frame(maxWidth: .infinity)
-            .background(ShellowTheme.panelBackground.opacity(0.94), in: RoundedRectangle(cornerRadius: 8))
-            .overlay(
-                RoundedRectangle(cornerRadius: 8)
-                    .stroke(ShellowTheme.keyBackground.opacity(0.7), lineWidth: 1)
-            )
+            .buttonStyle(.plain)
+            .disabled(openWorkspaceSwitcher == nil)
+            .accessibilityLabel(openWorkspaceSwitcher == nil ? session.title : "Switch terminal session")
 
             if session.bellCount > 0 {
                 HStack(spacing: 4) {
@@ -833,6 +947,16 @@ private struct TerminalFloatingHeader: View {
         .frame(height: TerminalChromeMetrics.floatingHeaderHeight)
     }
 
+    private var workspaceSubtitle: String {
+        if isRefreshingWorkspaces, workspaceCount == 0 {
+            return "\(profileName) · Loading sessions"
+        }
+        if openWorkspaceSwitcher != nil {
+            return "\(profileName) · \(workspaceCount) \(workspaceCount == 1 ? "session" : "sessions")"
+        }
+        return profileName
+    }
+
     private var statusColor: Color {
         switch session.state {
         case .connected: ShellowTheme.success
@@ -846,6 +970,7 @@ private struct TerminalViewport: View {
     let session: TerminalSession
     let fontSize: Double
     let lineHeightScale: Double
+    let terminalTheme: TerminalThemeSelection
     let search: TerminalSearchPresentation
     @Binding var selection: TerminalSelection?
     let renderTick: Int
@@ -893,6 +1018,7 @@ private struct TerminalViewport: View {
                                         grid: grid,
                                         fontSize: fontSize,
                                         lineHeightScale: lineHeightScale,
+                                        terminalTheme: terminalTheme,
                                         renderTick: renderTick,
                                         scrollOffsetY: gridUsesDirectScrollGeometry ? gridScrollOffsetY : nil,
                                         search: search,
@@ -1169,6 +1295,7 @@ private struct TerminalGridSurface: View {
     let grid: TerminalGridSnapshot
     let fontSize: Double
     let lineHeightScale: Double
+    let terminalTheme: TerminalThemeSelection
     let renderTick: Int
     let scrollOffsetY: CGFloat?
     let search: TerminalSearchPresentation
@@ -1189,6 +1316,7 @@ private struct TerminalGridSurface: View {
         ZStack(alignment: .topLeading) {
             if TerminalMetalGridSurface.isAvailable {
                 TerminalMetalGridSurface(
+                    terminalTheme: terminalTheme,
                     viewportFirstRow: currentViewportFirstRow,
                     viewportRowCount: currentViewportRowCount,
                     renderTick: renderTick,
@@ -2128,6 +2256,113 @@ private struct TerminalInputBar: View {
         } else {
             sendInput(input)
         }
+    }
+}
+
+private struct TerminalSessionSwitcherSheet: View {
+    @Environment(\.dismiss) private var dismiss
+
+    let profileName: String
+    let configuration: PersistentTerminalConfiguration
+    let catalog: RemoteTerminalSessionCatalog
+    let activeSessionName: String
+    let isRefreshing: Bool
+    let refresh: () -> Void
+    let switchSession: (String) -> Void
+    let newSession: () -> Void
+    let openControls: () -> Void
+
+    var body: some View {
+        NavigationStack {
+            List {
+                Section {
+                    if catalog.sessions.isEmpty, isRefreshing {
+                        HStack(spacing: 10) {
+                            ProgressView()
+                                .controlSize(.small)
+                            Text("Loading sessions…")
+                                .foregroundStyle(.secondary)
+                        }
+                    } else if catalog.sessions.isEmpty {
+                        ContentUnavailableView(
+                            "No Sessions",
+                            systemImage: "rectangle.stack",
+                            description: Text(catalog.errorMessage ?? "Create a workspace on \(profileName) to get started.")
+                        )
+                    } else {
+                        ForEach(catalog.sessions) { session in
+                            Button {
+                                switchSession(session.name)
+                            } label: {
+                                HStack(spacing: 12) {
+                                    Image(systemName: session.name == activeSessionName ? "checkmark.circle.fill" : "circle")
+                                        .foregroundStyle(session.name == activeSessionName ? ShellowTheme.accent : .secondary)
+
+                                    VStack(alignment: .leading, spacing: 3) {
+                                        Text(session.name)
+                                            .font(.body.weight(.semibold).monospaced())
+                                            .foregroundStyle(.primary)
+                                        Text(sessionDetail(session))
+                                            .font(.caption)
+                                            .foregroundStyle(.secondary)
+                                    }
+
+                                    Spacer()
+
+                                    if session.isAttached {
+                                        Text("Attached")
+                                            .font(.caption2.weight(.semibold))
+                                            .foregroundStyle(ShellowTheme.success)
+                                    }
+                                }
+                            }
+                            .buttonStyle(.plain)
+                            .disabled(session.name == activeSessionName)
+                        }
+                    }
+                } header: {
+                    Text("\(configuration.backend.displayTitle) on \(profileName)")
+                }
+
+                Section {
+                    Button {
+                        dismissThen(newSession)
+                    } label: {
+                        Label("New Session", systemImage: "plus")
+                    }
+
+                    Button(action: refresh) {
+                        Label("Refresh", systemImage: "arrow.clockwise")
+                    }
+                    .disabled(isRefreshing)
+
+                    Button {
+                        dismissThen(openControls)
+                    } label: {
+                        Label("Workspace Controls", systemImage: "slider.horizontal.3")
+                    }
+                }
+            }
+            .navigationTitle("Sessions")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Done") { dismiss() }
+                }
+            }
+        }
+    }
+
+    private func sessionDetail(_ session: RemoteTerminalSessionSummary) -> String {
+        if let windowCount = session.windowCount {
+            return "\(windowCount) \(windowCount == 1 ? "window" : "windows")"
+        }
+        return session.isAttached ? "Active remote workspace" : "Available remote workspace"
+    }
+
+    private func dismissThen(_ action: @escaping () -> Void) {
+        dismiss()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35, execute: action)
     }
 }
 
@@ -3254,10 +3489,20 @@ enum ShellowTheme {
         session: .constant(.preview),
         settings: ShellowSettings(),
         renderTick: 0,
+        profileName: "Preview Host",
         persistentTerminal: PersistentTerminalConfiguration(
             name: "shellow-preview",
             backend: .tmux
         ),
+        loadPersistentSessions: {
+            RemoteTerminalSessionCatalog(
+                sessions: [
+                    RemoteTerminalSessionSummary(name: "shellow-preview", isAttached: true, windowCount: 2),
+                    RemoteTerminalSessionSummary(name: "logs", isAttached: false, windowCount: 1)
+                ],
+                errorMessage: nil
+            )
+        },
         onTerminalInput: { _ in },
         onReconnect: nil,
         onDisconnect: {},

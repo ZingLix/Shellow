@@ -12,6 +12,7 @@ pub mod ghostty_adapter;
 pub mod integrations;
 pub mod renderer;
 pub mod ssh;
+pub mod terminal_theme;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct HostProfile {
@@ -256,6 +257,7 @@ pub struct ShellowEngine {
     demo_grid_bytes: Option<Vec<u8>>,
     last_grid_signature: RefCell<Option<GridRenderSignature>>,
     renderer: RefCell<renderer::TerminalRenderer>,
+    terminal_theme: terminal_theme::TerminalTheme,
     integration: IntegrationReport,
     #[cfg(feature = "native-integrations")]
     live_shell: Option<ssh::LiveShellHandle>,
@@ -449,6 +451,7 @@ impl ShellowEngine {
             demo_grid_bytes: None,
             last_grid_signature: RefCell::new(None),
             renderer: RefCell::new(renderer::TerminalRenderer::new(80, 24)),
+            terminal_theme: terminal_theme::default_terminal_theme(),
             integration,
             #[cfg(feature = "native-integrations")]
             live_shell: None,
@@ -542,6 +545,21 @@ impl ShellowEngine {
         state: renderer::RendererOverlayState,
     ) -> renderer::RendererOverlayUpdate {
         self.renderer.borrow_mut().set_overlay_state(state)
+    }
+
+    pub fn set_terminal_theme(&mut self, value: &str) -> terminal_theme::TerminalThemeUpdate {
+        let Some(id) = terminal_theme::TerminalThemeId::from_wire(value) else {
+            return terminal_theme::TerminalThemeUpdate::rejected(value, &self.terminal_theme);
+        };
+        let theme = terminal_theme::built_in_theme(id);
+        self.terminal_theme = theme.clone();
+        self.renderer.borrow_mut().set_theme(theme.clone());
+        #[cfg(feature = "native-integrations")]
+        if let Some(live_terminal) = self.live_terminal.as_mut() {
+            let _ = live_terminal.apply_theme(&theme);
+        }
+        self.last_grid_signature.replace(None);
+        terminal_theme::TerminalThemeUpdate::accepted(&theme)
     }
 
     pub fn attach_core_animation_layer_renderer_surface(
@@ -786,8 +804,11 @@ impl ShellowEngine {
 
         #[cfg(feature = "native-integrations")]
         {
-            self.live_terminal =
-                ghostty_adapter::LiveTerminalState::new(self.terminal_cols, self.terminal_rows);
+            self.live_terminal = ghostty_adapter::LiveTerminalState::new_with_theme(
+                self.terminal_cols,
+                self.terminal_rows,
+                &self.terminal_theme,
+            );
             if self.live_terminal.is_none() {
                 self.rows
                     .push(TerminalRow::warning("libghostty-vt live terminal failed"));
@@ -862,8 +883,11 @@ impl ShellowEngine {
 
         #[cfg(feature = "native-integrations")]
         {
-            self.live_terminal =
-                ghostty_adapter::LiveTerminalState::new(self.terminal_cols, self.terminal_rows);
+            self.live_terminal = ghostty_adapter::LiveTerminalState::new_with_theme(
+                self.terminal_cols,
+                self.terminal_rows,
+                &self.terminal_theme,
+            );
             let private_key_result =
                 ssh::validate_private_key_auth(&private_key_pem, passphrase.as_deref());
 
@@ -1052,12 +1076,20 @@ impl ShellowEngine {
     pub fn update_codex_settings(
         &mut self,
         model: Option<&str>,
+        reasoning_effort: Option<&str>,
+        service_tier: Option<&str>,
         approval_policy: Option<&str>,
         sandbox: Option<&str>,
     ) -> codex::CodexSnapshot {
         match self.codex_session.as_mut() {
             Some(session) => session
-                .update_settings(model, approval_policy, sandbox)
+                .update_settings(
+                    model,
+                    reasoning_effort,
+                    service_tier,
+                    approval_policy,
+                    sandbox,
+                )
                 .unwrap_or_else(codex::CodexSnapshot::failure),
             None => codex::CodexSnapshot::failure("Codex is not connected"),
         }
@@ -1344,7 +1376,11 @@ impl ShellowEngine {
             }
             if let Some(live_terminal) = self.live_terminal.as_mut() {
                 if !live_terminal.resize(cols, rows) {
-                    self.live_terminal = ghostty_adapter::LiveTerminalState::new(cols, rows);
+                    self.live_terminal = ghostty_adapter::LiveTerminalState::new_with_theme(
+                        cols,
+                        rows,
+                        &self.terminal_theme,
+                    );
                 }
             }
             return self.poll_live_shell();
@@ -1373,9 +1409,10 @@ impl ShellowEngine {
                 && self.demo_tui.is_none()
             {
                 if self.live_shell.is_some() {
-                    self.live_terminal = ghostty_adapter::LiveTerminalState::new(
+                    self.live_terminal = ghostty_adapter::LiveTerminalState::new_with_theme(
                         self.terminal_cols,
                         self.terminal_rows,
+                        &self.terminal_theme,
                     );
                 }
             }
@@ -1400,8 +1437,11 @@ impl ShellowEngine {
         #[cfg(feature = "native-integrations")]
         {
             if self.live_shell.is_some() {
-                self.live_terminal =
-                    ghostty_adapter::LiveTerminalState::new(self.terminal_cols, self.terminal_rows);
+                self.live_terminal = ghostty_adapter::LiveTerminalState::new_with_theme(
+                    self.terminal_cols,
+                    self.terminal_rows,
+                    &self.terminal_theme,
+                );
             } else {
                 self.live_terminal = None;
             }
@@ -2518,10 +2558,11 @@ impl ShellowEngine {
         } else if self.demo_tui.is_some() {
             Some(self.demo_tui_grid())
         } else if let Some(bytes) = &self.demo_grid_bytes {
-            Some(ghostty_adapter::terminal_grid_from_vt_bytes(
+            Some(ghostty_adapter::terminal_grid_from_vt_bytes_with_theme(
                 bytes,
                 self.terminal_cols,
                 self.terminal_rows,
+                &self.terminal_theme,
             ))
         } else {
             #[cfg(feature = "native-integrations")]
@@ -3189,6 +3230,65 @@ fn control_name(character: char) -> char {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn terminal_theme_switch_updates_renderer_and_rejects_unknown_ids() {
+        let mut engine = ShellowEngine::new();
+        assert_eq!(
+            engine.renderer.borrow().theme_id(),
+            terminal_theme::TerminalThemeId::ShellowDark
+        );
+
+        let update = engine.set_terminal_theme("paper_light");
+        assert!(update.accepted);
+        assert_eq!(update.theme_id, "paper_light");
+        assert_eq!(
+            engine.renderer.borrow().theme_id(),
+            terminal_theme::TerminalThemeId::PaperLight
+        );
+
+        let rejected = engine.set_terminal_theme("not_a_theme");
+        assert!(!rejected.accepted);
+        assert_eq!(rejected.theme_id, "paper_light");
+        assert_eq!(
+            engine.renderer.borrow().theme_id(),
+            terminal_theme::TerminalThemeId::PaperLight
+        );
+    }
+
+    #[test]
+    fn live_terminal_ansi_palette_uses_selected_theme() {
+        let theme = terminal_theme::built_in_theme(terminal_theme::TerminalThemeId::Amber);
+        let mut state = ghostty_adapter::LiveTerminalState::new_with_theme(40, 8, &theme)
+            .expect("themed live terminal should initialize");
+        state.write(b"\x1b[31mred\x1b[0m");
+        let snapshot = state.snapshot().expect("themed terminal snapshot");
+        let foreground = snapshot
+            .styled_lines
+            .iter()
+            .flat_map(|line| &line.runs)
+            .find(|run| run.text.contains("red"))
+            .and_then(|run| run.style.fg);
+        assert_eq!(foreground, Some(theme.palette[1]));
+    }
+
+    #[test]
+    fn local_ansi_demo_uses_selected_theme_palette() {
+        let mut engine = ShellowEngine::new();
+        engine.set_terminal_theme("midnight");
+        engine.send_terminal_input("shellow ansi");
+        engine.send_terminal_input("\r");
+
+        let theme = terminal_theme::built_in_theme(terminal_theme::TerminalThemeId::Midnight);
+        let snapshot = engine.snapshot().grid.expect("ANSI demo grid");
+        let red = snapshot
+            .styled_lines
+            .iter()
+            .flat_map(|line| &line.runs)
+            .find(|run| run.text.contains("red"))
+            .and_then(|run| run.style.fg);
+        assert_eq!(red, Some(theme.palette[1]));
+    }
 
     fn assert_renderer_glyph_atlas_backend(
         backend: &str,

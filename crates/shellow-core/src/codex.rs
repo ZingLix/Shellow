@@ -9,9 +9,10 @@ use serde_json::{Value, json};
 
 use crate::{HostProfile, ssh};
 
-const CODEX_APP_SERVER_COMMAND_BODY: &str = r#"SHELLOW_CODEX_CWD="$(pwd -P 2>/dev/null || pwd)"; printf 'SHELLOW_CODEX_CWD=%s\n' "$SHELLOW_CODEX_CWD" >&2; PATH="$PATH:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$HOME/.local/bin:$HOME/.cargo/bin:$HOME/.bun/bin:$HOME/.npm-global/bin:/home/linuxbrew/.linuxbrew/bin"; export PATH; if command -v codex >/dev/null 2>&1; then exec codex app-server --stdio; fi; echo "codex executable not found in non-interactive SSH PATH. Install Codex CLI or expose it via PATH." >&2; exit 127"#;
+const CODEX_APP_SERVER_COMMAND_BODY: &str = r#"SHELLOW_CODEX_CWD="$(pwd -P 2>/dev/null || pwd)"; printf 'SHELLOW_CODEX_CWD=%s\n' "$SHELLOW_CODEX_CWD" >&2; PATH="$PATH:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$HOME/.local/bin:$HOME/.cargo/bin:$HOME/.bun/bin:$HOME/.npm-global/bin:/home/linuxbrew/.linuxbrew/bin"; export PATH; if ! command -v codex >/dev/null 2>&1; then echo "codex executable not found in non-interactive SSH PATH. Install Codex CLI or expose it via PATH." >&2; exit 127; fi; if ! codex app-server daemon start >/dev/null; then echo "Unable to start the persistent Codex app-server daemon. Run 'codex app-server daemon bootstrap --remote-control' once on this host, then retry." >&2; exit 1; fi; exec codex app-server proxy"#;
 const REMOTE_CWD_PREFIX: &str = "SHELLOW_CODEX_CWD=";
 const APP_SERVER_REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
+const APP_SERVER_PROXY_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(8);
 const COMMAND_OUTPUT_PREVIEW_MAX_LINES: usize = 10;
 const COMMAND_OUTPUT_PREVIEW_MAX_CHARS: usize = 2_400;
 const STATUS_MESSAGE_MAX_CHARS: usize = 2_000;
@@ -147,12 +148,24 @@ pub struct CodexThreadSummary {
     pub preview: String,
     pub cwd: String,
     pub status: String,
+    pub active_flags: Vec<String>,
+    pub pending_approval_count: usize,
+    pub last_turn_status: Option<String>,
+    pub last_turn_error: Option<String>,
     pub updated_at: u64,
     pub created_at: u64,
     pub source: String,
     pub model_provider: String,
     pub forked_from_id: Option<String>,
     pub parent_thread_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct CodexThreadActivity {
+    status: Option<String>,
+    active_flags: Vec<String>,
+    last_turn_status: Option<String>,
+    last_turn_error: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -218,14 +231,29 @@ impl CodexOperationState {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CodexSettingOption {
+    pub id: String,
+    pub name: String,
+    pub description: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CodexModelOption {
     pub id: String,
     pub name: String,
+    #[serde(default)]
+    pub reasoning_efforts: Vec<CodexSettingOption>,
+    pub default_reasoning_effort: Option<String>,
+    #[serde(default)]
+    pub service_tiers: Vec<CodexSettingOption>,
+    pub default_service_tier: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CodexSettingsState {
     pub model: Option<String>,
+    pub reasoning_effort: Option<String>,
+    pub service_tier: Option<String>,
     pub approval_policy: Option<String>,
     pub sandbox: Option<String>,
     pub available_models: Vec<CodexModelOption>,
@@ -238,6 +266,8 @@ impl Default for CodexSettingsState {
         let available_models = default_model_options();
         Self {
             model: available_models.first().map(|model| model.id.clone()),
+            reasoning_effort: None,
+            service_tier: None,
             approval_policy: None,
             sandbox: None,
             available_models,
@@ -736,6 +766,7 @@ enum ClientRequestKind {
 #[derive(Debug, Clone)]
 struct PendingServerRequest {
     id: Value,
+    thread_id: Option<String>,
     approval: CodexApproval,
 }
 
@@ -747,11 +778,14 @@ pub struct CodexSession {
     remote_cwd: Option<String>,
     status: CodexStatus,
     initialized: bool,
+    connection_started_at: Instant,
     observed_host_key_sha256: Option<String>,
     thread_id: Option<String>,
+    event_thread_id: Option<String>,
     turn_active: bool,
     messages: Vec<CodexMessage>,
     pending_approvals: Vec<PendingServerRequest>,
+    thread_activity: HashMap<String, CodexThreadActivity>,
     directory: CodexDirectoryState,
     threads: CodexThreadListState,
     projects: CodexProjectState,
@@ -766,6 +800,7 @@ pub struct CodexSession {
     next_local_message_id: u64,
     local_revision: u64,
     request_kinds: HashMap<u64, ClientRequestKind>,
+    request_thread_ids: HashMap<u64, String>,
     completed_requests: HashMap<u64, Result<(), String>>,
     operation_thread_id: Option<String>,
     assistant_message_indices: HashMap<String, usize>,
@@ -837,14 +872,20 @@ impl CodexSession {
             remote_cwd: None,
             status: CodexStatus::Connecting,
             initialized: false,
+            connection_started_at: Instant::now(),
             observed_host_key_sha256: None,
             thread_id: None,
+            event_thread_id: None,
             turn_active: false,
             messages: vec![
-                CodexMessage::status("status-0", "Starting codex app-server over SSH."),
-                CodexMessage::status("status-1", "Waiting for JSON-RPC handshake."),
+                CodexMessage::status(
+                    "status-0",
+                    "Connecting to the persistent Codex app-server daemon over SSH.",
+                ),
+                CodexMessage::status("status-1", "Waiting for JSON-RPC proxy handshake."),
             ],
             pending_approvals: Vec::new(),
+            thread_activity: HashMap::new(),
             directory: CodexDirectoryState {
                 path: initial_cwd.clone(),
                 parent: None,
@@ -870,6 +911,7 @@ impl CodexSession {
             next_local_message_id: 2,
             local_revision: 1,
             request_kinds: HashMap::new(),
+            request_thread_ids: HashMap::new(),
             completed_requests: HashMap::new(),
             operation_thread_id: None,
             assistant_message_indices: HashMap::new(),
@@ -884,6 +926,15 @@ impl CodexSession {
     }
 
     pub fn snapshot(&self) -> CodexSnapshot {
+        let mut threads = self.threads.clone();
+        for thread in &mut threads.threads {
+            self.decorate_thread_summary(thread);
+        }
+        let mut thread_detail = self.thread_detail.clone();
+        if let Some(thread) = &mut thread_detail.thread {
+            self.decorate_thread_summary(thread);
+        }
+
         CodexSnapshot {
             title: self.title.clone(),
             endpoint: self.endpoint.clone(),
@@ -896,12 +947,18 @@ impl CodexSession {
             pending_approvals: self
                 .pending_approvals
                 .iter()
+                .filter(|pending| {
+                    thread_scope_matches(
+                        pending.thread_id.as_deref(),
+                        self.event_thread_id.as_deref(),
+                    )
+                })
                 .map(|pending| pending.approval.clone())
                 .collect(),
             directory: self.directory.clone(),
-            threads: self.threads.clone(),
+            threads,
             projects: self.projects.clone(),
-            thread_detail: self.thread_detail.clone(),
+            thread_detail,
             active_turn: self.active_turn.clone(),
             operation: self.operation.clone(),
             settings: self.settings.clone(),
@@ -927,7 +984,7 @@ impl CodexSession {
         self.transport.disconnect();
         self.status = CodexStatus::Disconnected;
         self.turn_active = false;
-        self.push_status("Codex connection closed.");
+        self.push_status("Codex proxy disconnected; the remote daemon remains running.");
     }
 
     pub fn poll(&mut self) -> CodexSnapshot {
@@ -936,6 +993,17 @@ impl CodexSession {
             let poll = self.transport.poll();
             self.apply_transport_status(poll.status);
             self.consume_output(&poll.output);
+            if daemon_proxy_handshake_timed_out(
+                self.initialized,
+                self.status,
+                self.connection_started_at.elapsed(),
+            ) {
+                self.transport.disconnect();
+                self.status = CodexStatus::Failed;
+                self.report_error(
+                    "Codex daemon proxy handshake timed out. Run 'codex app-server daemon bootstrap --remote-control' once on this host, then retry.",
+                );
+            }
         }
 
         self.snapshot()
@@ -962,7 +1030,6 @@ impl CodexSession {
         let mut params = serde_json::Map::new();
         params.insert("threadId".to_string(), json!(thread_id));
         params.insert("input".to_string(), text_input_value(text));
-        self.apply_turn_settings(&mut params);
 
         if self.turn_active {
             if let Some(active_turn) = &self.active_turn {
@@ -979,6 +1046,7 @@ impl CodexSession {
                 );
             }
         } else {
+            self.apply_turn_settings(&mut params);
             self.send_request(
                 "turn/start",
                 Value::Object(params),
@@ -993,6 +1061,8 @@ impl CodexSession {
     pub fn update_settings(
         &mut self,
         model: Option<&str>,
+        reasoning_effort: Option<&str>,
+        service_tier: Option<&str>,
         approval_policy: Option<&str>,
         sandbox: Option<&str>,
     ) -> Result<CodexSnapshot, String> {
@@ -1005,6 +1075,8 @@ impl CodexSession {
         );
         self.settings = CodexSettingsState {
             model: selected_model,
+            reasoning_effort: normalize_setting(reasoning_effort),
+            service_tier: normalize_setting(service_tier),
             approval_policy: normalize_approval_policy(approval_policy),
             sandbox: normalize_sandbox(sandbox),
             available_models: if self.settings.available_models.is_empty() {
@@ -1155,8 +1227,8 @@ impl CodexSession {
             .or_else(|| self.remote_cwd.clone());
         self.cwd = cwd.clone();
         self.thread_id = None;
+        self.event_thread_id = None;
         self.turn_active = false;
-        self.pending_approvals.clear();
         self.clear_message_indices();
         self.thread_detail = CodexThreadDetailState::default();
         self.active_turn = None;
@@ -1202,8 +1274,8 @@ impl CodexSession {
         }
 
         self.thread_id = None;
+        self.event_thread_id = Some(thread_id.to_string());
         self.turn_active = false;
-        self.pending_approvals.clear();
         self.clear_message_indices();
         self.thread_detail = CodexThreadDetailState::default();
         self.active_turn = None;
@@ -1592,8 +1664,42 @@ impl CodexSession {
     fn handle_response(&mut self, id: Value, message: &Value) {
         let id_u64 = id.as_u64();
         let kind = id_u64.and_then(|id| self.request_kinds.remove(&id));
+        let request_thread_id = id_u64.and_then(|id| self.request_thread_ids.remove(&id));
         let known_request = kind.is_some();
         let started = Instant::now();
+
+        if matches!(
+            kind,
+            Some(ClientRequestKind::TurnStart | ClientRequestKind::TurnSteer)
+        ) {
+            if let (Some(thread_id), Some(error)) =
+                (request_thread_id.as_deref(), message.get("error"))
+            {
+                self.record_thread_request_failure(thread_id, error);
+            }
+        }
+
+        if !should_apply_response_to_active_thread(
+            kind,
+            request_thread_id.as_deref(),
+            self.event_thread_id.as_deref(),
+        ) {
+            let result = message
+                .get("error")
+                .map(|error| {
+                    Err(describe_codex_error(error)
+                        .unwrap_or_else(|| truncate_status_message(error.to_string())))
+                })
+                .unwrap_or(Ok(()));
+            if let Some(id) = id_u64.filter(|_| known_request) {
+                self.completed_requests.insert(id, result);
+            }
+            codex_debug(format_args!(
+                "ignored cross-thread response id={:?} kind={:?} request_thread={:?} active_thread={:?}",
+                id_u64, kind, request_thread_id, self.event_thread_id
+            ));
+            return;
+        }
 
         if let Some(error) = message.get("error") {
             let description = describe_codex_error(error)
@@ -1687,17 +1793,21 @@ impl CodexSession {
             }
             Some(ClientRequestKind::ThreadArchive) => {
                 self.operation = CodexOperationState::succeeded("Thread archived.");
-                self.remove_thread_from_visible_list();
+                let _ = self.remove_thread_from_visible_list();
             }
             Some(ClientRequestKind::ThreadUnarchive) => {
                 self.operation = CodexOperationState::succeeded("Thread restored.");
-                self.remove_thread_from_visible_list();
+                let _ = self.remove_thread_from_visible_list();
             }
             Some(ClientRequestKind::ThreadDelete) => {
                 self.operation = CodexOperationState::succeeded("Thread deleted.");
-                self.remove_thread_from_visible_list();
-                self.thread_id = None;
-                self.active_turn = None;
+                let deleted_thread_id = self.remove_thread_from_visible_list();
+                if deleted_thread_id.as_deref() == self.thread_id.as_deref() {
+                    self.thread_id = None;
+                    self.event_thread_id = None;
+                    self.turn_active = false;
+                    self.active_turn = None;
+                }
             }
             Some(ClientRequestKind::ThreadRename) => {
                 self.operation = CodexOperationState::succeeded("Thread renamed.");
@@ -1739,14 +1849,27 @@ impl CodexSession {
     }
 
     fn handle_notification(&mut self, method: &str, params: &Value) {
+        self.record_thread_lifecycle_notification(method, params);
+        if !should_apply_notification_to_thread(method, params, self.event_thread_id.as_deref()) {
+            codex_debug(format_args!(
+                "ignored cross-thread notification method={} incoming_thread={:?} active_thread={:?}",
+                method,
+                notification_thread_id(params),
+                self.event_thread_id
+            ));
+            return;
+        }
+
         match method {
+            "thread/status/changed" => {}
             "thread/started" => {
                 if let Some(thread_id) = params
                     .pointer("/thread/id")
                     .and_then(Value::as_str)
                     .map(str::to_string)
                 {
-                    self.thread_id = Some(thread_id);
+                    self.thread_id = Some(thread_id.clone());
+                    self.event_thread_id = Some(thread_id);
                     self.status = CodexStatus::Connected;
                 }
             }
@@ -1775,6 +1898,7 @@ impl CodexSession {
                         && self.thread_id.as_deref() == Some(thread_id.as_str())
                     {
                         self.thread_id = None;
+                        self.event_thread_id = None;
                         self.turn_active = false;
                         self.active_turn = None;
                     }
@@ -1923,7 +2047,8 @@ impl CodexSession {
         ));
 
         if let Some(thread_id) = thread.get("id").and_then(Value::as_str).map(str::to_string) {
-            self.thread_id = Some(thread_id);
+            self.thread_id = Some(thread_id.clone());
+            self.event_thread_id = Some(thread_id);
         }
 
         if let Some(cwd) = message
@@ -2597,6 +2722,10 @@ impl CodexSession {
         };
         let id = message.get("id").cloned().unwrap_or(Value::Null);
         let params = message.get("params").unwrap_or(&Value::Null);
+        let request_thread_id = params
+            .get("threadId")
+            .and_then(Value::as_str)
+            .map(str::to_string);
 
         match method {
             "item/commandExecution/requestApproval" => {
@@ -2614,6 +2743,7 @@ impl CodexSession {
                     .map(str::to_string);
                 self.add_pending_request(
                     id,
+                    request_thread_id,
                     CodexApproval {
                         request_id: String::new(),
                         kind: CodexApprovalKind::Command,
@@ -2639,6 +2769,7 @@ impl CodexSession {
                     .map(str::to_string);
                 self.add_pending_request(
                     id,
+                    request_thread_id,
                     CodexApproval {
                         request_id: String::new(),
                         kind: CodexApprovalKind::FileChange,
@@ -2656,6 +2787,7 @@ impl CodexSession {
             "item/tool/requestUserInput" => {
                 self.add_pending_request(
                     id,
+                    request_thread_id,
                     CodexApproval {
                         request_id: String::new(),
                         kind: CodexApprovalKind::UserInput,
@@ -2670,6 +2802,7 @@ impl CodexSession {
             "item/permissions/requestApproval" => {
                 self.add_pending_request(
                     id,
+                    request_thread_id,
                     CodexApproval {
                         request_id: String::new(),
                         kind: CodexApprovalKind::Permissions,
@@ -2691,6 +2824,7 @@ impl CodexSession {
             _ => {
                 self.add_pending_request(
                     id,
+                    request_thread_id,
                     CodexApproval {
                         request_id: String::new(),
                         kind: CodexApprovalKind::Tool,
@@ -2742,30 +2876,11 @@ impl CodexSession {
     }
 
     fn apply_thread_settings(&self, params: &mut serde_json::Map<String, Value>) {
-        if let Some(model) = &self.settings.model {
-            params.insert("model".to_string(), json!(model));
-        }
-        if let Some(approval_policy) = &self.settings.approval_policy {
-            params.insert(
-                "approvalPolicy".to_string(),
-                approval_policy_value(approval_policy),
-            );
-        }
-        if let Some(sandbox) = &self.settings.sandbox {
-            params.insert("sandbox".to_string(), json!(sandbox));
-        }
+        apply_thread_settings(&self.settings, params);
     }
 
     fn apply_turn_settings(&self, params: &mut serde_json::Map<String, Value>) {
-        if let Some(model) = &self.settings.model {
-            params.insert("model".to_string(), json!(model));
-        }
-        if let Some(approval_policy) = &self.settings.approval_policy {
-            params.insert(
-                "approvalPolicy".to_string(),
-                approval_policy_value(approval_policy),
-            );
-        }
+        apply_turn_settings(&self.settings, params);
     }
 
     fn apply_model_list_response(&mut self, message: &Value) {
@@ -2786,15 +2901,20 @@ impl CodexSession {
         self.bump_revision();
     }
 
-    fn remove_thread_from_visible_list(&mut self) {
-        if let Some(thread_id) = self.operation_thread_id.take() {
-            self.remove_thread_by_id(&thread_id);
+    fn remove_thread_from_visible_list(&mut self) -> Option<String> {
+        let thread_id = self.operation_thread_id.take();
+        if let Some(thread_id) = thread_id.as_deref() {
+            self.remove_thread_by_id(thread_id);
         }
+        thread_id
     }
 
     fn remove_thread_by_id(&mut self, thread_id: &str) {
         let before = self.threads.threads.len();
         self.threads.threads.retain(|thread| thread.id != thread_id);
+        self.thread_activity.remove(thread_id);
+        self.pending_approvals
+            .retain(|pending| pending.thread_id.as_deref() != Some(thread_id));
         if self
             .thread_detail
             .thread
@@ -2803,7 +2923,7 @@ impl CodexSession {
         {
             self.thread_detail.thread = None;
         }
-        if self.threads.threads.len() != before {
+        if before != self.threads.threads.len() {
             self.bump_revision();
         }
     }
@@ -2836,18 +2956,133 @@ impl CodexSession {
         }
     }
 
-    fn add_pending_request(&mut self, id: Value, mut approval: CodexApproval) {
+    fn decorate_thread_summary(&self, summary: &mut CodexThreadSummary) {
+        if let Some(activity) = self.thread_activity.get(&summary.id) {
+            if let Some(status) = &activity.status {
+                summary.status = status.clone();
+                summary.active_flags = activity.active_flags.clone();
+            }
+            if activity.last_turn_status.is_some() {
+                summary.last_turn_status = activity.last_turn_status.clone();
+                summary.last_turn_error = activity.last_turn_error.clone();
+            }
+        }
+        summary.pending_approval_count = self
+            .pending_approvals
+            .iter()
+            .filter(|pending| {
+                pending.thread_id.as_deref() == Some(summary.id.as_str())
+                    && pending.approval.kind != CodexApprovalKind::UserInput
+            })
+            .count();
+    }
+
+    fn record_thread_lifecycle_notification(&mut self, method: &str, params: &Value) {
+        let Some(thread_id) = notification_thread_id(params).map(str::to_string) else {
+            return;
+        };
+        let activity = self.thread_activity.entry(thread_id).or_default();
+        match method {
+            "thread/status/changed" => {
+                let (status, active_flags) = parse_thread_status(params.get("status"));
+                activity.status = (!status.is_empty()).then_some(status);
+                activity.active_flags = active_flags;
+            }
+            "turn/started" => {
+                activity.last_turn_status = Some("inProgress".to_string());
+                activity.last_turn_error = None;
+            }
+            "turn/completed" => {
+                activity.last_turn_status = params
+                    .pointer("/turn/status")
+                    .and_then(Value::as_str)
+                    .map(str::to_string);
+                activity.last_turn_error =
+                    params.pointer("/turn/error").and_then(describe_codex_error);
+            }
+            _ => {}
+        }
+    }
+
+    fn record_thread_request_failure(&mut self, thread_id: &str, error: &Value) {
+        let activity = self
+            .thread_activity
+            .entry(thread_id.to_string())
+            .or_default();
+        activity.last_turn_status = Some("failed".to_string());
+        activity.last_turn_error = describe_codex_error(error)
+            .or_else(|| Some(truncate_status_message(error.to_string())));
+    }
+
+    fn sync_pending_request_flags(&mut self, thread_id: &str) {
+        let mut waiting_on_approval = false;
+        let mut waiting_on_user_input = false;
+        for pending in &self.pending_approvals {
+            if pending.thread_id.as_deref() != Some(thread_id) {
+                continue;
+            }
+            if pending.approval.kind == CodexApprovalKind::UserInput {
+                waiting_on_user_input = true;
+            } else {
+                waiting_on_approval = true;
+            }
+        }
+
+        let activity = self
+            .thread_activity
+            .entry(thread_id.to_string())
+            .or_default();
+        activity
+            .active_flags
+            .retain(|flag| flag != "waitingOnApproval" && flag != "waitingOnUserInput");
+        if waiting_on_approval {
+            activity.active_flags.push("waitingOnApproval".to_string());
+        }
+        if waiting_on_user_input {
+            activity.active_flags.push("waitingOnUserInput".to_string());
+        }
+        if waiting_on_approval || waiting_on_user_input {
+            activity.status = Some("active".to_string());
+        }
+    }
+
+    fn add_pending_request(
+        &mut self,
+        id: Value,
+        thread_id: Option<String>,
+        mut approval: CodexApproval,
+    ) {
         approval.request_id = request_id_to_string(&id);
-        let message = format!("Approval needed: {}", approval.title);
-        self.pending_approvals
-            .push(PendingServerRequest { id, approval });
-        self.push_status(message);
+        let is_active_thread =
+            thread_scope_matches(thread_id.as_deref(), self.event_thread_id.as_deref());
+        let message = is_active_thread.then(|| format!("Approval needed: {}", approval.title));
+        self.pending_approvals.push(PendingServerRequest {
+            id,
+            thread_id: thread_id.clone(),
+            approval,
+        });
+        if let Some(thread_id) = thread_id.as_deref() {
+            self.sync_pending_request_flags(thread_id);
+        }
+        if let Some(message) = message {
+            self.push_status(message);
+        } else {
+            self.bump_revision();
+        }
     }
 
     fn remove_pending_request_by_value(&mut self, id: &Value) {
+        let affected_thread = self
+            .pending_approvals
+            .iter()
+            .find(|pending| pending.id == *id)
+            .and_then(|pending| pending.thread_id.clone());
         let before = self.pending_approvals.len();
         self.pending_approvals.retain(|pending| pending.id != *id);
         if self.pending_approvals.len() != before {
+            if let Some(thread_id) = affected_thread.as_deref() {
+                self.sync_pending_request_flags(thread_id);
+            }
             self.bump_revision();
         }
     }
@@ -3203,6 +3438,8 @@ impl CodexSession {
             if Instant::now() >= deadline {
                 let message = "Codex app-server request timed out".to_string();
                 self.completed_requests.remove(&id);
+                self.request_kinds.remove(&id);
+                self.request_thread_ids.remove(&id);
                 codex_debug(format_args!(
                     "request wait timeout id={} elapsed_ms={}",
                     id,
@@ -3223,6 +3460,13 @@ impl CodexSession {
     ) -> Result<u64, String> {
         let id = self.next_request_id;
         self.next_request_id = self.next_request_id.saturating_add(1);
+        if let Some(thread_id) = params
+            .get("threadId")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+        {
+            self.request_thread_ids.insert(id, thread_id);
+        }
         self.request_kinds.insert(id, kind);
         let params_bytes = json_byte_len(&params);
         codex_debug(format_args!(
@@ -3260,6 +3504,39 @@ impl CodexSession {
         line.push(b'\n');
         self.transport.send_bytes(line)
     }
+}
+
+fn apply_thread_settings(
+    settings: &CodexSettingsState,
+    params: &mut serde_json::Map<String, Value>,
+) {
+    if let Some(model) = &settings.model {
+        params.insert("model".to_string(), json!(model));
+    }
+    if let Some(approval_policy) = &settings.approval_policy {
+        params.insert(
+            "approvalPolicy".to_string(),
+            approval_policy_value(approval_policy),
+        );
+    }
+    if let Some(sandbox) = &settings.sandbox {
+        params.insert("sandbox".to_string(), json!(sandbox));
+    }
+    params.insert("serviceTier".to_string(), json!(settings.service_tier));
+}
+
+fn apply_turn_settings(settings: &CodexSettingsState, params: &mut serde_json::Map<String, Value>) {
+    if let Some(model) = &settings.model {
+        params.insert("model".to_string(), json!(model));
+    }
+    if let Some(approval_policy) = &settings.approval_policy {
+        params.insert(
+            "approvalPolicy".to_string(),
+            approval_policy_value(approval_policy),
+        );
+    }
+    params.insert("effort".to_string(), json!(settings.reasoning_effort));
+    params.insert("serviceTier".to_string(), json!(settings.service_tier));
 }
 
 fn agent_message_kind(item: &Value) -> CodexMessageKind {
@@ -3536,6 +3813,72 @@ fn extract_first_bold_text(text: &str) -> Option<String> {
 fn normalize_cwd(cwd: Option<String>) -> Option<String> {
     cwd.map(|cwd| cwd.trim().to_string())
         .filter(|cwd| !cwd.is_empty())
+}
+
+fn daemon_proxy_handshake_timed_out(
+    initialized: bool,
+    status: CodexStatus,
+    elapsed: Duration,
+) -> bool {
+    !initialized
+        && status == CodexStatus::Connecting
+        && elapsed >= APP_SERVER_PROXY_HANDSHAKE_TIMEOUT
+}
+
+fn notification_thread_id(params: &Value) -> Option<&str> {
+    params
+        .get("threadId")
+        .and_then(Value::as_str)
+        .or_else(|| params.pointer("/thread/id").and_then(Value::as_str))
+}
+
+fn notification_is_cross_thread_metadata(method: &str) -> bool {
+    matches!(
+        method,
+        "thread/name/updated"
+            | "thread/archived"
+            | "thread/unarchived"
+            | "thread/deleted"
+            | "serverRequest/resolved"
+    )
+}
+
+fn thread_scope_matches(scoped_thread_id: Option<&str>, active_thread_id: Option<&str>) -> bool {
+    scoped_thread_id.is_none() || scoped_thread_id == active_thread_id
+}
+
+fn should_apply_notification_to_thread(
+    method: &str,
+    params: &Value,
+    active_thread_id: Option<&str>,
+) -> bool {
+    if notification_is_cross_thread_metadata(method) {
+        return true;
+    }
+
+    match notification_thread_id(params) {
+        Some(notification_thread_id) => {
+            thread_scope_matches(Some(notification_thread_id), active_thread_id)
+        }
+        None => true,
+    }
+}
+
+fn response_updates_active_turn(kind: Option<ClientRequestKind>) -> bool {
+    matches!(
+        kind,
+        Some(ClientRequestKind::TurnStart)
+            | Some(ClientRequestKind::TurnSteer)
+            | Some(ClientRequestKind::TurnInterrupt)
+    )
+}
+
+fn should_apply_response_to_active_thread(
+    kind: Option<ClientRequestKind>,
+    request_thread_id: Option<&str>,
+    active_thread_id: Option<&str>,
+) -> bool {
+    !response_updates_active_turn(kind) || thread_scope_matches(request_thread_id, active_thread_id)
 }
 
 fn codex_app_server_command(cwd: Option<&str>) -> String {
@@ -4126,7 +4469,52 @@ fn join_path(parent: &str, child: &str) -> String {
     }
 }
 
+fn parse_thread_status(value: Option<&Value>) -> (String, Vec<String>) {
+    let Some(value) = value else {
+        return (String::new(), Vec::new());
+    };
+    if let Some(status) = value.as_str() {
+        return (status.to_string(), Vec::new());
+    }
+
+    let status = value
+        .get("type")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    let active_flags = value
+        .get("activeFlags")
+        .and_then(Value::as_array)
+        .map(|flags| {
+            flags
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
+    (status, active_flags)
+}
+
+fn parse_last_turn_state(value: &Value) -> (Option<String>, Option<String>) {
+    let Some(turn) = value
+        .get("turns")
+        .and_then(Value::as_array)
+        .and_then(|turns| turns.last())
+    else {
+        return (None, None);
+    };
+    let status = turn
+        .get("status")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let error = turn.get("error").and_then(describe_codex_error);
+    (status, error)
+}
+
 fn parse_thread_summary(value: &Value) -> Option<CodexThreadSummary> {
+    let (status, active_flags) = parse_thread_status(value.get("status"));
+    let (last_turn_status, last_turn_error) = parse_last_turn_state(value);
     Some(CodexThreadSummary {
         id: value.get("id")?.as_str()?.to_string(),
         name: value
@@ -4143,11 +4531,11 @@ fn parse_thread_summary(value: &Value) -> Option<CodexThreadSummary> {
             .and_then(Value::as_str)
             .unwrap_or("")
             .to_string(),
-        status: value
-            .get("status")
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .to_string(),
+        status,
+        active_flags,
+        pending_approval_count: 0,
+        last_turn_status,
+        last_turn_error,
         updated_at: value
             .get("updatedAt")
             .and_then(Value::as_u64)
@@ -4217,11 +4605,37 @@ fn default_model_options() -> Vec<CodexModelOption> {
         ("codex-auto-review", "Codex Auto Review"),
     ]
     .into_iter()
-    .map(|(id, name)| CodexModelOption {
-        id: id.to_string(),
-        name: name.to_string(),
+    .map(|(id, name)| {
+        let service_tiers = if matches!(id, "gpt-5.5" | "gpt-5.4") {
+            vec![CodexSettingOption {
+                id: "fast".to_string(),
+                name: "Fast".to_string(),
+                description: Some("Higher speed with increased credit usage.".to_string()),
+            }]
+        } else {
+            Vec::new()
+        };
+        CodexModelOption {
+            id: id.to_string(),
+            name: name.to_string(),
+            reasoning_efforts: fallback_reasoning_efforts(),
+            default_reasoning_effort: None,
+            service_tiers,
+            default_service_tier: None,
+        }
     })
     .collect()
+}
+
+fn fallback_reasoning_efforts() -> Vec<CodexSettingOption> {
+    ["low", "medium", "high", "xhigh"]
+        .into_iter()
+        .map(|id| CodexSettingOption {
+            id: id.to_string(),
+            name: setting_option_name(id),
+            description: None,
+        })
+        .collect()
 }
 
 fn parse_model_catalog(message: &Value) -> (Vec<CodexModelOption>, Option<String>) {
@@ -4311,6 +4725,10 @@ fn collect_model_options(value: &Value, target: &mut Vec<CodexModelOption>) {
                         Some(CodexModelOption {
                             id: fallback_id.to_string(),
                             name: clean_model_text(name).unwrap_or_else(|| fallback_id.to_string()),
+                            reasoning_efforts: Vec::new(),
+                            default_reasoning_effort: None,
+                            service_tiers: Vec::new(),
+                            default_service_tier: None,
                         })
                     } else {
                         parse_model_option(item, Some(fallback_id))
@@ -4329,6 +4747,10 @@ fn parse_model_option(value: &Value, fallback_id: Option<&str>) -> Option<CodexM
         return Some(CodexModelOption {
             name: id.clone(),
             id,
+            reasoning_efforts: Vec::new(),
+            default_reasoning_effort: None,
+            service_tiers: Vec::new(),
+            default_service_tier: None,
         });
     }
 
@@ -4354,7 +4776,104 @@ fn parse_model_option(value: &Value, fallback_id: Option<&str>) -> Option<CodexM
         .and_then(clean_model_text)
         .unwrap_or_else(|| id.clone());
 
-    Some(CodexModelOption { id, name })
+    let reasoning_efforts = object
+        .get("supportedReasoningEfforts")
+        .or_else(|| object.get("supported_reasoning_efforts"))
+        .map(parse_reasoning_effort_options)
+        .unwrap_or_default();
+    let default_reasoning_effort = object
+        .get("defaultReasoningEffort")
+        .or_else(|| object.get("default_reasoning_effort"))
+        .and_then(Value::as_str)
+        .and_then(clean_model_text);
+    let service_tiers = object
+        .get("serviceTiers")
+        .or_else(|| object.get("service_tiers"))
+        .map(parse_setting_options)
+        .unwrap_or_default();
+    let default_service_tier = object
+        .get("defaultServiceTier")
+        .or_else(|| object.get("default_service_tier"))
+        .and_then(Value::as_str)
+        .and_then(clean_model_text);
+
+    Some(CodexModelOption {
+        id,
+        name,
+        reasoning_efforts,
+        default_reasoning_effort,
+        service_tiers,
+        default_service_tier,
+    })
+}
+
+fn parse_reasoning_effort_options(value: &Value) -> Vec<CodexSettingOption> {
+    let Some(items) = value.as_array() else {
+        return Vec::new();
+    };
+    items
+        .iter()
+        .filter_map(|item| {
+            let id = item.as_str().and_then(clean_model_text).or_else(|| {
+                item.get("reasoningEffort")
+                    .or_else(|| item.get("reasoning_effort"))
+                    .and_then(Value::as_str)
+                    .and_then(clean_model_text)
+            })?;
+            let description = item
+                .get("description")
+                .and_then(Value::as_str)
+                .and_then(clean_model_text);
+            Some(CodexSettingOption {
+                name: setting_option_name(&id),
+                id,
+                description,
+            })
+        })
+        .collect()
+}
+
+fn parse_setting_options(value: &Value) -> Vec<CodexSettingOption> {
+    let Some(items) = value.as_array() else {
+        return Vec::new();
+    };
+    items
+        .iter()
+        .filter_map(|item| {
+            let id = item.as_str().and_then(clean_model_text).or_else(|| {
+                item.get("id")
+                    .and_then(Value::as_str)
+                    .and_then(clean_model_text)
+            })?;
+            let name = item
+                .get("name")
+                .and_then(Value::as_str)
+                .and_then(clean_model_text)
+                .unwrap_or_else(|| setting_option_name(&id));
+            let description = item
+                .get("description")
+                .and_then(Value::as_str)
+                .and_then(clean_model_text);
+            Some(CodexSettingOption {
+                id,
+                name,
+                description,
+            })
+        })
+        .collect()
+}
+
+fn setting_option_name(value: &str) -> String {
+    match value {
+        "minimal" => "Minimal".to_string(),
+        "low" => "Light".to_string(),
+        "medium" => "Medium".to_string(),
+        "high" => "High".to_string(),
+        "xhigh" => "Extra High".to_string(),
+        "ultra" => "Ultra".to_string(),
+        "fast" => "Fast".to_string(),
+        other => other.to_string(),
+    }
 }
 
 fn push_model_option(target: &mut Vec<CodexModelOption>, option: Option<CodexModelOption>) {
@@ -4466,11 +4985,104 @@ mod tests {
     }
 
     #[test]
-    fn builds_app_server_command_with_remote_cwd() {
+    fn builds_daemon_proxy_command_with_remote_cwd() {
         let command = codex_app_server_command(Some("/Users/zinglix/Shellow"));
         assert!(command.starts_with("cd '/Users/zinglix/Shellow' || exit $?; "));
         assert!(command.contains("SHELLOW_CODEX_CWD=\"$(pwd -P 2>/dev/null || pwd)\""));
-        assert!(command.contains("exec codex app-server --stdio"));
+        let daemon_start = command
+            .find("codex app-server daemon start")
+            .expect("daemon start command");
+        let proxy = command
+            .find("exec codex app-server proxy")
+            .expect("daemon proxy command");
+        assert!(daemon_start < proxy);
+        assert!(command.contains("codex app-server daemon bootstrap --remote-control"));
+        assert!(!command.contains("daemon enable-remote-control"));
+        assert!(!command.contains("codex app-server --stdio"));
+    }
+
+    #[test]
+    fn times_out_only_a_stalled_daemon_proxy_handshake() {
+        assert!(!daemon_proxy_handshake_timed_out(
+            false,
+            CodexStatus::Connecting,
+            APP_SERVER_PROXY_HANDSHAKE_TIMEOUT - Duration::from_millis(1),
+        ));
+        assert!(daemon_proxy_handshake_timed_out(
+            false,
+            CodexStatus::Connecting,
+            APP_SERVER_PROXY_HANDSHAKE_TIMEOUT,
+        ));
+        assert!(!daemon_proxy_handshake_timed_out(
+            true,
+            CodexStatus::Connected,
+            APP_SERVER_PROXY_HANDSHAKE_TIMEOUT,
+        ));
+        assert!(!daemon_proxy_handshake_timed_out(
+            false,
+            CodexStatus::Failed,
+            APP_SERVER_PROXY_HANDSHAKE_TIMEOUT,
+        ));
+    }
+
+    #[test]
+    fn filters_daemon_notifications_to_the_selected_thread() {
+        let thread_a_delta = json!({
+            "threadId": "thread-a",
+            "turnId": "turn-a",
+            "itemId": "item-a",
+            "delta": "A"
+        });
+        assert!(should_apply_notification_to_thread(
+            "item/agentMessage/delta",
+            &thread_a_delta,
+            Some("thread-a"),
+        ));
+        assert!(!should_apply_notification_to_thread(
+            "item/agentMessage/delta",
+            &thread_a_delta,
+            Some("thread-b"),
+        ));
+        assert!(!should_apply_notification_to_thread(
+            "item/agentMessage/delta",
+            &thread_a_delta,
+            None,
+        ));
+
+        let thread_started = json!({ "thread": { "id": "thread-a" } });
+        assert!(!should_apply_notification_to_thread(
+            "thread/started",
+            &thread_started,
+            Some("thread-b"),
+        ));
+
+        let renamed = json!({ "threadId": "thread-a", "name": "Renamed" });
+        assert!(should_apply_notification_to_thread(
+            "thread/name/updated",
+            &renamed,
+            Some("thread-b"),
+        ));
+
+        assert!(thread_scope_matches(Some("thread-a"), Some("thread-a")));
+        assert!(!thread_scope_matches(Some("thread-a"), Some("thread-b")));
+        assert!(!thread_scope_matches(Some("thread-a"), None));
+        assert!(thread_scope_matches(None, Some("thread-b")));
+
+        assert!(!should_apply_response_to_active_thread(
+            Some(ClientRequestKind::TurnStart),
+            Some("thread-a"),
+            Some("thread-b"),
+        ));
+        assert!(should_apply_response_to_active_thread(
+            Some(ClientRequestKind::TurnStart),
+            Some("thread-b"),
+            Some("thread-b"),
+        ));
+        assert!(should_apply_response_to_active_thread(
+            Some(ClientRequestKind::ThreadRename),
+            Some("thread-a"),
+            Some("thread-b"),
+        ));
     }
 
     #[test]
@@ -4528,7 +5140,17 @@ mod tests {
                         "id": "gpt-current",
                         "model": "gpt-current",
                         "displayName": "Current",
-                        "isDefault": true
+                        "isDefault": true,
+                        "defaultReasoningEffort": "medium",
+                        "supportedReasoningEfforts": [
+                            { "reasoningEffort": "low", "description": "Quick tasks" },
+                            { "reasoningEffort": "medium", "description": "Balanced" },
+                            { "reasoningEffort": "xhigh", "description": "Deep work" }
+                        ],
+                        "defaultServiceTier": null,
+                        "serviceTiers": [
+                            { "id": "fast", "name": "Fast", "description": "1.5x speed" }
+                        ]
                     }
                 ]
             }
@@ -4537,6 +5159,14 @@ mod tests {
         let (models, server_default) = parse_model_catalog(&response);
         assert_eq!(models.len(), 2);
         assert_eq!(server_default.as_deref(), Some("gpt-current"));
+        let current = models
+            .iter()
+            .find(|model| model.id == "gpt-current")
+            .expect("current model");
+        assert_eq!(current.default_reasoning_effort.as_deref(), Some("medium"));
+        assert_eq!(current.reasoning_efforts[0].name, "Light");
+        assert_eq!(current.reasoning_efforts[2].name, "Extra High");
+        assert_eq!(current.service_tiers[0].id, "fast");
         assert_eq!(
             preferred_model_id(Some("gpt-removed"), &models, server_default.as_deref()).as_deref(),
             Some("gpt-current")
@@ -4545,6 +5175,30 @@ mod tests {
             preferred_model_id(Some("gpt-old"), &models, server_default.as_deref()).as_deref(),
             Some("gpt-old")
         );
+    }
+
+    #[test]
+    fn applies_reasoning_and_speed_settings_to_supported_requests() {
+        let mut settings = CodexSettingsState::default();
+        settings.reasoning_effort = Some("high".to_string());
+        settings.service_tier = Some("fast".to_string());
+
+        let mut thread_params = serde_json::Map::new();
+        apply_thread_settings(&settings, &mut thread_params);
+        assert_eq!(thread_params.get("serviceTier"), Some(&json!("fast")));
+        assert!(!thread_params.contains_key("effort"));
+
+        let mut turn_params = serde_json::Map::new();
+        apply_turn_settings(&settings, &mut turn_params);
+        assert_eq!(turn_params.get("effort"), Some(&json!("high")));
+        assert_eq!(turn_params.get("serviceTier"), Some(&json!("fast")));
+
+        settings.reasoning_effort = None;
+        settings.service_tier = None;
+        let mut cleared_turn_params = serde_json::Map::new();
+        apply_turn_settings(&settings, &mut cleared_turn_params);
+        assert_eq!(cleared_turn_params.get("effort"), Some(&Value::Null));
+        assert_eq!(cleared_turn_params.get("serviceTier"), Some(&Value::Null));
     }
 
     #[test]
@@ -4603,7 +5257,16 @@ mod tests {
             "name": "Build native Codex",
             "preview": "hello",
             "cwd": "/Users/zinglix/Shellow",
-            "status": "completed",
+            "status": {
+                "type": "active",
+                "activeFlags": ["waitingOnApproval"]
+            },
+            "turns": [{
+                "id": "turn-1",
+                "status": "failed",
+                "error": { "message": "Build failed" },
+                "items": []
+            }],
             "updatedAt": 1,
             "createdAt": 0,
             "source": "app-server",
@@ -4615,8 +5278,20 @@ mod tests {
         let summary = parse_thread_summary(&value).expect("thread summary");
         assert_eq!(summary.id, "thread-1");
         assert_eq!(summary.name.as_deref(), Some("Build native Codex"));
+        assert_eq!(summary.status, "active");
+        assert_eq!(summary.active_flags, vec!["waitingOnApproval"]);
+        assert_eq!(summary.pending_approval_count, 0);
+        assert_eq!(summary.last_turn_status.as_deref(), Some("failed"));
+        assert_eq!(summary.last_turn_error.as_deref(), Some("Build failed"));
         assert_eq!(summary.forked_from_id.as_deref(), Some("thread-0"));
         assert_eq!(summary.parent_thread_id, None);
+    }
+
+    #[test]
+    fn keeps_legacy_string_thread_status_compatible() {
+        let (status, flags) = parse_thread_status(Some(&json!("idle")));
+        assert_eq!(status, "idle");
+        assert!(flags.is_empty());
     }
 
     #[test]
