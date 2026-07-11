@@ -62,7 +62,7 @@ pub fn link_status() -> &'static str {
 pub fn demo_terminal_summary() -> String {
     #[cfg(feature = "official-libghostty-vt-rs")]
     {
-        return libghostty_vt_backend::demo_terminal_summary();
+        libghostty_vt_backend::demo_terminal_summary()
     }
 
     #[cfg(not(feature = "official-libghostty-vt-rs"))]
@@ -82,7 +82,7 @@ enum ActiveVtBackend {
 fn active_backend() -> ActiveVtBackend {
     #[cfg(feature = "official-libghostty-vt-rs")]
     {
-        return ActiveVtBackend::LibGhosttyVt;
+        ActiveVtBackend::LibGhosttyVt
     }
 
     #[cfg(not(feature = "official-libghostty-vt-rs"))]
@@ -459,12 +459,12 @@ mod libghostty_vt_backend {
         } else {
             0
         };
-        let metadata = render_metadata(&terminal, cursor_row_offset as usize, rows_u16 as usize);
+        let metadata = render_metadata(terminal, cursor_row_offset as usize, rows_u16 as usize);
         let palette = terminal.color_palette().ok();
 
         let styled_lines = (first_row..end_row)
             .map(|row| {
-                styled_line_from_terminal_row(&terminal, row as u32, cols_u16, palette.as_ref())
+                styled_line_from_terminal_row(terminal, row as u32, cols_u16, palette.as_ref())
             })
             .collect::<Vec<_>>();
         let lines = styled_lines
@@ -600,15 +600,15 @@ mod libghostty_vt_backend {
             Dirty::Full => (row_offset..row_offset + viewport_rows).collect(),
             Dirty::Partial => {
                 let mut dirty = Vec::new();
-                if let Ok(mut rows) = RowIterator::new() {
-                    if let Ok(mut row_iter) = rows.update(&snapshot) {
-                        let mut row_index = 0usize;
-                        while let Some(row) = row_iter.next() {
-                            if row.dirty().unwrap_or(false) {
-                                dirty.push(row_offset + row_index);
-                            }
-                            row_index += 1;
+                if let Ok(mut rows) = RowIterator::new()
+                    && let Ok(mut row_iter) = rows.update(&snapshot)
+                {
+                    let mut row_index = 0usize;
+                    while let Some(row) = row_iter.next() {
+                        if row.dirty().unwrap_or(false) {
+                            dirty.push(row_offset + row_index);
                         }
+                        row_index += 1;
                     }
                 }
                 dirty
@@ -650,11 +650,11 @@ mod libghostty_vt_backend {
 
         let mut runs: Vec<TerminalGridRun> = Vec::new();
         for (text, style) in cells {
-            if let Some(last) = runs.last_mut() {
-                if last.style == style {
-                    last.text.push_str(&text);
-                    continue;
-                }
+            if let Some(last) = runs.last_mut()
+                && last.style == style
+            {
+                last.text.push_str(&text);
+                continue;
             }
             runs.push(TerminalGridRun { text, style });
         }
@@ -1082,9 +1082,7 @@ pub(crate) fn terminal_grid_from_vt_bytes_with_theme(
 ) -> TerminalGridSnapshot {
     #[cfg(feature = "official-libghostty-vt-rs")]
     {
-        return libghostty_vt_backend::terminal_grid_from_vt_bytes_with_theme(
-            bytes, cols, rows, theme,
-        );
+        libghostty_vt_backend::terminal_grid_from_vt_bytes_with_theme(bytes, cols, rows, theme)
     }
 
     #[cfg(not(feature = "official-libghostty-vt-rs"))]

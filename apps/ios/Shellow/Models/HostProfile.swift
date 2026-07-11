@@ -610,14 +610,13 @@ enum HostProfileStore {
 
     static func load() -> [HostProfile] {
         guard let data = UserDefaults.standard.data(forKey: key) else {
-            return HostProfile.samples
+            return []
         }
 
         do {
-            let profiles = try JSONDecoder().decode([HostProfile].self, from: data)
-            return profiles.isEmpty ? HostProfile.samples : profiles
+            return try JSONDecoder().decode([HostProfile].self, from: data)
         } catch {
-            return HostProfile.samples
+            return []
         }
     }
 

@@ -11,6 +11,7 @@ struct ShellowSettings: Equatable, Codable {
     var confirmPaste = true
     var showKeyboardToolbar = true
     var keepAliveSeconds: Double = 30
+    var detectRemotePorts = false
     var colorScheme: TerminalColorScheme = .system
     var terminalTheme: TerminalThemeSelection = .shellowDark
 
@@ -20,6 +21,7 @@ struct ShellowSettings: Equatable, Codable {
         case confirmPaste
         case showKeyboardToolbar
         case keepAliveSeconds
+        case detectRemotePorts
         case colorScheme
         case terminalTheme
     }
@@ -33,6 +35,7 @@ struct ShellowSettings: Equatable, Codable {
         confirmPaste = try container.decodeIfPresent(Bool.self, forKey: .confirmPaste) ?? true
         showKeyboardToolbar = try container.decodeIfPresent(Bool.self, forKey: .showKeyboardToolbar) ?? true
         keepAliveSeconds = try container.decodeIfPresent(Double.self, forKey: .keepAliveSeconds) ?? 30
+        detectRemotePorts = try container.decodeIfPresent(Bool.self, forKey: .detectRemotePorts) ?? false
         colorScheme = try container.decodeIfPresent(TerminalColorScheme.self, forKey: .colorScheme) ?? .system
         terminalTheme = try container.decodeIfPresent(TerminalThemeSelection.self, forKey: .terminalTheme) ?? .shellowDark
     }

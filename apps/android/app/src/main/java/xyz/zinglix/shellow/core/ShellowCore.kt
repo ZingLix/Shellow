@@ -13,6 +13,11 @@ private fun JSONObject.optNullableString(name: String): String? {
   return optString(name).takeIf { it.isNotBlank() && it != "null" }
 }
 
+private fun JSONObject.optNullableLong(name: String): Long? {
+  if (!has(name) || isNull(name)) return null
+  return optLong(name)
+}
+
 data class HostProfile(
   val name: String,
   val host: String,
@@ -149,6 +154,7 @@ data class TerminalSession(
   val pendingClipboardText: String?,
   val clipboardSequence: Long,
   val bellCount: Int,
+  val detectedRemotePorts: List<Int>,
   val rows: List<TerminalRow>,
   val grid: TerminalGridSnapshot?,
   val cursorColumn: Int,
@@ -171,6 +177,7 @@ data class TerminalSession(
         pendingClipboardText = root.optNullableString("pending_clipboard_text"),
         clipboardSequence = root.optLong("clipboard_sequence"),
         bellCount = root.optInt("bell_count"),
+        detectedRemotePorts = root.optJSONArray("detected_remote_ports")?.mapInts().orEmpty(),
         rows = root.getJSONArray("rows").mapObjects(TerminalRow::fromJson),
         grid = root.optJSONObject("grid")?.let(TerminalGridSnapshot::fromJson),
         cursorColumn = root.optInt("cursor_column"),
@@ -189,6 +196,7 @@ data class TerminalSession(
         pendingClipboardText = null,
         clipboardSequence = 0,
         bellCount = 0,
+        detectedRemotePorts = emptyList(),
         rows =
           listOf(
             TerminalRow("", "Shellow native bridge failed", TerminalRowStyle.Warning),
@@ -211,6 +219,7 @@ data class TerminalSession(
         pendingClipboardText = null,
         clipboardSequence = 0,
         bellCount = 0,
+        detectedRemotePorts = emptyList(),
         rows =
           listOf(
             TerminalRow("$", "ssh ${profile.endpoint}", TerminalRowStyle.Command),
@@ -243,7 +252,10 @@ data class CodexSnapshot(
   val activeTurn: CodexActiveTurn?,
   val operation: CodexOperationState,
   val settings: CodexSettingsState,
+  val usage: CodexUsageState = CodexUsageState.Empty,
   val lastError: String?,
+  val messagesStartIndex: Int = 0,
+  val messagesReplaceAll: Boolean = true,
 ) {
   companion object {
     fun fromJson(json: String): CodexSnapshot {
@@ -269,7 +281,10 @@ data class CodexSnapshot(
         activeTurn = root.optJSONObject("active_turn")?.let(CodexActiveTurn::fromJson),
         operation = root.optJSONObject("operation")?.let(CodexOperationState::fromJson) ?: CodexOperationState.Idle,
         settings = root.optJSONObject("settings")?.let(CodexSettingsState::fromJson) ?: CodexSettingsState.Empty,
+        usage = root.optJSONObject("usage")?.let(CodexUsageState::fromJson) ?: CodexUsageState.Empty,
         lastError = root.optNullableString("last_error"),
+        messagesStartIndex = root.optInt("messages_start_index", 0),
+        messagesReplaceAll = root.optBoolean("messages_replace_all", true),
       )
     }
 
@@ -569,6 +584,133 @@ data class CodexSettingsState(
   }
 }
 
+data class CodexUsageState(
+  val thread: CodexThreadTokenUsage?,
+  val rateLimits: CodexRateLimitSnapshot?,
+  val isLoadingRateLimits: Boolean,
+  val rateLimitsError: String?,
+) {
+  companion object {
+    val Empty = CodexUsageState(null, null, false, null)
+
+    fun fromJson(json: JSONObject) =
+      CodexUsageState(
+        thread = json.optJSONObject("thread")?.let(CodexThreadTokenUsage::fromJson),
+        rateLimits = json.optJSONObject("rate_limits")?.let(CodexRateLimitSnapshot::fromJson),
+        isLoadingRateLimits = json.optBoolean("is_loading_rate_limits"),
+        rateLimitsError = json.optNullableString("rate_limits_error"),
+      )
+  }
+}
+
+data class CodexThreadTokenUsage(
+  val last: CodexTokenUsageBreakdown,
+  val total: CodexTokenUsageBreakdown,
+  val modelContextWindow: Long?,
+) {
+  companion object {
+    fun fromJson(json: JSONObject) =
+      CodexThreadTokenUsage(
+        last = json.optJSONObject("last")?.let(CodexTokenUsageBreakdown::fromJson) ?: CodexTokenUsageBreakdown.Empty,
+        total = json.optJSONObject("total")?.let(CodexTokenUsageBreakdown::fromJson) ?: CodexTokenUsageBreakdown.Empty,
+        modelContextWindow = json.optNullableLong("model_context_window"),
+      )
+  }
+}
+
+data class CodexTokenUsageBreakdown(
+  val cachedInputTokens: Long,
+  val inputTokens: Long,
+  val outputTokens: Long,
+  val reasoningOutputTokens: Long,
+  val totalTokens: Long,
+) {
+  companion object {
+    val Empty = CodexTokenUsageBreakdown(0, 0, 0, 0, 0)
+
+    fun fromJson(json: JSONObject) =
+      CodexTokenUsageBreakdown(
+        cachedInputTokens = json.optLong("cached_input_tokens"),
+        inputTokens = json.optLong("input_tokens"),
+        outputTokens = json.optLong("output_tokens"),
+        reasoningOutputTokens = json.optLong("reasoning_output_tokens"),
+        totalTokens = json.optLong("total_tokens"),
+      )
+  }
+}
+
+data class CodexRateLimitSnapshot(
+  val limitId: String?,
+  val limitName: String?,
+  val planType: String?,
+  val primary: CodexRateLimitWindow?,
+  val secondary: CodexRateLimitWindow?,
+  val credits: CodexCreditsSnapshot?,
+  val individualLimit: CodexSpendControlLimitSnapshot?,
+  val rateLimitReachedType: String?,
+) {
+  companion object {
+    fun fromJson(json: JSONObject) =
+      CodexRateLimitSnapshot(
+        limitId = json.optNullableString("limit_id"),
+        limitName = json.optNullableString("limit_name"),
+        planType = json.optNullableString("plan_type"),
+        primary = json.optJSONObject("primary")?.let(CodexRateLimitWindow::fromJson),
+        secondary = json.optJSONObject("secondary")?.let(CodexRateLimitWindow::fromJson),
+        credits = json.optJSONObject("credits")?.let(CodexCreditsSnapshot::fromJson),
+        individualLimit = json.optJSONObject("individual_limit")?.let(CodexSpendControlLimitSnapshot::fromJson),
+        rateLimitReachedType = json.optNullableString("rate_limit_reached_type"),
+      )
+  }
+}
+
+data class CodexRateLimitWindow(
+  val usedPercent: Int,
+  val resetsAt: Long?,
+  val windowDurationMins: Long?,
+) {
+  companion object {
+    fun fromJson(json: JSONObject) =
+      CodexRateLimitWindow(
+        usedPercent = json.optInt("used_percent").coerceIn(0, 100),
+        resetsAt = json.optNullableLong("resets_at"),
+        windowDurationMins = json.optNullableLong("window_duration_mins"),
+      )
+  }
+}
+
+data class CodexCreditsSnapshot(
+  val hasCredits: Boolean,
+  val unlimited: Boolean,
+  val balance: String?,
+) {
+  companion object {
+    fun fromJson(json: JSONObject) =
+      CodexCreditsSnapshot(
+        hasCredits = json.optBoolean("has_credits"),
+        unlimited = json.optBoolean("unlimited"),
+        balance = json.optNullableString("balance"),
+      )
+  }
+}
+
+data class CodexSpendControlLimitSnapshot(
+  val limit: String,
+  val used: String,
+  val remainingPercent: Int,
+  val resetsAt: Long,
+) {
+  companion object {
+    fun fromJson(json: JSONObject) =
+      CodexSpendControlLimitSnapshot(
+        limit = json.optString("limit"),
+        used = json.optString("used"),
+        remainingPercent = json.optInt("remaining_percent").coerceIn(0, 100),
+        resetsAt = json.optLong("resets_at"),
+      )
+  }
+}
+
 data class CodexModelOption(
   val id: String,
   val name: String,
@@ -629,6 +771,7 @@ data class CodexMessage(
   val blocks: List<CodexMarkdownBlock> = emptyList(),
   val isStreaming: Boolean = false,
   val truncated: Boolean = false,
+  val delivery: CodexMessageDelivery? = null,
 ) {
   companion object {
     fun fromJson(json: JSONObject) =
@@ -645,7 +788,19 @@ data class CodexMessage(
         blocks = json.optJSONArray("blocks")?.mapObjects(CodexMarkdownBlock::fromJson).orEmpty(),
         isStreaming = json.optBoolean("is_streaming"),
         truncated = json.optBoolean("truncated"),
+        delivery = json.optNullableString("delivery")?.let(CodexMessageDelivery::fromWire),
       )
+  }
+}
+
+enum class CodexMessageDelivery(val wire: String) {
+  Queued("queued"),
+  Sent("sent"),
+  Committed("committed"),
+  Failed("failed");
+
+  companion object {
+    fun fromWire(value: String) = entries.firstOrNull { it.wire == value } ?: Committed
   }
 }
 
@@ -822,7 +977,9 @@ data class CodexApproval(
   val command: String?,
   val cwd: String?,
   val reason: String?,
-  val questions: List<CodexUserQuestion>,
+  val questions: List<CodexUserInputQuestion> = emptyList(),
+  val availableDecisions: List<String> = emptyList(),
+  val permissions: String? = null,
 ) {
   companion object {
     fun fromJson(json: JSONObject) =
@@ -834,36 +991,44 @@ data class CodexApproval(
         command = json.optNullableString("command"),
         cwd = json.optNullableString("cwd"),
         reason = json.optNullableString("reason"),
-        questions = json.optJSONArray("questions")?.mapObjects(CodexUserQuestion::fromJson).orEmpty(),
+        questions = json.optJSONArray("questions")?.mapObjects(CodexUserInputQuestion::fromJson).orEmpty(),
+        availableDecisions = json.optJSONArray("available_decisions")?.mapStrings().orEmpty(),
+        permissions = json.optNullableString("permissions"),
       )
   }
 }
 
-data class CodexUserQuestion(
-  val question: String,
+data class CodexUserInputQuestion(
+  val id: String,
   val header: String,
-  val options: List<CodexUserQuestionOption>,
+  val question: String,
+  val isOther: Boolean,
+  val isSecret: Boolean,
   val multiSelect: Boolean,
+  val options: List<CodexUserInputOption>,
 ) {
   companion object {
     fun fromJson(json: JSONObject) =
-      CodexUserQuestion(
+      CodexUserInputQuestion(
+        id = json.optString("id"),
+        header = json.optString("header"),
         question = json.optString("question"),
-        header = json.optString("header", "Question"),
-        options = json.optJSONArray("options")?.mapObjects(CodexUserQuestionOption::fromJson).orEmpty(),
+        isOther = json.optBoolean("is_other"),
+        isSecret = json.optBoolean("is_secret"),
         multiSelect = json.optBoolean("multi_select"),
+        options = json.optJSONArray("options")?.mapObjects(CodexUserInputOption::fromJson).orEmpty(),
       )
   }
 }
 
-data class CodexUserQuestionOption(
+data class CodexUserInputOption(
   val label: String,
   val description: String,
   val preview: String?,
 ) {
   companion object {
     fun fromJson(json: JSONObject) =
-      CodexUserQuestionOption(
+      CodexUserInputOption(
         label = json.optString("label"),
         description = json.optString("description"),
         preview = json.optNullableString("preview"),
@@ -876,6 +1041,7 @@ enum class CodexApprovalKind(val wire: String) {
   FileChange("file_change"),
   UserInput("user_input"),
   Permissions("permissions"),
+  Elicitation("elicitation"),
   Tool("tool");
 
   companion object {
@@ -1250,6 +1416,22 @@ class ShellowCoreSession : Closeable {
       )
     }
 
+  fun setTransportOptions(
+    keepAliveSeconds: Long,
+    detectRemotePorts: Boolean,
+  ) {
+    lock.withLock {
+      val current = handle
+      if (current != 0L) {
+        ShellowNative.nativeSetTransportOptions(
+          current,
+          keepAliveSeconds.coerceIn(10, 120),
+          detectRemotePorts,
+        )
+      }
+    }
+  }
+
   fun startPrivateKeyShell(
     profile: HostProfile,
     privateKeyPem: String,
@@ -1307,6 +1489,9 @@ class ShellowCoreSession : Closeable {
     }
 
   fun pollLiveShell() = decode { current -> ShellowNative.nativePollLiveShellJson(current) }
+
+  fun dismissDetectedRemotePort(port: Int) =
+    decode { current -> ShellowNative.nativeDismissDetectedRemotePortJson(current, port) }
 
   fun disconnectLiveShell() =
     decode { current -> ShellowNative.nativeDisconnectLiveShellJson(current) }
@@ -1594,6 +1779,12 @@ internal object ShellowNative {
     password: String,
   ): String
 
+  external fun nativeSetTransportOptions(
+    handle: Long,
+    keepAliveSeconds: Long,
+    detectRemotePorts: Boolean,
+  )
+
   external fun nativeConnectPasswordExecJson(
     handle: Long,
     name: String,
@@ -1629,6 +1820,7 @@ internal object ShellowNative {
   ): String
 
   external fun nativePollLiveShellJson(handle: Long): String
+  external fun nativeDismissDetectedRemotePortJson(handle: Long, port: Int): String
   external fun nativeDisconnectLiveShellJson(handle: Long): String
   external fun nativeCodexSnapshotJson(handle: Long): String
 

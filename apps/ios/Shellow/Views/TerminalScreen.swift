@@ -863,7 +863,7 @@ private struct TerminalFloatingHeader: View {
             Button(action: onBack) {
                 Image(systemName: "chevron.left")
                     .font(.system(size: 15, weight: .semibold))
-                    .frame(width: 34, height: 34)
+                    .frame(width: 44, height: 44)
             }
             .buttonStyle(.plain)
             .foregroundStyle(ShellowTheme.terminalText)
@@ -896,7 +896,7 @@ private struct TerminalFloatingHeader: View {
                     }
                 }
                 .padding(.horizontal, 12)
-                .frame(height: 34)
+                .frame(height: 44)
                 .frame(maxWidth: .infinity)
                 .background(ShellowTheme.panelBackground.opacity(0.94), in: RoundedRectangle(cornerRadius: 8))
                 .overlay(
@@ -917,7 +917,7 @@ private struct TerminalFloatingHeader: View {
                 .font(.caption.weight(.semibold))
                 .foregroundStyle(ShellowTheme.warning)
                 .padding(.horizontal, 8)
-                .frame(height: 34)
+                .frame(height: 44)
                 .background(
                     ShellowTheme.warning.opacity(0.16),
                     in: RoundedRectangle(cornerRadius: 8)
@@ -931,7 +931,7 @@ private struct TerminalFloatingHeader: View {
                 Button(action: onReconnect) {
                     Image(systemName: "arrow.clockwise")
                         .font(.system(size: 14, weight: .semibold))
-                        .frame(width: 34, height: 34)
+                        .frame(width: 44, height: 44)
                 }
                 .buttonStyle(.plain)
                 .foregroundStyle(ShellowTheme.accent)
@@ -943,7 +943,7 @@ private struct TerminalFloatingHeader: View {
                 Button(action: onDisconnect) {
                     Image(systemName: "power")
                         .font(.system(size: 14, weight: .semibold))
-                        .frame(width: 34, height: 34)
+                        .frame(width: 44, height: 44)
                 }
                 .buttonStyle(.plain)
                 .foregroundStyle(ShellowTheme.warning)
@@ -2083,7 +2083,7 @@ private struct TerminalSearchBar: View {
             Button(action: previous) {
                 Image(systemName: "chevron.up")
                     .font(.system(size: 13, weight: .semibold))
-                    .frame(width: 32, height: 32)
+                    .frame(width: 44, height: 44)
             }
             .buttonStyle(.plain)
             .foregroundStyle(ShellowTheme.terminalText)
@@ -2093,7 +2093,7 @@ private struct TerminalSearchBar: View {
             Button(action: next) {
                 Image(systemName: "chevron.down")
                     .font(.system(size: 13, weight: .semibold))
-                    .frame(width: 32, height: 32)
+                    .frame(width: 44, height: 44)
             }
             .buttonStyle(.plain)
             .foregroundStyle(ShellowTheme.terminalText)
@@ -2103,7 +2103,7 @@ private struct TerminalSearchBar: View {
             Button(action: onClose) {
                 Image(systemName: "xmark")
                     .font(.system(size: 13, weight: .semibold))
-                    .frame(width: 32, height: 32)
+                    .frame(width: 44, height: 44)
             }
             .buttonStyle(.plain)
             .foregroundStyle(ShellowTheme.terminalText)
@@ -2171,10 +2171,10 @@ enum TerminalMetrics {
 }
 
 private enum TerminalChromeMetrics {
-    static let floatingHeaderHeight: CGFloat = 42
+    static let floatingHeaderHeight: CGFloat = 44
     static let floatingHeaderTopPadding: CGFloat = 8
     static let cursorPadding: CGFloat = 18
-    static let searchHeight: CGFloat = 48
+    static let searchHeight: CGFloat = 60
     static let headerContentGap: CGFloat = 8
     static let contentBottomGap: CGFloat = 8
     static let fallbackSafeAreaTop: CGFloat = 52
@@ -2335,7 +2335,7 @@ private struct TerminalInputBar: View {
             } label: {
                 Image(systemName: "ellipsis.circle")
                     .font(.system(size: 15, weight: .semibold))
-                    .frame(width: 38, height: 38)
+                    .frame(width: 44, height: 44)
             }
             .buttonStyle(.plain)
             .foregroundStyle(ShellowTheme.terminalText)
@@ -2799,7 +2799,7 @@ private struct TerminalIconButton: View {
         Button(action: action) {
             Image(systemName: systemName)
                 .font(.system(size: 15, weight: .semibold))
-                .frame(width: 38, height: 38)
+                .frame(width: 44, height: 44)
         }
         .buttonStyle(.plain)
         .foregroundStyle(foreground)
@@ -2815,7 +2815,7 @@ private struct TerminalJumpToBottomButton: View {
         Button(action: action) {
             Image(systemName: "arrow.down.to.line")
                 .font(.system(size: 14, weight: .semibold))
-                .frame(width: 38, height: 38)
+                .frame(width: 44, height: 44)
         }
         .buttonStyle(.plain)
         .foregroundStyle(ShellowTheme.terminalText)
@@ -2994,7 +2994,7 @@ private struct TerminalKeyButton: View {
         Button(action: action) {
             Text(title)
                 .font(.caption.weight(.semibold))
-                .frame(width: keyWidth, height: 34)
+                .frame(width: keyWidth, height: 44)
         }
         .buttonStyle(.plain)
         .background(isActive ? ShellowTheme.accent : ShellowTheme.keyBackground, in: RoundedRectangle(cornerRadius: 8))
@@ -3014,7 +3014,7 @@ private struct TerminalIconKey: View {
         Button(action: action) {
             Image(systemName: systemName)
                 .font(.system(size: 14, weight: .semibold))
-                .frame(width: 44, height: 34)
+                .frame(width: 44, height: 44)
         }
         .buttonStyle(.plain)
         .background(ShellowTheme.keyBackground, in: RoundedRectangle(cornerRadius: 8))

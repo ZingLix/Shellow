@@ -122,11 +122,14 @@ const APP_SERVER_WEBSOCKET_MAX_FRAME_BYTES: usize = 32 * 1024 * 1024;
 const COMMAND_OUTPUT_PREVIEW_MAX_LINES: usize = 10;
 const COMMAND_OUTPUT_PREVIEW_MAX_CHARS: usize = 2_400;
 const STATUS_MESSAGE_MAX_CHARS: usize = 2_000;
-const HISTORY_ITEMS_VIEW: &str = "summary";
+const HISTORY_ITEMS_VIEW: &str = "full";
 const COMPACT_TRANSCRIPT_MAX_CHARS: usize = 8_000;
 
 fn codex_debug(args: std::fmt::Arguments<'_>) {
+    #[cfg(debug_assertions)]
     println!("[Shellow Codex] {args}");
+    #[cfg(not(debug_assertions))]
+    let _ = args;
 }
 
 fn json_byte_len(value: &Value) -> usize {
@@ -189,6 +192,8 @@ pub struct CodexSnapshot {
     pub thread_id: Option<String>,
     pub turn_active: bool,
     pub messages: Vec<CodexMessage>,
+    pub messages_start_index: usize,
+    pub messages_replace_all: bool,
     pub pending_approvals: Vec<CodexApproval>,
     pub directory: CodexDirectoryState,
     pub threads: CodexThreadListState,
@@ -197,6 +202,7 @@ pub struct CodexSnapshot {
     pub active_turn: Option<CodexActiveTurn>,
     pub operation: CodexOperationState,
     pub settings: CodexSettingsState,
+    pub usage: CodexUsageState,
     pub last_error: Option<String>,
 }
 
@@ -214,6 +220,8 @@ impl CodexSnapshot {
                 "status-0",
                 "Connect to a host to start Codex.",
             )],
+            messages_start_index: 0,
+            messages_replace_all: true,
             pending_approvals: Vec::new(),
             directory: CodexDirectoryState::default(),
             threads: CodexThreadListState::default(),
@@ -222,6 +230,7 @@ impl CodexSnapshot {
             active_turn: None,
             operation: CodexOperationState::idle(),
             settings: CodexSettingsState::default(),
+            usage: CodexUsageState::default(),
             last_error: None,
         }
     }
@@ -240,6 +249,8 @@ impl CodexSnapshot {
                 CodexMessage::status("status-0", "Codex bridge failed"),
                 CodexMessage::status("status-1", &message),
             ],
+            messages_start_index: 0,
+            messages_replace_all: true,
             pending_approvals: Vec::new(),
             directory: CodexDirectoryState::default(),
             threads: CodexThreadListState::default(),
@@ -248,6 +259,7 @@ impl CodexSnapshot {
             active_turn: None,
             operation: CodexOperationState::failed(message.clone()),
             settings: CodexSettingsState::default(),
+            usage: CodexUsageState::default(),
             last_error: Some(message),
         }
     }
@@ -427,6 +439,64 @@ impl Default for CodexSettingsState {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct CodexUsageState {
+    pub thread: Option<CodexThreadTokenUsage>,
+    pub rate_limits: Option<CodexRateLimitSnapshot>,
+    pub is_loading_rate_limits: bool,
+    pub rate_limits_error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CodexThreadTokenUsage {
+    pub last: CodexTokenUsageBreakdown,
+    pub total: CodexTokenUsageBreakdown,
+    pub model_context_window: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct CodexTokenUsageBreakdown {
+    pub cached_input_tokens: u64,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub reasoning_output_tokens: u64,
+    pub total_tokens: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct CodexRateLimitSnapshot {
+    pub limit_id: Option<String>,
+    pub limit_name: Option<String>,
+    pub plan_type: Option<String>,
+    pub primary: Option<CodexRateLimitWindow>,
+    pub secondary: Option<CodexRateLimitWindow>,
+    pub credits: Option<CodexCreditsSnapshot>,
+    pub individual_limit: Option<CodexSpendControlLimitSnapshot>,
+    pub rate_limit_reached_type: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CodexRateLimitWindow {
+    pub used_percent: u32,
+    pub resets_at: Option<u64>,
+    pub window_duration_mins: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CodexCreditsSnapshot {
+    pub has_credits: bool,
+    pub unlimited: bool,
+    pub balance: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CodexSpendControlLimitSnapshot {
+    pub limit: String,
+    pub used: String,
+    pub remaining_percent: u32,
+    pub resets_at: u64,
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum CodexStatus {
@@ -450,6 +520,7 @@ pub struct CodexMessage {
     pub blocks: Vec<CodexMarkdownBlock>,
     pub is_streaming: bool,
     pub truncated: bool,
+    pub delivery: Option<CodexMessageDelivery>,
 }
 
 impl CodexMessage {
@@ -468,8 +539,15 @@ impl CodexMessage {
             blocks: Vec::new(),
             is_streaming: false,
             truncated: false,
+            delivery: Some(CodexMessageDelivery::Committed),
         };
         message.refresh_blocks();
+        message
+    }
+
+    fn local_user(id: impl Into<String>, text: impl Into<String>) -> Self {
+        let mut message = Self::user(id, text);
+        message.delivery = Some(CodexMessageDelivery::Sent);
         message
     }
 
@@ -487,6 +565,7 @@ impl CodexMessage {
             blocks: Vec::new(),
             is_streaming: true,
             truncated: false,
+            delivery: None,
         }
     }
 
@@ -504,6 +583,7 @@ impl CodexMessage {
             blocks: Vec::new(),
             is_streaming: false,
             truncated: false,
+            delivery: None,
         }
     }
 
@@ -529,6 +609,7 @@ impl CodexMessage {
             blocks: Vec::new(),
             is_streaming: false,
             truncated: false,
+            delivery: None,
         }
     }
 
@@ -554,6 +635,7 @@ impl CodexMessage {
             blocks: Vec::new(),
             is_streaming: false,
             truncated: false,
+            delivery: None,
         };
         message.refresh_blocks();
         message
@@ -573,6 +655,7 @@ impl CodexMessage {
             blocks: Vec::new(),
             is_streaming: false,
             truncated: false,
+            delivery: None,
         }
     }
 
@@ -590,6 +673,7 @@ impl CodexMessage {
             blocks: Vec::new(),
             is_streaming: true,
             truncated: false,
+            delivery: None,
         }
     }
 
@@ -645,6 +729,15 @@ pub enum CodexMessageFormat {
     Markdown,
     Code,
     Status,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CodexMessageDelivery {
+    Queued,
+    Sent,
+    Committed,
+    Failed,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -881,19 +974,26 @@ pub struct CodexApproval {
     pub cwd: Option<String>,
     pub reason: Option<String>,
     #[serde(default)]
-    pub questions: Vec<CodexUserQuestion>,
+    pub questions: Vec<CodexUserInputQuestion>,
+    #[serde(default)]
+    pub available_decisions: Vec<String>,
+    pub permissions: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct CodexUserQuestion {
-    pub question: String,
+pub struct CodexUserInputQuestion {
+    pub id: String,
     pub header: String,
-    pub options: Vec<CodexUserQuestionOption>,
+    pub question: String,
+    pub is_other: bool,
+    pub is_secret: bool,
+    #[serde(default)]
     pub multi_select: bool,
+    pub options: Vec<CodexUserInputOption>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct CodexUserQuestionOption {
+pub struct CodexUserInputOption {
     pub label: String,
     pub description: String,
     pub preview: Option<String>,
@@ -906,6 +1006,7 @@ pub enum CodexApprovalKind {
     FileChange,
     UserInput,
     Permissions,
+    Elicitation,
     Tool,
 }
 
@@ -913,6 +1014,7 @@ pub enum CodexApprovalKind {
 enum ClientRequestKind {
     Initialize,
     ModelList,
+    RateLimitsRead,
     ThreadStart,
     ThreadResume,
     DirectoryList,
@@ -935,6 +1037,7 @@ struct PendingServerRequest {
     id: Value,
     thread_id: Option<String>,
     approval: CodexApproval,
+    params: Value,
 }
 
 #[derive(Debug)]
@@ -951,6 +1054,7 @@ pub struct CodexSession {
     event_thread_id: Option<String>,
     turn_active: bool,
     messages: Vec<CodexMessage>,
+    last_polled_messages: Vec<CodexMessage>,
     pending_approvals: Vec<PendingServerRequest>,
     thread_activity: HashMap<String, CodexThreadActivity>,
     directory: CodexDirectoryState,
@@ -960,6 +1064,7 @@ pub struct CodexSession {
     active_turn: Option<CodexActiveTurn>,
     operation: CodexOperationState,
     settings: CodexSettingsState,
+    usage: CodexUsageState,
     model_explicitly_selected: bool,
     last_error: Option<String>,
     line_buffer: String,
@@ -969,6 +1074,8 @@ pub struct CodexSession {
     local_revision: u64,
     request_kinds: HashMap<u64, ClientRequestKind>,
     request_thread_ids: HashMap<u64, String>,
+    request_message_ids: HashMap<u64, String>,
+    pending_steers: Vec<(String, String)>,
     completed_requests: HashMap<u64, Result<(), String>>,
     operation_thread_id: Option<String>,
     assistant_message_indices: HashMap<String, usize>,
@@ -977,6 +1084,8 @@ pub struct CodexSession {
     reasoning_message_indices: HashMap<String, usize>,
     #[cfg(feature = "native-integrations")]
     transport: ssh::ExecStdioHandle,
+    #[cfg(feature = "native-integrations")]
+    media_transport_options: ssh::RusshConnectOptions,
 }
 
 impl CodexSession {
@@ -985,8 +1094,14 @@ impl CodexSession {
         profile: HostProfile,
         password: String,
         cwd: Option<String>,
+        keepalive_interval_secs: u64,
     ) -> Result<Self, String> {
-        Self::start(profile, ssh::RusshAuthMethod::Password(password), cwd)
+        Self::start(
+            profile,
+            ssh::RusshAuthMethod::Password(password),
+            cwd,
+            keepalive_interval_secs,
+        )
     }
 
     #[cfg(feature = "native-integrations")]
@@ -995,6 +1110,7 @@ impl CodexSession {
         private_key_pem: String,
         passphrase: Option<String>,
         cwd: Option<String>,
+        keepalive_interval_secs: u64,
     ) -> Result<Self, String> {
         ssh::validate_private_key_auth(&private_key_pem, passphrase.as_deref())?;
         Self::start(
@@ -1004,6 +1120,7 @@ impl CodexSession {
                 passphrase,
             },
             cwd,
+            keepalive_interval_secs,
         )
     }
 
@@ -1012,26 +1129,27 @@ impl CodexSession {
         profile: HostProfile,
         auth: ssh::RusshAuthMethod,
         cwd: Option<String>,
+        keepalive_interval_secs: u64,
     ) -> Result<Self, String> {
         let title = profile.name.clone();
         let endpoint = profile.endpoint();
         let initial_cwd = normalize_cwd(cwd);
         let app_server_command = codex_app_server_command(initial_cwd.as_deref());
-        let transport = ssh::ExecStdioHandle::spawn(
-            ssh::RusshConnectOptions {
-                host: profile.host,
-                port: profile.port,
-                username: profile.username,
-                auth,
-                expected_host_key_sha256: profile.trusted_host_key_sha256,
-                keepalive_interval_secs: Some(ssh::DEFAULT_LIVE_KEEPALIVE_INTERVAL_SECS),
-                keepalive_max: ssh::DEFAULT_KEEPALIVE_MAX,
-                cols: 80,
-                rows: 24,
-                inactivity_timeout_secs: 3_600,
-            },
-            app_server_command,
-        )?;
+        let transport_options = ssh::RusshConnectOptions {
+            host: profile.host,
+            port: profile.port,
+            username: profile.username,
+            auth,
+            expected_host_key_sha256: profile.trusted_host_key_sha256,
+            keepalive_interval_secs: Some(keepalive_interval_secs.clamp(10, 120)),
+            keepalive_max: ssh::DEFAULT_KEEPALIVE_MAX,
+            detect_remote_ports: false,
+            cols: 80,
+            rows: 24,
+            inactivity_timeout_secs: 3_600,
+        };
+        let media_transport_options = transport_options.clone();
+        let transport = ssh::ExecStdioHandle::spawn(transport_options, app_server_command)?;
 
         let session = Self {
             title,
@@ -1052,6 +1170,7 @@ impl CodexSession {
                 ),
                 CodexMessage::status("status-1", "Waiting for the Unix WebSocket handshake."),
             ],
+            last_polled_messages: Vec::new(),
             pending_approvals: Vec::new(),
             thread_activity: HashMap::new(),
             directory: CodexDirectoryState {
@@ -1072,6 +1191,7 @@ impl CodexSession {
             active_turn: None,
             operation: CodexOperationState::idle(),
             settings: CodexSettingsState::default(),
+            usage: CodexUsageState::default(),
             model_explicitly_selected: false,
             last_error: None,
             line_buffer: String::new(),
@@ -1081,6 +1201,8 @@ impl CodexSession {
             local_revision: 1,
             request_kinds: HashMap::new(),
             request_thread_ids: HashMap::new(),
+            request_message_ids: HashMap::new(),
+            pending_steers: Vec::new(),
             completed_requests: HashMap::new(),
             operation_thread_id: None,
             assistant_message_indices: HashMap::new(),
@@ -1088,6 +1210,7 @@ impl CodexSession {
             event_message_indices: HashMap::new(),
             reasoning_message_indices: HashMap::new(),
             transport,
+            media_transport_options,
         };
 
         session.start_websocket_handshake()?;
@@ -1095,6 +1218,26 @@ impl CodexSession {
     }
 
     pub fn snapshot(&self) -> CodexSnapshot {
+        self.snapshot_from_message(0, true)
+    }
+
+    fn incremental_snapshot(&mut self) -> CodexSnapshot {
+        let replace_all = self.messages.len() < self.last_polled_messages.len();
+        let start = if replace_all {
+            0
+        } else {
+            self.messages
+                .iter()
+                .zip(&self.last_polled_messages)
+                .position(|(current, previous)| current != previous)
+                .unwrap_or_else(|| self.last_polled_messages.len().min(self.messages.len()))
+        };
+        let snapshot = self.snapshot_from_message(start, replace_all || start == 0);
+        self.last_polled_messages = self.messages.clone();
+        snapshot
+    }
+
+    fn snapshot_from_message(&self, start: usize, replace_all: bool) -> CodexSnapshot {
         let mut threads = self.threads.clone();
         for thread in &mut threads.threads {
             self.decorate_thread_summary(thread);
@@ -1112,7 +1255,9 @@ impl CodexSession {
             observed_host_key_sha256: self.observed_host_key_sha256.clone(),
             thread_id: self.thread_id.clone(),
             turn_active: self.turn_active,
-            messages: self.messages.clone(),
+            messages: self.messages[start..].to_vec(),
+            messages_start_index: start,
+            messages_replace_all: replace_all,
             pending_approvals: self
                 .pending_approvals
                 .iter()
@@ -1131,6 +1276,7 @@ impl CodexSession {
             active_turn: self.active_turn.clone(),
             operation: self.operation.clone(),
             settings: self.settings.clone(),
+            usage: self.usage.clone(),
             last_error: self.last_error.clone(),
         }
     }
@@ -1158,6 +1304,7 @@ impl CodexSession {
         }
         self.websocket.state = WebSocketConnectionState::Closed;
         self.status = CodexStatus::Disconnected;
+        self.fail_pending_steers("Disconnected before this message could be sent.");
         self.turn_active = false;
         self.push_status("Codex disconnected; the background app-server remains running.");
     }
@@ -1182,7 +1329,7 @@ impl CodexSession {
             }
         }
 
-        self.snapshot()
+        self.incremental_snapshot()
     }
 
     pub fn send_user_message(&mut self, text: &str) -> Result<CodexSnapshot, String> {
@@ -1198,39 +1345,50 @@ impl CodexSession {
         };
 
         self.clear_error();
-        let user_message_id = self.next_message_id("user");
-        self.messages
-            .push(CodexMessage::user(user_message_id, text.to_string()));
-        self.bump_revision();
-
         let mut params = serde_json::Map::new();
         params.insert("threadId".to_string(), json!(thread_id));
         params.insert("input".to_string(), text_input_value(text));
 
-        if self.turn_active {
+        let request_id = if self.turn_active {
             if let Some(active_turn) = &self.active_turn {
                 params.insert("expectedTurnId".to_string(), json!(active_turn.id));
-                self.send_request(
+                let request_id = self.send_request(
                     "turn/steer",
                     Value::Object(params),
                     ClientRequestKind::TurnSteer,
                 )?;
                 self.operation = CodexOperationState::running("Steering active turn");
+                request_id
             } else {
-                self.push_status(
-                    "Codex is working, but this server did not report an active turn id yet.",
-                );
+                let user_message_id = self.next_message_id("user");
+                let mut message = CodexMessage::local_user(user_message_id.clone(), text);
+                message.delivery = Some(CodexMessageDelivery::Queued);
+                self.messages.push(message);
+                self.pending_steers
+                    .push((user_message_id, text.to_string()));
+                self.operation =
+                    CodexOperationState::running("Message queued until the active turn is ready");
+                self.bump_revision();
+                return Ok(self.snapshot());
             }
         } else {
             self.apply_turn_settings(&mut params);
-            self.send_request(
+            let request_id = self.send_request(
                 "turn/start",
                 Value::Object(params),
                 ClientRequestKind::TurnStart,
             )?;
             self.turn_active = true;
             self.operation = CodexOperationState::running("Starting turn");
-        }
+            request_id
+        };
+        let user_message_id = self.next_message_id("user");
+        self.messages.push(CodexMessage::local_user(
+            user_message_id.clone(),
+            text.to_string(),
+        ));
+        self.request_message_ids.insert(request_id, user_message_id);
+        self.bump_revision();
         Ok(self.snapshot())
     }
 
@@ -1264,7 +1422,9 @@ impl CodexSession {
             models_error: self.settings.models_error.clone(),
         };
         self.model_explicitly_selected = normalize_setting(model).is_some();
-        self.operation = CodexOperationState::succeeded("Codex settings updated.");
+        self.operation = CodexOperationState::succeeded(
+            "Defaults saved. Model, reasoning, speed, and approval apply to the next turn; sandbox applies when a thread starts or resumes.",
+        );
         self.bump_revision();
         Ok(self.snapshot())
     }
@@ -1404,8 +1564,11 @@ impl CodexSession {
         self.cwd = cwd.clone();
         self.thread_id = None;
         self.event_thread_id = None;
+        self.usage.thread = None;
         self.turn_active = false;
         self.clear_message_indices();
+        self.request_message_ids.clear();
+        self.pending_steers.clear();
         self.thread_detail = CodexThreadDetailState::default();
         self.active_turn = None;
         self.messages.clear();
@@ -1451,8 +1614,11 @@ impl CodexSession {
 
         self.thread_id = None;
         self.event_thread_id = Some(thread_id.to_string());
+        self.usage.thread = None;
         self.turn_active = false;
         self.clear_message_indices();
+        self.request_message_ids.clear();
+        self.pending_steers.clear();
         self.thread_detail = CodexThreadDetailState::default();
         self.active_turn = None;
         self.messages.clear();
@@ -1467,7 +1633,7 @@ impl CodexSession {
                 "initialTurnsPage".to_string(),
                 json!({
                     "limit": 30,
-                    "sortDirection": "asc",
+                    "sortDirection": "desc",
                     "itemsView": HISTORY_ITEMS_VIEW
                 }),
             );
@@ -1695,19 +1861,36 @@ impl CodexSession {
         };
 
         let pending = self.pending_approvals.remove(index);
-        let decision = normalize_approval_decision(decision);
+        let raw_decision = decision.trim();
+        let decision = normalize_approval_decision(raw_decision);
         let result = match pending.approval.kind {
             CodexApprovalKind::Command => json!({ "decision": decision }),
             CodexApprovalKind::FileChange => json!({ "decision": decision }),
-            CodexApprovalKind::UserInput => json!({ "answers": {} }),
-            CodexApprovalKind::Permissions => json!({ "permissions": null, "scope": "once" }),
-            CodexApprovalKind::Tool => json!({ "contentItems": [], "success": false }),
+            CodexApprovalKind::UserInput => user_input_response(raw_decision),
+            CodexApprovalKind::Permissions => {
+                let granted = if matches!(decision, "decline" | "cancel") {
+                    json!({})
+                } else {
+                    pending
+                        .params
+                        .get("permissions")
+                        .cloned()
+                        .unwrap_or_else(|| json!({}))
+                };
+                json!({
+                    "permissions": granted,
+                    "scope": if decision == "acceptForSession" { "session" } else { "turn" }
+                })
+            }
+            CodexApprovalKind::Elicitation => mcp_elicitation_response(raw_decision),
+            CodexApprovalKind::Tool => dynamic_tool_response(raw_decision),
         };
         self.send_response(pending.id, result)?;
-        self.push_status(format!(
-            "Answered {} approval: {}",
-            pending.approval.title, decision
-        ));
+        if let Some(thread_id) = pending.thread_id.as_deref() {
+            self.sync_pending_request_flags(thread_id);
+        }
+        self.operation = CodexOperationState::running("Working");
+        self.bump_revision();
         Ok(self.snapshot())
     }
 
@@ -1889,6 +2072,23 @@ impl CodexSession {
         self.bump_revision();
     }
 
+    #[cfg(feature = "native-integrations")]
+    fn request_rate_limits(&mut self) {
+        self.usage.is_loading_rate_limits = true;
+        self.usage.rate_limits_error = None;
+
+        if let Err(error) = self.send_request(
+            "account/rateLimits/read",
+            Value::Null,
+            ClientRequestKind::RateLimitsRead,
+        ) {
+            self.usage.is_loading_rate_limits = false;
+            self.usage.rate_limits_error = Some(error);
+        }
+
+        self.bump_revision();
+    }
+
     fn consume_output(&mut self, bytes: &[u8]) {
         if bytes.is_empty() {
             return;
@@ -1991,12 +2191,10 @@ impl CodexSession {
         if matches!(
             kind,
             Some(ClientRequestKind::TurnStart | ClientRequestKind::TurnSteer)
-        ) {
-            if let (Some(thread_id), Some(error)) =
-                (request_thread_id.as_deref(), message.get("error"))
-            {
-                self.record_thread_request_failure(thread_id, error);
-            }
+        ) && let (Some(thread_id), Some(error)) =
+            (request_thread_id.as_deref(), message.get("error"))
+        {
+            self.record_thread_request_failure(thread_id, error);
         }
 
         if !should_apply_response_to_active_thread(
@@ -2024,6 +2222,22 @@ impl CodexSession {
         if let Some(error) = message.get("error") {
             let description = describe_codex_error(error)
                 .unwrap_or_else(|| truncate_status_message(error.to_string()));
+            if let Some(id) = id_u64 {
+                self.set_message_delivery_for_request(
+                    id,
+                    CodexMessageDelivery::Failed,
+                    Some(&description),
+                );
+            }
+            if kind == Some(ClientRequestKind::RateLimitsRead) {
+                self.usage.is_loading_rate_limits = false;
+                self.usage.rate_limits_error = Some(description.clone());
+                if let Some(id) = id_u64.filter(|_| known_request) {
+                    self.completed_requests.insert(id, Err(description));
+                }
+                self.bump_revision();
+                return;
+            }
             self.report_error(format!("Codex request failed: {description}"));
             match kind {
                 Some(ClientRequestKind::Initialize) => {
@@ -2085,10 +2299,16 @@ impl CodexSession {
                 self.clear_error();
                 self.push_status("JSON-RPC initialized.");
                 #[cfg(feature = "native-integrations")]
-                self.request_model_list();
+                {
+                    self.request_model_list();
+                    self.request_rate_limits();
+                }
             }
             Some(ClientRequestKind::ModelList) => {
                 self.apply_model_list_response(message);
+            }
+            Some(ClientRequestKind::RateLimitsRead) => {
+                self.apply_rate_limits_response(message);
             }
             Some(ClientRequestKind::ThreadStart) => {
                 self.apply_thread_response(message, "Codex thread ready.");
@@ -2125,6 +2345,7 @@ impl CodexSession {
                 if deleted_thread_id.as_deref() == self.thread_id.as_deref() {
                     self.thread_id = None;
                     self.event_thread_id = None;
+                    self.usage.thread = None;
                     self.turn_active = false;
                     self.active_turn = None;
                 }
@@ -2149,6 +2370,10 @@ impl CodexSession {
                 self.operation = CodexOperationState::succeeded("Turn interrupted.");
             }
             None => {}
+        }
+
+        if let Some(id) = id_u64 {
+            self.set_message_delivery_for_request(id, CodexMessageDelivery::Committed, None);
         }
 
         if let Some(id) = id_u64.filter(|_| known_request) {
@@ -2219,6 +2444,7 @@ impl CodexSession {
                     {
                         self.thread_id = None;
                         self.event_thread_id = None;
+                        self.usage.thread = None;
                         self.turn_active = false;
                         self.active_turn = None;
                     }
@@ -2233,13 +2459,14 @@ impl CodexSession {
                         id: id.to_string(),
                         status: "inProgress".to_string(),
                     });
+                self.flush_pending_steers();
                 self.bump_revision();
             }
             "turn/completed" => {
+                self.fail_pending_steers("The turn ended before this message could be sent.");
                 self.turn_active = false;
                 self.active_turn = None;
                 self.mark_streaming_messages_complete();
-                self.hide_reasoning_summaries();
                 let status = params
                     .pointer("/turn/status")
                     .and_then(Value::as_str)
@@ -2263,6 +2490,14 @@ impl CodexSession {
                     .unwrap_or("assistant");
                 let delta = params.get("delta").and_then(Value::as_str).unwrap_or("");
                 self.append_assistant_delta(item_id, delta);
+            }
+            "item/plan/delta" => {
+                let item_id = params
+                    .get("itemId")
+                    .and_then(Value::as_str)
+                    .unwrap_or("plan");
+                let delta = params.get("delta").and_then(Value::as_str).unwrap_or("");
+                self.append_plan_delta(item_id, delta);
             }
             "item/reasoning/summaryTextDelta" => {
                 let item_id = params
@@ -2288,6 +2523,24 @@ impl CodexSession {
                 let delta = params.get("delta").and_then(Value::as_str).unwrap_or("");
                 self.append_command_output_delta(item_id, delta);
             }
+            "item/mcpToolCall/progress" => {
+                let item_id = params
+                    .get("itemId")
+                    .and_then(Value::as_str)
+                    .unwrap_or("mcp");
+                let detail = params
+                    .get("message")
+                    .and_then(Value::as_str)
+                    .map(str::to_string);
+                self.upsert_compact_event(
+                    item_id,
+                    CodexMessageKind::ToolCall,
+                    "Tool working",
+                    detail,
+                    None,
+                );
+                self.bump_revision();
+            }
             "item/started" => self.handle_item_started(params),
             "item/completed" => self.handle_item_completed(params),
             "serverRequest/resolved" => {
@@ -2301,16 +2554,18 @@ impl CodexSession {
                     .and_then(describe_codex_error)
                     .or_else(|| describe_codex_error(params))
                     .unwrap_or_else(|| "Codex app-server reported an error.".to_string());
-                let description = if params
+                let will_retry = params
                     .get("willRetry")
                     .and_then(Value::as_bool)
-                    .unwrap_or(false)
-                {
-                    format!("{description} Codex will retry automatically.")
+                    .unwrap_or(false);
+                if will_retry {
+                    self.last_error = None;
+                    self.operation =
+                        CodexOperationState::running(format!("Retrying · {description}"));
+                    self.bump_revision();
                 } else {
-                    description
-                };
-                self.report_error(format!("Codex error: {description}"));
+                    self.report_error(format!("Codex error: {description}"));
+                }
             }
             "thread/realtime/error" => {
                 let description = params
@@ -2320,16 +2575,61 @@ impl CodexSession {
                     .unwrap_or_else(|| "Codex realtime connection failed.".to_string());
                 self.report_error(format!("Codex realtime error: {description}"));
             }
+            "account/updated" => {
+                #[cfg(feature = "native-integrations")]
+                self.request_rate_limits();
+            }
+            "account/rateLimits/updated" => {
+                if let Some(rate_limits) = params.get("rateLimits") {
+                    merge_rate_limit_snapshot(&mut self.usage.rate_limits, rate_limits);
+                    self.usage.is_loading_rate_limits = false;
+                    self.usage.rate_limits_error = None;
+                    self.bump_revision();
+                }
+            }
+            "thread/tokenUsage/updated" => {
+                if let Some(token_usage) =
+                    params.get("tokenUsage").and_then(parse_thread_token_usage)
+                {
+                    self.usage.thread = Some(token_usage);
+                    self.bump_revision();
+                }
+            }
+            "warning" | "guardianWarning" | "configWarning" => {
+                if let Some(message) = params.get("message").and_then(Value::as_str) {
+                    self.push_status(format!("Warning: {message}"));
+                }
+            }
+            "hook/started" | "hook/completed" => {
+                let run = params.get("run").unwrap_or(&Value::Null);
+                let id = run.get("id").and_then(Value::as_str).unwrap_or("hook");
+                let name = run
+                    .get("name")
+                    .or_else(|| run.get("hookName"))
+                    .and_then(Value::as_str)
+                    .unwrap_or("Hook");
+                self.upsert_compact_event(
+                    id,
+                    CodexMessageKind::ToolCall,
+                    if method == "hook/started" {
+                        "Running hook"
+                    } else {
+                        "Hook completed"
+                    },
+                    Some(name.to_string()),
+                    pretty_json(run),
+                );
+                self.bump_revision();
+            }
             "remoteControl/status/changed"
-            | "account/updated"
-            | "account/rateLimits/updated"
-            | "thread/tokenUsage/updated"
             | "model/verification"
             | "model/safetyBuffering/updated" => {}
             other => {
-                if other.ends_with("/updated") || other.ends_with("/changed") {
-                    return;
-                }
+                codex_debug(format_args!(
+                    "unhandled notification method={} params={}",
+                    other,
+                    truncate_status_message(params.to_string())
+                ));
             }
         }
     }
@@ -2438,6 +2738,7 @@ impl CodexSession {
         {
             self.load_thread_messages(thread);
         }
+        self.restore_active_turn(message, thread);
         if let Some(model_warning) = model_warning {
             self.push_status(model_warning);
         }
@@ -2450,6 +2751,22 @@ impl CodexSession {
             self.messages.len(),
             self.thread_detail.turns_next_cursor
         ));
+    }
+
+    fn apply_rate_limits_response(&mut self, message: &Value) {
+        self.usage.is_loading_rate_limits = false;
+        let rate_limits = message.pointer("/result/rateLimits");
+        match rate_limits {
+            Some(value) => {
+                self.usage.rate_limits = parse_rate_limit_snapshot(value);
+                self.usage.rate_limits_error = None;
+            }
+            None => {
+                self.usage.rate_limits_error =
+                    Some("account/rateLimits/read returned no rate limits".to_string());
+            }
+        }
+        self.bump_revision();
     }
 
     fn apply_directory_list_response(&mut self, message: &Value) {
@@ -2577,12 +2894,12 @@ impl CodexSession {
     }
 
     fn apply_thread_operation_thread(&mut self, message: &Value) {
-        if let Some(thread) = message.pointer("/result/thread") {
-            if let Some(summary) = parse_thread_summary(thread) {
-                self.upsert_thread_summary(summary.clone());
-                if self.thread_id.as_deref() == Some(summary.id.as_str()) {
-                    self.thread_detail.thread = Some(summary);
-                }
+        if let Some(thread) = message.pointer("/result/thread")
+            && let Some(summary) = parse_thread_summary(thread)
+        {
+            self.upsert_thread_summary(summary.clone());
+            if self.thread_id.as_deref() == Some(summary.id.as_str()) {
+                self.thread_detail.thread = Some(summary);
             }
         }
         self.bump_revision();
@@ -2630,14 +2947,18 @@ impl CodexSession {
 
     fn load_turn_page_messages(&mut self, page: &Value, append: bool) {
         let started = Instant::now();
-        if !append {
-            self.messages.clear();
-            self.clear_message_indices();
-        }
-
         let Some(turns) = page.get("data").and_then(Value::as_array) else {
             return;
         };
+        let existing_messages = if append {
+            std::mem::take(&mut self.messages)
+        } else {
+            Vec::new()
+        };
+        if !append {
+            self.messages.clear();
+        }
+        self.clear_message_indices();
         let item_count = turns
             .iter()
             .filter_map(|turn| turn.get("items").and_then(Value::as_array))
@@ -2660,6 +2981,20 @@ impl CodexSession {
             }
         }
 
+        if append {
+            let mut loaded_ids = self
+                .messages
+                .iter()
+                .map(|message| message.id.clone())
+                .collect::<std::collections::HashSet<_>>();
+            self.messages.extend(
+                existing_messages
+                    .into_iter()
+                    .filter(|message| loaded_ids.insert(message.id.clone())),
+            );
+            self.rebuild_message_indices();
+        }
+
         if self.messages.is_empty() {
             let message_id = self.next_message_id("status");
             self.messages.push(CodexMessage::status(
@@ -2675,6 +3010,17 @@ impl CodexSession {
             self.messages.len(),
             started.elapsed().as_millis()
         ));
+    }
+
+    fn restore_active_turn(&mut self, response: &Value, thread: &Value) {
+        if let Some(active_turn) = active_turn_from_response(response, thread) {
+            self.turn_active = true;
+            self.active_turn = Some(active_turn);
+            self.operation = CodexOperationState::running("Working");
+        } else {
+            self.turn_active = false;
+            self.active_turn = None;
+        }
     }
 
     fn load_thread_item_message(&mut self, item: &Value) {
@@ -2758,7 +3104,7 @@ impl CodexSession {
                         message.text = header.clone();
                         message.detail = Some(header);
                     }
-                    message.visibility = CodexMessageVisibility::TranscriptOnly;
+                    message.visibility = CodexMessageVisibility::Compact;
                     message.is_streaming = false;
                     self.reasoning_message_indices
                         .insert(item_id, self.messages.len());
@@ -2767,10 +3113,10 @@ impl CodexSession {
             }
             "commandExecution" => {
                 self.upsert_command_execution_message(item);
-                if let Some(output) = item.get("aggregatedOutput").and_then(Value::as_str) {
-                    if !output.trim().is_empty() {
-                        self.set_command_output_text(&item_id, output);
-                    }
+                if let Some(output) = item.get("aggregatedOutput").and_then(Value::as_str)
+                    && !output.trim().is_empty()
+                {
+                    self.set_command_output_text(&item_id, output);
                 }
             }
             "fileChange" => {
@@ -2782,8 +3128,8 @@ impl CodexSession {
                     &item_id,
                     CodexMessageKind::FileChange,
                     file_change_title(status),
-                    Some("File changes were prepared.".to_string()),
-                    None,
+                    file_change_detail(item),
+                    item.get("changes").and_then(pretty_json),
                 );
             }
             "mcpToolCall" => {
@@ -2813,7 +3159,33 @@ impl CodexSession {
                     self.messages.push(message);
                 }
             }
-            "dynamicToolCall" | "sleep" => {}
+            "dynamicToolCall" => {
+                let tool = item.get("tool").and_then(Value::as_str).unwrap_or("tool");
+                let status = item
+                    .get("status")
+                    .and_then(Value::as_str)
+                    .unwrap_or("completed");
+                self.upsert_compact_event(
+                    &item_id,
+                    CodexMessageKind::ToolCall,
+                    humanize_camel_status("Tool", status),
+                    Some(tool.to_string()),
+                    pretty_json(item.get("arguments").unwrap_or(&Value::Null)),
+                );
+            }
+            "sleep" => {
+                let duration = item
+                    .get("durationMs")
+                    .and_then(Value::as_u64)
+                    .unwrap_or_default();
+                self.upsert_compact_event(
+                    &item_id,
+                    CodexMessageKind::Status,
+                    "Waiting",
+                    Some(format!("{} ms", duration)),
+                    None,
+                );
+            }
             "webSearch" => {
                 let query = item.get("query").and_then(Value::as_str).unwrap_or("");
                 if !query.trim().is_empty() {
@@ -2828,15 +3200,34 @@ impl CodexSession {
             }
             "imageView" => {
                 if let Some(path) = item.get("path").and_then(Value::as_str) {
-                    self.messages.push(CodexMessage::image_event(
-                        item_id,
+                    let url = self.image_url_for_client(path);
+                    self.upsert_image_event(
+                        &item_id,
                         "Viewed image",
-                        path,
+                        &url,
                         item.get("alt")
                             .or_else(|| item.get("name"))
                             .and_then(Value::as_str)
                             .map(str::to_string),
-                    ));
+                    );
+                }
+            }
+            "imageGeneration" => {
+                let url = item
+                    .get("result")
+                    .and_then(Value::as_str)
+                    .filter(|value| !value.is_empty())
+                    .or_else(|| item.get("savedPath").and_then(Value::as_str));
+                if let Some(url) = url {
+                    let url = self.image_url_for_client(url);
+                    self.upsert_image_event(
+                        &item_id,
+                        "Generated image",
+                        &url,
+                        item.get("revisedPrompt")
+                            .and_then(Value::as_str)
+                            .map(str::to_string),
+                    );
                 }
             }
             "contextCompaction" => {
@@ -2845,6 +3236,30 @@ impl CodexSession {
                     CodexMessageKind::Status,
                     "Context compacted",
                     None,
+                    None,
+                );
+            }
+            "collabAgentToolCall" | "subAgentActivity" => {
+                self.upsert_compact_event(
+                    &item_id,
+                    CodexMessageKind::ToolCall,
+                    collaboration_event_title(item_type, item),
+                    collaboration_event_detail(item),
+                    pretty_json(item),
+                );
+            }
+            "enteredReviewMode" | "exitedReviewMode" => {
+                self.upsert_compact_event(
+                    &item_id,
+                    CodexMessageKind::Status,
+                    if item_type == "enteredReviewMode" {
+                        "Entered review mode"
+                    } else {
+                        "Exited review mode"
+                    },
+                    item.get("review")
+                        .and_then(Value::as_str)
+                        .map(str::to_string),
                     None,
                 );
             }
@@ -2899,8 +3314,8 @@ impl CodexSession {
                     item_id,
                     CodexMessageKind::FileChange,
                     "Preparing file changes",
-                    None,
-                    None,
+                    file_change_detail(item),
+                    item.get("changes").and_then(pretty_json),
                 );
                 self.bump_revision();
             }
@@ -2927,7 +3342,60 @@ impl CodexSession {
                 );
                 self.bump_revision();
             }
-            "dynamicToolCall" | "sleep" => {}
+            "plan" => {
+                if let Some(text) = item.get("text").and_then(Value::as_str) {
+                    self.append_plan_delta(item_id, text);
+                }
+            }
+            "dynamicToolCall" => {
+                let tool = item.get("tool").and_then(Value::as_str).unwrap_or("tool");
+                self.upsert_compact_event(
+                    item_id,
+                    CodexMessageKind::ToolCall,
+                    "Calling tool",
+                    Some(tool.to_string()),
+                    pretty_json(item.get("arguments").unwrap_or(&Value::Null)),
+                );
+                self.bump_revision();
+            }
+            "sleep" => {
+                self.upsert_compact_event(
+                    item_id,
+                    CodexMessageKind::Status,
+                    "Waiting",
+                    item.get("durationMs")
+                        .and_then(Value::as_u64)
+                        .map(|value| format!("{} ms", value)),
+                    None,
+                );
+                self.bump_revision();
+            }
+            "collabAgentToolCall" | "subAgentActivity" => {
+                self.upsert_compact_event(
+                    item_id,
+                    CodexMessageKind::ToolCall,
+                    collaboration_event_title(item_type, item),
+                    collaboration_event_detail(item),
+                    pretty_json(item),
+                );
+                self.bump_revision();
+            }
+            "enteredReviewMode" | "exitedReviewMode" => {
+                self.upsert_compact_event(
+                    item_id,
+                    CodexMessageKind::Status,
+                    if item_type == "enteredReviewMode" {
+                        "Entered review mode"
+                    } else {
+                        "Exited review mode"
+                    },
+                    item.get("review")
+                        .and_then(Value::as_str)
+                        .map(str::to_string),
+                    None,
+                );
+                self.bump_revision();
+            }
             _ => {}
         }
     }
@@ -2946,10 +3414,10 @@ impl CodexSession {
                 let text = item.get("text").and_then(Value::as_str).unwrap_or("");
                 if !text.is_empty() {
                     self.set_assistant_text(item_id, text);
-                    if let Some(index) = self.assistant_message_indices.get(item_id).copied() {
-                        if let Some(message) = self.messages.get_mut(index) {
-                            message.kind = agent_message_kind(item);
-                        }
+                    if let Some(index) = self.assistant_message_indices.get(item_id).copied()
+                        && let Some(message) = self.messages.get_mut(index)
+                    {
+                        message.kind = agent_message_kind(item);
                     }
                 }
             }
@@ -2974,10 +3442,10 @@ impl CodexSession {
             "commandExecution" => {
                 let item_id = item.get("id").and_then(Value::as_str).unwrap_or("command");
                 self.upsert_command_execution_message(item);
-                if let Some(output) = item.get("aggregatedOutput").and_then(Value::as_str) {
-                    if !output.trim().is_empty() {
-                        self.set_command_output_text(item_id, output);
-                    }
+                if let Some(output) = item.get("aggregatedOutput").and_then(Value::as_str)
+                    && !output.trim().is_empty()
+                {
+                    self.set_command_output_text(item_id, output);
                 }
                 self.bump_revision();
             }
@@ -2994,8 +3462,8 @@ impl CodexSession {
                     item_id,
                     CodexMessageKind::FileChange,
                     file_change_title(status),
-                    None,
-                    None,
+                    file_change_detail(item),
+                    item.get("changes").and_then(pretty_json),
                 );
                 self.bump_revision();
             }
@@ -3019,19 +3487,114 @@ impl CodexSession {
             "imageView" => {
                 let item_id = item.get("id").and_then(Value::as_str).unwrap_or("image");
                 if let Some(path) = item.get("path").and_then(Value::as_str) {
-                    self.messages.push(CodexMessage::image_event(
+                    let url = self.image_url_for_client(path);
+                    self.upsert_image_event(
                         item_id,
                         "Viewed image",
-                        path,
+                        &url,
                         item.get("alt")
                             .or_else(|| item.get("name"))
                             .and_then(Value::as_str)
                             .map(str::to_string),
-                    ));
+                    );
                     self.bump_revision();
                 }
             }
-            "dynamicToolCall" | "sleep" => {}
+            "plan" => {
+                let item_id = item.get("id").and_then(Value::as_str).unwrap_or("plan");
+                let text = item.get("text").and_then(Value::as_str).unwrap_or("");
+                if let Some(index) = self.event_message_indices.get(item_id).copied()
+                    && let Some(message) = self.messages.get_mut(index)
+                {
+                    message.text = text.to_string();
+                    message.is_streaming = false;
+                    message.refresh_blocks();
+                    self.bump_revision();
+                } else {
+                    self.append_plan_delta(item_id, text);
+                    if let Some(index) = self.event_message_indices.get(item_id).copied()
+                        && let Some(message) = self.messages.get_mut(index)
+                    {
+                        message.is_streaming = false;
+                    }
+                }
+            }
+            "imageGeneration" => {
+                let item_id = item.get("id").and_then(Value::as_str).unwrap_or("image");
+                let url = item
+                    .get("result")
+                    .and_then(Value::as_str)
+                    .filter(|value| !value.is_empty())
+                    .or_else(|| item.get("savedPath").and_then(Value::as_str));
+                if let Some(url) = url {
+                    let url = self.image_url_for_client(url);
+                    self.upsert_image_event(
+                        item_id,
+                        "Generated image",
+                        &url,
+                        item.get("revisedPrompt")
+                            .and_then(Value::as_str)
+                            .map(str::to_string),
+                    );
+                    self.bump_revision();
+                }
+            }
+            "dynamicToolCall" => {
+                let item_id = item.get("id").and_then(Value::as_str).unwrap_or("tool");
+                let status = item
+                    .get("status")
+                    .and_then(Value::as_str)
+                    .unwrap_or("completed");
+                self.upsert_compact_event(
+                    item_id,
+                    CodexMessageKind::ToolCall,
+                    humanize_camel_status("Tool", status),
+                    item.get("tool").and_then(Value::as_str).map(str::to_string),
+                    pretty_json(item),
+                );
+                self.bump_revision();
+            }
+            "sleep" => {
+                let item_id = item.get("id").and_then(Value::as_str).unwrap_or("sleep");
+                self.upsert_compact_event(
+                    item_id,
+                    CodexMessageKind::Status,
+                    "Wait completed",
+                    item.get("durationMs")
+                        .and_then(Value::as_u64)
+                        .map(|value| format!("{} ms", value)),
+                    None,
+                );
+                self.bump_revision();
+            }
+            "collabAgentToolCall" | "subAgentActivity" => {
+                let item_id = item.get("id").and_then(Value::as_str).unwrap_or(item_type);
+                self.upsert_compact_event(
+                    item_id,
+                    CodexMessageKind::ToolCall,
+                    collaboration_event_title(item_type, item),
+                    collaboration_event_detail(item),
+                    pretty_json(item),
+                );
+                self.bump_revision();
+            }
+            "enteredReviewMode" | "exitedReviewMode" => {
+                let item_id = item.get("id").and_then(Value::as_str).unwrap_or(item_type);
+                self.upsert_compact_event(
+                    item_id,
+                    CodexMessageKind::Status,
+                    if item_type == "enteredReviewMode" {
+                        "Entered review mode"
+                    } else {
+                        "Exited review mode"
+                    },
+                    item.get("review")
+                        .and_then(Value::as_str)
+                        .map(str::to_string),
+                    None,
+                );
+                self.bump_revision();
+            }
             _ => {}
         }
     }
@@ -3064,6 +3627,7 @@ impl CodexSession {
                 self.add_pending_request(
                     id,
                     request_thread_id,
+                    params.clone(),
                     CodexApproval {
                         request_id: String::new(),
                         kind: CodexApprovalKind::Command,
@@ -3076,6 +3640,11 @@ impl CodexSession {
                         cwd,
                         reason,
                         questions: Vec::new(),
+                        available_decisions: approval_decisions(
+                            params,
+                            &["accept", "acceptForSession", "decline", "cancel"],
+                        ),
+                        permissions: params.get("additionalPermissions").and_then(pretty_json),
                     },
                 );
             }
@@ -3091,6 +3660,7 @@ impl CodexSession {
                 self.add_pending_request(
                     id,
                     request_thread_id,
+                    params.clone(),
                     CodexApproval {
                         request_id: String::new(),
                         kind: CodexApprovalKind::FileChange,
@@ -3103,6 +3673,13 @@ impl CodexSession {
                         cwd: grant_root,
                         reason,
                         questions: Vec::new(),
+                        available_decisions: vec![
+                            "accept".to_string(),
+                            "acceptForSession".to_string(),
+                            "decline".to_string(),
+                            "cancel".to_string(),
+                        ],
+                        permissions: None,
                     },
                 );
             }
@@ -3110,15 +3687,25 @@ impl CodexSession {
                 self.add_pending_request(
                     id,
                     request_thread_id,
+                    params.clone(),
                     CodexApproval {
                         request_id: String::new(),
                         kind: CodexApprovalKind::UserInput,
                         title: "User input".to_string(),
-                        detail: params.to_string(),
+                        detail: params
+                            .get("questions")
+                            .and_then(Value::as_array)
+                            .and_then(|questions| questions.first())
+                            .and_then(|question| question.get("question"))
+                            .and_then(Value::as_str)
+                            .unwrap_or("Codex needs your input to continue.")
+                            .to_string(),
                         command: None,
                         cwd: None,
                         reason: None,
-                        questions: Vec::new(),
+                        questions: parse_user_input_questions(params),
+                        available_decisions: Vec::new(),
+                        permissions: None,
                     },
                 );
             }
@@ -3126,15 +3713,63 @@ impl CodexSession {
                 self.add_pending_request(
                     id,
                     request_thread_id,
+                    params.clone(),
                     CodexApproval {
                         request_id: String::new(),
                         kind: CodexApprovalKind::Permissions,
                         title: "Permissions".to_string(),
-                        detail: params.to_string(),
+                        detail: params
+                            .get("reason")
+                            .and_then(Value::as_str)
+                            .unwrap_or("Codex is requesting additional access.")
+                            .to_string(),
+                        command: None,
+                        cwd: params
+                            .get("cwd")
+                            .and_then(Value::as_str)
+                            .map(str::to_string),
+                        reason: params
+                            .get("reason")
+                            .and_then(Value::as_str)
+                            .map(str::to_string),
+                        questions: Vec::new(),
+                        available_decisions: vec![
+                            "accept".to_string(),
+                            "acceptForSession".to_string(),
+                            "decline".to_string(),
+                        ],
+                        permissions: params.get("permissions").and_then(pretty_json),
+                    },
+                );
+            }
+            "mcpServer/elicitation/request" => {
+                let mode = params.get("mode").and_then(Value::as_str).unwrap_or("form");
+                self.add_pending_request(
+                    id,
+                    request_thread_id,
+                    params.clone(),
+                    CodexApproval {
+                        request_id: String::new(),
+                        kind: CodexApprovalKind::Elicitation,
+                        title: "MCP server input".to_string(),
+                        detail: params
+                            .get("message")
+                            .and_then(Value::as_str)
+                            .unwrap_or("An MCP server needs structured input to continue.")
+                            .to_string(),
                         command: None,
                         cwd: None,
-                        reason: None,
+                        reason: Some(format!("Mode: {mode}")),
                         questions: Vec::new(),
+                        available_decisions: vec![
+                            "accept".to_string(),
+                            "decline".to_string(),
+                            "cancel".to_string(),
+                        ],
+                        permissions: params
+                            .get("requestedSchema")
+                            .or_else(|| params.get("url"))
+                            .and_then(pretty_json_or_string),
                     },
                 );
             }
@@ -3145,10 +3780,11 @@ impl CodexSession {
                     .unwrap_or(0);
                 let _ = self.send_response(id, json!({ "currentTimeAt": seconds }));
             }
-            _ => {
+            "item/tool/call" => {
                 self.add_pending_request(
                     id,
                     request_thread_id,
+                    params.clone(),
                     CodexApproval {
                         request_id: String::new(),
                         kind: CodexApprovalKind::Tool,
@@ -3158,8 +3794,20 @@ impl CodexSession {
                         cwd: None,
                         reason: None,
                         questions: Vec::new(),
+                        available_decisions: vec!["submit".to_string(), "decline".to_string()],
+                        permissions: None,
                     },
                 );
+            }
+            _ => {
+                let _ = self.send_error_response(
+                    id,
+                    -32601,
+                    format!("Shellow does not support server request {method}"),
+                );
+                codex_debug(format_args!(
+                    "rejected unsupported server request method={method}"
+                ));
             }
         }
     }
@@ -3260,10 +3908,10 @@ impl CodexSession {
                 thread.name = next_name.clone();
             }
         }
-        if let Some(thread) = &mut self.thread_detail.thread {
-            if thread.id == thread_id {
-                thread.name = next_name;
-            }
+        if let Some(thread) = &mut self.thread_detail.thread
+            && thread.id == thread_id
+        {
+            thread.name = next_name;
         }
         self.bump_revision();
     }
@@ -3297,7 +3945,10 @@ impl CodexSession {
             .iter()
             .filter(|pending| {
                 pending.thread_id.as_deref() == Some(summary.id.as_str())
-                    && pending.approval.kind != CodexApprovalKind::UserInput
+                    && !matches!(
+                        pending.approval.kind,
+                        CodexApprovalKind::UserInput | CodexApprovalKind::Elicitation
+                    )
             })
             .count();
     }
@@ -3346,7 +3997,10 @@ impl CodexSession {
             if pending.thread_id.as_deref() != Some(thread_id) {
                 continue;
             }
-            if pending.approval.kind == CodexApprovalKind::UserInput {
+            if matches!(
+                pending.approval.kind,
+                CodexApprovalKind::UserInput | CodexApprovalKind::Elicitation
+            ) {
                 waiting_on_user_input = true;
             } else {
                 waiting_on_approval = true;
@@ -3375,25 +4029,25 @@ impl CodexSession {
         &mut self,
         id: Value,
         thread_id: Option<String>,
+        params: Value,
         mut approval: CodexApproval,
     ) {
         approval.request_id = request_id_to_string(&id);
         let is_active_thread =
             thread_scope_matches(thread_id.as_deref(), self.event_thread_id.as_deref());
-        let message = is_active_thread.then(|| format!("Approval needed: {}", approval.title));
         self.pending_approvals.push(PendingServerRequest {
             id,
             thread_id: thread_id.clone(),
             approval,
+            params,
         });
         if let Some(thread_id) = thread_id.as_deref() {
             self.sync_pending_request_flags(thread_id);
         }
-        if let Some(message) = message {
-            self.push_status(message);
-        } else {
-            self.bump_revision();
+        if is_active_thread {
+            self.operation = CodexOperationState::running("Waiting for your response");
         }
+        self.bump_revision();
     }
 
     fn remove_pending_request_by_value(&mut self, id: &Value) {
@@ -3431,6 +4085,9 @@ impl CodexSession {
             }
             ssh::ExecStdioStatus::Closed => {
                 if self.status != CodexStatus::Disconnected {
+                    self.fail_pending_steers(
+                        "Connection closed before this message could be sent.",
+                    );
                     self.status = CodexStatus::Disconnected;
                     self.turn_active = false;
                     self.active_turn = None;
@@ -3439,6 +4096,9 @@ impl CodexSession {
             }
             ssh::ExecStdioStatus::Failed(error) => {
                 if self.last_error.as_deref() != Some(error.as_str()) {
+                    self.fail_pending_steers(
+                        "Connection failed before this message could be sent.",
+                    );
                     self.status = CodexStatus::Failed;
                     self.turn_active = false;
                     self.active_turn = None;
@@ -3475,6 +4135,42 @@ impl CodexSession {
         self.command_output_indices.clear();
         self.event_message_indices.clear();
         self.reasoning_message_indices.clear();
+    }
+
+    fn rebuild_message_indices(&mut self) {
+        self.clear_message_indices();
+        for (index, message) in self.messages.iter().enumerate() {
+            match message.kind {
+                CodexMessageKind::FinalAnswer | CodexMessageKind::Commentary => {
+                    self.assistant_message_indices
+                        .insert(message.id.clone(), index);
+                }
+                CodexMessageKind::ReasoningSummary => {
+                    self.reasoning_message_indices
+                        .insert(message.id.clone(), index);
+                }
+                CodexMessageKind::CommandOutput => {
+                    let item_id = message
+                        .id
+                        .strip_prefix("command-output-")
+                        .unwrap_or(&message.id);
+                    self.command_output_indices
+                        .insert(item_id.to_string(), index);
+                }
+                CodexMessageKind::Command
+                | CodexMessageKind::FileChange
+                | CodexMessageKind::ToolCall
+                | CodexMessageKind::ToolResult
+                | CodexMessageKind::Plan => {
+                    self.event_message_indices.insert(message.id.clone(), index);
+                    if message.kind == CodexMessageKind::Command {
+                        self.command_output_indices
+                            .insert(message.id.clone(), index);
+                    }
+                }
+                CodexMessageKind::UserMessage | CodexMessageKind::Status => {}
+            }
+        }
     }
 
     fn set_assistant_text(&mut self, item_id: &str, text: &str) {
@@ -3529,6 +4225,30 @@ impl CodexSession {
         }
     }
 
+    fn append_plan_delta(&mut self, item_id: &str, delta: &str) {
+        if delta.is_empty() {
+            return;
+        }
+        let index = if let Some(index) = self.event_message_indices.get(item_id).copied() {
+            index
+        } else {
+            let index = self.messages.len();
+            let mut message = CodexMessage::assistant(item_id.to_string());
+            message.kind = CodexMessageKind::Plan;
+            message.title = Some("Plan".to_string());
+            self.messages.push(message);
+            self.event_message_indices
+                .insert(item_id.to_string(), index);
+            index
+        };
+        if let Some(message) = self.messages.get_mut(index) {
+            message.text.push_str(delta);
+            message.is_streaming = true;
+            message.refresh_blocks();
+            self.bump_revision();
+        }
+    }
+
     fn finalize_reasoning_summary(&mut self, item_id: &str, summary: Option<String>) {
         let index = if let Some(index) = self.reasoning_message_indices.get(item_id).copied() {
             index
@@ -3547,17 +4267,26 @@ impl CodexSession {
         };
 
         if let Some(message) = self.messages.get_mut(index) {
-            if let Some(summary) = summary {
-                if !summary.trim().is_empty() {
-                    message.transcript = Some(summary);
-                }
+            if let Some(summary) = summary
+                && !summary.trim().is_empty()
+            {
+                message.transcript = Some(summary);
             }
             let transcript = message.transcript.clone().unwrap_or_default();
             if let Some(header) = extract_first_bold_text(&transcript) {
                 message.text = header.clone();
                 message.detail = Some(header);
             }
-            message.visibility = CodexMessageVisibility::TranscriptOnly;
+            if message.text == "Thinking..." {
+                message.text = transcript
+                    .lines()
+                    .map(str::trim)
+                    .find(|line| !line.is_empty())
+                    .unwrap_or("Thought through the task")
+                    .trim_matches('*')
+                    .to_string();
+            }
+            message.visibility = CodexMessageVisibility::Compact;
             message.is_streaming = false;
             self.bump_revision();
         }
@@ -3607,6 +4336,51 @@ impl CodexSession {
         index
     }
 
+    fn upsert_image_event(
+        &mut self,
+        item_id: &str,
+        title: &str,
+        url: &str,
+        alt: Option<String>,
+    ) -> usize {
+        upsert_image_message(
+            &mut self.messages,
+            &mut self.event_message_indices,
+            item_id,
+            title,
+            url,
+            alt,
+        )
+    }
+
+    fn image_url_for_client(&self, value: &str) -> String {
+        if value.starts_with("data:")
+            || value.starts_with("https://")
+            || value.starts_with("http://")
+            || !value.starts_with('/')
+        {
+            return value.to_string();
+        }
+
+        #[cfg(feature = "native-integrations")]
+        {
+            let quoted = shell_quote(value);
+            let command = format!(
+                "FILE={quoted}; SIZE=$(wc -c < \"$FILE\" 2>/dev/null) || exit 2; [ \"$SIZE\" -le 8388608 ] || exit 3; base64 < \"$FILE\" | tr -d '\\r\\n'"
+            );
+            if let Ok(encoded) =
+                ssh::exec_password_blocking(self.media_transport_options.clone(), &command)
+            {
+                let encoded = encoded.trim();
+                if is_base64_payload(encoded) {
+                    return format!("data:{};base64,{encoded}", image_mime_type(value));
+                }
+            }
+        }
+
+        value.to_string()
+    }
+
     fn upsert_command_execution_message(&mut self, item: &Value) {
         let item_id = item.get("id").and_then(Value::as_str).unwrap_or("command");
         let command = item.get("command").and_then(Value::as_str).unwrap_or("");
@@ -3617,7 +4391,7 @@ impl CodexSession {
             .unwrap_or("inProgress");
         let exit_code = item.get("exitCode").and_then(Value::as_i64);
         let line = format_command_line(cwd, command);
-        let title = command_event_title(status, exit_code);
+        let title = command_event_title(status, exit_code, command);
         let index = self.upsert_compact_event(
             item_id,
             CodexMessageKind::Command,
@@ -3690,22 +4464,6 @@ impl CodexSession {
         }
     }
 
-    fn hide_reasoning_summaries(&mut self) {
-        let mut changed = false;
-        for message in &mut self.messages {
-            if message.kind == CodexMessageKind::ReasoningSummary
-                && message.visibility != CodexMessageVisibility::TranscriptOnly
-            {
-                message.visibility = CodexMessageVisibility::TranscriptOnly;
-                message.is_streaming = false;
-                changed = true;
-            }
-        }
-        if changed {
-            self.bump_revision();
-        }
-    }
-
     fn push_status(&mut self, text: impl Into<String>) {
         let id = self.next_message_id("status");
         self.messages.push(CodexMessage::status(
@@ -3726,12 +4484,91 @@ impl CodexSession {
         let message = truncate_status_message(message.into());
         self.last_error = Some(message.clone());
         self.operation = CodexOperationState::failed(message.clone());
-        self.push_status(message);
+        self.bump_revision();
     }
 
     fn report_error_if_absent(&mut self, message: impl Into<String>) {
         if self.last_error.is_none() {
             self.report_error(message);
+        }
+    }
+
+    fn set_message_delivery_for_request(
+        &mut self,
+        request_id: u64,
+        delivery: CodexMessageDelivery,
+        error: Option<&str>,
+    ) {
+        let Some(message_id) = self.request_message_ids.remove(&request_id) else {
+            return;
+        };
+        if let Some(message) = self
+            .messages
+            .iter_mut()
+            .find(|message| message.id == message_id)
+        {
+            message.delivery = Some(delivery);
+            if let Some(error) = error {
+                message.detail = Some(truncate_status_message(error.to_string()));
+            }
+            self.bump_revision();
+        }
+    }
+
+    fn flush_pending_steers(&mut self) {
+        let (Some(thread_id), Some(active_turn)) =
+            (self.thread_id.clone(), self.active_turn.clone())
+        else {
+            return;
+        };
+        let pending = std::mem::take(&mut self.pending_steers);
+        for (message_id, text) in pending {
+            let request = self.send_request(
+                "turn/steer",
+                json!({
+                    "threadId": thread_id.clone(),
+                    "expectedTurnId": active_turn.id.clone(),
+                    "input": text_input_value(&text)
+                }),
+                ClientRequestKind::TurnSteer,
+            );
+            match request {
+                Ok(request_id) => {
+                    self.request_message_ids
+                        .insert(request_id, message_id.clone());
+                    if let Some(message) = self
+                        .messages
+                        .iter_mut()
+                        .find(|message| message.id == message_id)
+                    {
+                        message.delivery = Some(CodexMessageDelivery::Sent);
+                    }
+                }
+                Err(error) => {
+                    if let Some(message) = self
+                        .messages
+                        .iter_mut()
+                        .find(|message| message.id == message_id)
+                    {
+                        message.delivery = Some(CodexMessageDelivery::Failed);
+                        message.detail = Some(truncate_status_message(error));
+                    }
+                }
+            }
+        }
+    }
+
+    fn fail_pending_steers(&mut self, reason: &str) {
+        let pending = std::mem::take(&mut self.pending_steers);
+        for (message_id, _) in pending {
+            if let Some(message) = self
+                .messages
+                .iter_mut()
+                .find(|message| message.id == message_id)
+            {
+                message.delivery = Some(CodexMessageDelivery::Failed);
+                message.detail = Some(reason.to_string());
+            }
         }
     }
 
@@ -3823,11 +4660,44 @@ impl CodexSession {
     }
 
     #[cfg(feature = "native-integrations")]
+    fn send_error_response(&mut self, id: Value, code: i64, message: String) -> Result<(), String> {
+        self.write_json(json!({
+            "id": id,
+            "error": { "code": code, "message": message }
+        }))
+    }
+
+    #[cfg(feature = "native-integrations")]
     fn write_json(&mut self, message: Value) -> Result<(), String> {
         let payload = serde_json::to_vec(&message)
             .map_err(|error| format!("codex json encode failed: {error}"))?;
         self.send_websocket_frame(0x1, &payload)
     }
+}
+
+fn active_turn_from_response(response: &Value, thread: &Value) -> Option<CodexActiveTurn> {
+    response
+        .pointer("/result/initialTurnsPage/data")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .chain(
+            thread
+                .get("turns")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten(),
+        )
+        .rev()
+        .find_map(|turn| {
+            (turn.get("status").and_then(Value::as_str) == Some("inProgress"))
+                .then(|| turn.get("id").and_then(Value::as_str))
+                .flatten()
+        })
+        .map(|id| CodexActiveTurn {
+            id: id.to_string(),
+            status: "inProgress".to_string(),
+        })
 }
 
 fn apply_thread_settings(
@@ -3884,19 +4754,59 @@ fn format_command_line(cwd: &str, command: &str) -> String {
     }
 }
 
-fn command_event_title(status: &str, exit_code: Option<i64>) -> String {
-    match status {
-        "inProgress" | "in_progress" => "Running command".to_string(),
+fn truncate_chars(value: &str, max: usize) -> String {
+    let mut chars = value.chars();
+    let truncated = chars.by_ref().take(max).collect::<String>();
+    if chars.next().is_some() {
+        format!("{truncated}…")
+    } else {
+        truncated
+    }
+}
+
+fn image_mime_type(path: &str) -> &'static str {
+    let path = path.to_ascii_lowercase();
+    if path.ends_with(".jpg") || path.ends_with(".jpeg") {
+        "image/jpeg"
+    } else if path.ends_with(".gif") {
+        "image/gif"
+    } else if path.ends_with(".webp") {
+        "image/webp"
+    } else {
+        "image/png"
+    }
+}
+
+fn is_base64_payload(value: &str) -> bool {
+    !value.is_empty()
+        && value.len().is_multiple_of(4)
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'+' | b'/' | b'='))
+}
+
+fn command_event_title(status: &str, exit_code: Option<i64>, command: &str) -> String {
+    let summary = command
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .map(|line| truncate_chars(line, 54));
+    let action = match status {
+        "inProgress" | "in_progress" => "Running".to_string(),
         "completed" => match exit_code {
-            Some(0) | None => "Command completed".to_string(),
-            Some(code) => format!("Command exited {code}"),
+            Some(0) | None => "Completed".to_string(),
+            Some(code) => format!("Exited {code}"),
         },
         "failed" => match exit_code {
-            Some(code) => format!("Command failed ({code})"),
-            None => "Command failed".to_string(),
+            Some(code) => format!("Failed ({code})"),
+            None => "Failed".to_string(),
         },
-        "declined" => "Command declined".to_string(),
+        "declined" => "Declined".to_string(),
         other => humanize_camel_status("Command", other),
+    };
+    match summary {
+        Some(summary) => format!("{action} · {summary}"),
+        None => action,
     }
 }
 
@@ -3910,6 +4820,23 @@ fn file_change_title(status: &str) -> String {
     }
 }
 
+fn file_change_detail(item: &Value) -> Option<String> {
+    let paths = item
+        .get("changes")
+        .and_then(Value::as_object)
+        .map(|changes| changes.keys().cloned().collect::<Vec<_>>())
+        .unwrap_or_default();
+    match paths.as_slice() {
+        [] => None,
+        [path] => Some(path.clone()),
+        _ => Some(format!(
+            "{} files · {}",
+            paths.len(),
+            paths.iter().take(3).cloned().collect::<Vec<_>>().join(", ")
+        )),
+    }
+}
+
 fn mcp_tool_title(status: &str) -> String {
     match status {
         "inProgress" | "in_progress" => "Calling tool".to_string(),
@@ -3917,6 +4844,27 @@ fn mcp_tool_title(status: &str) -> String {
         "failed" => "Tool failed".to_string(),
         other => humanize_camel_status("Tool", other),
     }
+}
+
+fn collaboration_event_title(item_type: &str, item: &Value) -> String {
+    let status = item
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or("inProgress");
+    let prefix = if item_type == "subAgentActivity" {
+        "Sub-agent"
+    } else {
+        "Agent"
+    };
+    humanize_camel_status(prefix, status)
+}
+
+fn collaboration_event_detail(item: &Value) -> Option<String> {
+    item.get("agentPath")
+        .or_else(|| item.get("tool"))
+        .or_else(|| item.get("receiverThreadId"))
+        .and_then(Value::as_str)
+        .map(str::to_string)
 }
 
 fn humanize_camel_status(prefix: &str, status: &str) -> String {
@@ -4437,24 +5385,23 @@ fn parse_markdown_blocks(message_id: &str, text: &str) -> Vec<CodexMarkdownBlock
                     inline_state.link_url = Some(dest_url.to_string());
                 }
                 Tag::Image { dest_url, .. } => {
-                    if !current_runs.is_empty() {
-                        if let Some(kind) = current_kind {
-                            if matches!(
-                                kind,
-                                CodexMarkdownBlockKind::Paragraph
-                                    | CodexMarkdownBlockKind::BlockQuote
-                                    | CodexMarkdownBlockKind::Heading
-                            ) {
-                                push_text_block(
-                                    &mut blocks,
-                                    message_id,
-                                    &mut block_index,
-                                    kind,
-                                    current_level,
-                                    std::mem::take(&mut current_runs),
-                                );
-                            }
-                        }
+                    if !current_runs.is_empty()
+                        && let Some(kind) = current_kind
+                        && matches!(
+                            kind,
+                            CodexMarkdownBlockKind::Paragraph
+                                | CodexMarkdownBlockKind::BlockQuote
+                                | CodexMarkdownBlockKind::Heading
+                        )
+                    {
+                        push_text_block(
+                            &mut blocks,
+                            message_id,
+                            &mut block_index,
+                            kind,
+                            current_level,
+                            std::mem::take(&mut current_runs),
+                        );
                     }
                     image_url = Some(dest_url.to_string());
                     image_alt.clear();
@@ -4463,19 +5410,18 @@ fn parse_markdown_blocks(message_id: &str, text: &str) -> Vec<CodexMarkdownBlock
             },
             Event::End(tag) => match tag {
                 TagEnd::Paragraph => {
-                    if let Some(kind) = current_kind.take() {
-                        if kind == CodexMarkdownBlockKind::Paragraph
-                            || kind == CodexMarkdownBlockKind::BlockQuote
-                        {
-                            push_text_block(
-                                &mut blocks,
-                                message_id,
-                                &mut block_index,
-                                kind,
-                                None,
-                                std::mem::take(&mut current_runs),
-                            );
-                        }
+                    if let Some(kind) = current_kind.take()
+                        && (kind == CodexMarkdownBlockKind::Paragraph
+                            || kind == CodexMarkdownBlockKind::BlockQuote)
+                    {
+                        push_text_block(
+                            &mut blocks,
+                            message_id,
+                            &mut block_index,
+                            kind,
+                            None,
+                            std::mem::take(&mut current_runs),
+                        );
                     }
                 }
                 TagEnd::Heading(_) => {
@@ -4504,15 +5450,15 @@ fn parse_markdown_blocks(message_id: &str, text: &str) -> Vec<CodexMarkdownBlock
                     block_index = block_index.saturating_add(1);
                 }
                 TagEnd::List(_) => {
-                    if let Some(ordered) = list_ordered.take() {
-                        if !list_items.is_empty() {
-                            blocks.push(CodexMarkdownBlock::list(
-                                markdown_block_id(message_id, block_index),
-                                ordered,
-                                std::mem::take(&mut list_items),
-                            ));
-                            block_index = block_index.saturating_add(1);
-                        }
+                    if let Some(ordered) = list_ordered.take()
+                        && !list_items.is_empty()
+                    {
+                        blocks.push(CodexMarkdownBlock::list(
+                            markdown_block_id(message_id, block_index),
+                            ordered,
+                            std::mem::take(&mut list_items),
+                        ));
+                        block_index = block_index.saturating_add(1);
                     }
                 }
                 TagEnd::Table => {
@@ -4533,10 +5479,10 @@ fn parse_markdown_blocks(message_id: &str, text: &str) -> Vec<CodexMarkdownBlock
                 }
                 TagEnd::TableRow => {
                     if !in_table_head {
-                        if let Some(row) = current_table_row.take() {
-                            if !row.is_empty() {
-                                table_rows.push(row);
-                            }
+                        if let Some(row) = current_table_row.take()
+                            && !row.is_empty()
+                        {
+                            table_rows.push(row);
                         }
                     } else {
                         current_table_row = None;
@@ -4664,15 +5610,15 @@ fn parse_markdown_blocks(message_id: &str, text: &str) -> Vec<CodexMarkdownBlock
             list_items.push(CodexMarkdownListItem { text, runs });
         }
     }
-    if let Some(ordered) = list_ordered.take() {
-        if !list_items.is_empty() {
-            blocks.push(CodexMarkdownBlock::list(
-                markdown_block_id(message_id, block_index),
-                ordered,
-                std::mem::take(&mut list_items),
-            ));
-            block_index = block_index.saturating_add(1);
-        }
+    if let Some(ordered) = list_ordered.take()
+        && !list_items.is_empty()
+    {
+        blocks.push(CodexMarkdownBlock::list(
+            markdown_block_id(message_id, block_index),
+            ordered,
+            std::mem::take(&mut list_items),
+        ));
+        block_index = block_index.saturating_add(1);
     }
     if in_code_block || !code_text.is_empty() {
         blocks.push(CodexMarkdownBlock::code(
@@ -4683,14 +5629,13 @@ fn parse_markdown_blocks(message_id: &str, text: &str) -> Vec<CodexMarkdownBlock
         ));
     }
 
-    if markdown_has_unclosed_fence(text) {
-        if let Some(block) = blocks
+    if markdown_has_unclosed_fence(text)
+        && let Some(block) = blocks
             .iter_mut()
             .rev()
             .find(|block| block.kind == CodexMarkdownBlockKind::CodeBlock)
-        {
-            block.incomplete = true;
-        }
+    {
+        block.incomplete = true;
     }
 
     if blocks.is_empty() {
@@ -4818,12 +5763,43 @@ fn markdown_image_text(url: &str, alt: &str) -> String {
     format!("![{alt}]({url})")
 }
 
+fn upsert_image_message(
+    messages: &mut Vec<CodexMessage>,
+    event_message_indices: &mut HashMap<String, usize>,
+    item_id: &str,
+    title: &str,
+    url: &str,
+    alt: Option<String>,
+) -> usize {
+    let existing_index = event_message_indices
+        .get(item_id)
+        .copied()
+        .filter(|index| {
+            messages
+                .get(*index)
+                .is_some_and(|message| message.id == item_id)
+        })
+        .or_else(|| messages.iter().position(|message| message.id == item_id));
+    let message = CodexMessage::image_event(item_id.to_string(), title, url, alt);
+    let index = if let Some(index) = existing_index {
+        messages[index] = message;
+        index
+    } else {
+        messages.push(message);
+        messages.len().saturating_sub(1)
+    };
+
+    event_message_indices.insert(item_id.to_string(), index);
+    index
+}
+
 fn append_markdown_run(runs: &mut Vec<CodexMarkdownInlineRun>, run: CodexMarkdownInlineRun) {
-    if let Some(last) = runs.last_mut() {
-        if last.style == run.style && last.url == run.url {
-            last.text.push_str(&run.text);
-            return;
-        }
+    if let Some(last) = runs.last_mut()
+        && last.style == run.style
+        && last.url == run.url
+    {
+        last.text.push_str(&run.text);
+        return;
     }
     runs.push(run);
 }
@@ -5003,6 +5979,131 @@ fn parse_thread_summary(value: &Value) -> Option<CodexThreadSummary> {
             .and_then(Value::as_str)
             .map(str::to_string),
     })
+}
+
+fn parse_thread_token_usage(value: &Value) -> Option<CodexThreadTokenUsage> {
+    Some(CodexThreadTokenUsage {
+        last: parse_token_usage_breakdown(value.get("last")?)?,
+        total: parse_token_usage_breakdown(value.get("total")?)?,
+        model_context_window: value.get("modelContextWindow").and_then(Value::as_u64),
+    })
+}
+
+fn parse_token_usage_breakdown(value: &Value) -> Option<CodexTokenUsageBreakdown> {
+    value.as_object()?;
+    Some(CodexTokenUsageBreakdown {
+        cached_input_tokens: value
+            .get("cachedInputTokens")
+            .and_then(Value::as_u64)
+            .unwrap_or_default(),
+        input_tokens: value
+            .get("inputTokens")
+            .and_then(Value::as_u64)
+            .unwrap_or_default(),
+        output_tokens: value
+            .get("outputTokens")
+            .and_then(Value::as_u64)
+            .unwrap_or_default(),
+        reasoning_output_tokens: value
+            .get("reasoningOutputTokens")
+            .and_then(Value::as_u64)
+            .unwrap_or_default(),
+        total_tokens: value
+            .get("totalTokens")
+            .and_then(Value::as_u64)
+            .unwrap_or_default(),
+    })
+}
+
+fn parse_rate_limit_snapshot(value: &Value) -> Option<CodexRateLimitSnapshot> {
+    value.as_object()?;
+    Some(CodexRateLimitSnapshot {
+        limit_id: value
+            .get("limitId")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        limit_name: value
+            .get("limitName")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        plan_type: value
+            .get("planType")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        primary: value.get("primary").and_then(parse_rate_limit_window),
+        secondary: value.get("secondary").and_then(parse_rate_limit_window),
+        credits: value.get("credits").and_then(parse_credits_snapshot),
+        individual_limit: value
+            .get("individualLimit")
+            .and_then(parse_spend_control_limit),
+        rate_limit_reached_type: value
+            .get("rateLimitReachedType")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+    })
+}
+
+fn parse_rate_limit_window(value: &Value) -> Option<CodexRateLimitWindow> {
+    Some(CodexRateLimitWindow {
+        used_percent: value.get("usedPercent")?.as_u64()?.min(100) as u32,
+        resets_at: value.get("resetsAt").and_then(Value::as_u64),
+        window_duration_mins: value.get("windowDurationMins").and_then(Value::as_u64),
+    })
+}
+
+fn parse_credits_snapshot(value: &Value) -> Option<CodexCreditsSnapshot> {
+    Some(CodexCreditsSnapshot {
+        has_credits: value.get("hasCredits")?.as_bool()?,
+        unlimited: value.get("unlimited")?.as_bool()?,
+        balance: value
+            .get("balance")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+    })
+}
+
+fn parse_spend_control_limit(value: &Value) -> Option<CodexSpendControlLimitSnapshot> {
+    Some(CodexSpendControlLimitSnapshot {
+        limit: value.get("limit")?.as_str()?.to_string(),
+        used: value.get("used")?.as_str()?.to_string(),
+        remaining_percent: value.get("remainingPercent")?.as_u64()?.min(100) as u32,
+        resets_at: value.get("resetsAt")?.as_u64()?,
+    })
+}
+
+fn merge_rate_limit_snapshot(current: &mut Option<CodexRateLimitSnapshot>, update: &Value) {
+    let Some(update) = update.as_object() else {
+        return;
+    };
+    let snapshot = current.get_or_insert_with(CodexRateLimitSnapshot::default);
+
+    if let Some(value) = update.get("limitId").and_then(Value::as_str) {
+        snapshot.limit_id = Some(value.to_string());
+    }
+    if let Some(value) = update.get("limitName").and_then(Value::as_str) {
+        snapshot.limit_name = Some(value.to_string());
+    }
+    if let Some(value) = update.get("planType").and_then(Value::as_str) {
+        snapshot.plan_type = Some(value.to_string());
+    }
+    if let Some(value) = update.get("primary").and_then(parse_rate_limit_window) {
+        snapshot.primary = Some(value);
+    }
+    if let Some(value) = update.get("secondary").and_then(parse_rate_limit_window) {
+        snapshot.secondary = Some(value);
+    }
+    if let Some(value) = update.get("credits").and_then(parse_credits_snapshot) {
+        snapshot.credits = Some(value);
+    }
+    if let Some(value) = update
+        .get("individualLimit")
+        .and_then(parse_spend_control_limit)
+    {
+        snapshot.individual_limit = Some(value);
+    }
+    if let Some(value) = update.get("rateLimitReachedType").and_then(Value::as_str) {
+        snapshot.rate_limit_reached_type = Some(value.to_string());
+    }
 }
 
 fn append_unique_threads(target: &mut Vec<CodexThreadSummary>, threads: Vec<CodexThreadSummary>) {
@@ -5396,6 +6497,131 @@ fn request_id_to_string(id: &Value) -> String {
     }
 }
 
+fn pretty_json(value: &Value) -> Option<String> {
+    serde_json::to_string_pretty(value).ok()
+}
+
+fn pretty_json_or_string(value: &Value) -> Option<String> {
+    value
+        .as_str()
+        .map(str::to_string)
+        .or_else(|| pretty_json(value))
+}
+
+fn approval_decisions(params: &Value, fallback: &[&str]) -> Vec<String> {
+    params
+        .get("availableDecisions")
+        .and_then(Value::as_array)
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        })
+        .filter(|values| !values.is_empty())
+        .unwrap_or_else(|| fallback.iter().map(|value| (*value).to_string()).collect())
+}
+
+fn parse_user_input_questions(params: &Value) -> Vec<CodexUserInputQuestion> {
+    params
+        .get("questions")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|question| {
+            Some(CodexUserInputQuestion {
+                id: question.get("id")?.as_str()?.to_string(),
+                header: question
+                    .get("header")
+                    .and_then(Value::as_str)
+                    .unwrap_or("Question")
+                    .to_string(),
+                question: question.get("question")?.as_str()?.to_string(),
+                is_other: question
+                    .get("isOther")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false),
+                is_secret: question
+                    .get("isSecret")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false),
+                multi_select: question
+                    .get("multiSelect")
+                    .or_else(|| question.get("multi_select"))
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false),
+                options: question
+                    .get("options")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|option| {
+                        Some(CodexUserInputOption {
+                            label: option.get("label")?.as_str()?.to_string(),
+                            description: option
+                                .get("description")
+                                .and_then(Value::as_str)
+                                .unwrap_or("")
+                                .to_string(),
+                            preview: option
+                                .get("preview")
+                                .and_then(Value::as_str)
+                                .map(str::to_string),
+                        })
+                    })
+                    .collect(),
+            })
+        })
+        .collect()
+}
+
+fn user_input_response(value: &str) -> Value {
+    if matches!(value, "decline" | "cancel") || value.is_empty() {
+        return json!({ "answers": {} });
+    }
+    let Ok(parsed) = serde_json::from_str::<Value>(value) else {
+        return json!({ "answers": {} });
+    };
+    if parsed.get("answers").is_some() {
+        return parsed;
+    }
+    let answers = parsed
+        .as_object()
+        .map(|values| {
+            values
+                .iter()
+                .map(|(id, value)| {
+                    let answers = value
+                        .as_array()
+                        .cloned()
+                        .unwrap_or_else(|| vec![value.clone()]);
+                    (id.clone(), json!({ "answers": answers }))
+                })
+                .collect::<serde_json::Map<_, _>>()
+        })
+        .unwrap_or_default();
+    json!({ "answers": answers })
+}
+
+fn dynamic_tool_response(value: &str) -> Value {
+    serde_json::from_str::<Value>(value)
+        .ok()
+        .filter(|value| value.get("success").is_some() && value.get("contentItems").is_some())
+        .unwrap_or_else(|| json!({ "contentItems": [], "success": false }))
+}
+
+fn mcp_elicitation_response(value: &str) -> Value {
+    if matches!(value, "decline" | "cancel") {
+        return json!({ "action": value, "content": null });
+    }
+    match serde_json::from_str::<Value>(value) {
+        Ok(parsed) if parsed.get("action").is_some() => parsed,
+        Ok(content) => json!({ "action": "accept", "content": content }),
+        Err(_) => json!({ "action": "accept", "content": value }),
+    }
+}
+
 fn normalize_approval_decision(decision: &str) -> &'static str {
     match decision {
         "acceptForSession" | "accept_for_session" => "acceptForSession",
@@ -5649,9 +6875,11 @@ mod tests {
 
     #[test]
     fn applies_reasoning_and_speed_settings_to_supported_requests() {
-        let mut settings = CodexSettingsState::default();
-        settings.reasoning_effort = Some("high".to_string());
-        settings.service_tier = Some("fast".to_string());
+        let mut settings = CodexSettingsState {
+            reasoning_effort: Some("high".to_string()),
+            service_tier: Some("fast".to_string()),
+            ..Default::default()
+        };
 
         let mut thread_params = serde_json::Map::new();
         apply_thread_settings(&settings, &mut thread_params);
@@ -5765,6 +6993,161 @@ mod tests {
     }
 
     #[test]
+    fn restores_the_latest_in_progress_turn_from_a_descending_resume_page() {
+        let response = json!({
+            "result": {
+                "initialTurnsPage": {
+                    "data": [
+                        { "id": "turn-3", "status": "inProgress", "items": [] },
+                        { "id": "turn-2", "status": "completed", "items": [] }
+                    ]
+                }
+            }
+        });
+        let thread = json!({
+            "turns": [{ "id": "turn-1", "status": "completed", "items": [] }]
+        });
+
+        let active = active_turn_from_response(&response, &thread).expect("active turn");
+        assert_eq!(active.id, "turn-3");
+        assert_eq!(active.status, "inProgress");
+        assert_eq!(HISTORY_ITEMS_VIEW, "full");
+    }
+
+    #[test]
+    fn encodes_structured_user_input_answers_for_app_server() {
+        assert_eq!(
+            user_input_response(r#"{"choice":["Fast"],"notes":"Ship it"}"#),
+            json!({
+                "answers": {
+                    "choice": { "answers": ["Fast"] },
+                    "notes": { "answers": ["Ship it"] }
+                }
+            })
+        );
+        assert_eq!(user_input_response("decline"), json!({ "answers": {} }));
+    }
+
+    #[test]
+    fn parses_user_input_questions_and_server_decisions() {
+        let params = json!({
+            "availableDecisions": ["accept", "decline"],
+            "questions": [{
+                "id": "scope",
+                "header": "Scope",
+                "question": "Which scope?",
+                "isOther": true,
+                "isSecret": false,
+                "options": [{ "label": "Workspace", "description": "Current workspace" }]
+            }]
+        });
+        let questions = parse_user_input_questions(&params);
+        assert_eq!(questions.len(), 1);
+        assert_eq!(questions[0].options[0].label, "Workspace");
+        assert_eq!(
+            approval_decisions(&params, &["accept"]),
+            vec!["accept", "decline"]
+        );
+    }
+
+    #[test]
+    fn gives_completed_commands_meaningful_compact_titles() {
+        assert_eq!(
+            command_event_title("completed", Some(0), "cargo test -p shellow-core"),
+            "Completed · cargo test -p shellow-core"
+        );
+        assert_eq!(image_mime_type("/tmp/result.webp"), "image/webp");
+        assert!(is_base64_payload("aGVsbG8="));
+        assert!(!is_base64_payload("not base64 output"));
+        assert_eq!(
+            mcp_elicitation_response(r#"{"project":"Shellow"}"#),
+            json!({ "action": "accept", "content": { "project": "Shellow" } })
+        );
+        assert_eq!(
+            mcp_elicitation_response("decline"),
+            json!({ "action": "decline", "content": null })
+        );
+    }
+
+    #[test]
+    fn parses_thread_token_usage_for_context_display() {
+        let usage = parse_thread_token_usage(&json!({
+            "last": {
+                "cachedInputTokens": 512,
+                "inputTokens": 8_000,
+                "outputTokens": 1_000,
+                "reasoningOutputTokens": 250,
+                "totalTokens": 9_000
+            },
+            "total": {
+                "cachedInputTokens": 1_024,
+                "inputTokens": 15_000,
+                "outputTokens": 2_000,
+                "reasoningOutputTokens": 500,
+                "totalTokens": 17_000
+            },
+            "modelContextWindow": 128_000
+        }))
+        .expect("thread token usage");
+
+        assert_eq!(usage.last.total_tokens, 9_000);
+        assert_eq!(usage.total.input_tokens, 15_000);
+        assert_eq!(usage.model_context_window, Some(128_000));
+    }
+
+    #[test]
+    fn parses_and_merges_sparse_rate_limit_updates() {
+        let mut snapshot = parse_rate_limit_snapshot(&json!({
+            "limitId": "codex",
+            "planType": "plus",
+            "primary": {
+                "usedPercent": 21,
+                "resetsAt": 1_800_000_000,
+                "windowDurationMins": 300
+            },
+            "secondary": {
+                "usedPercent": 42,
+                "resetsAt": 1_800_500_000,
+                "windowDurationMins": 10_080
+            },
+            "credits": {
+                "hasCredits": true,
+                "unlimited": false,
+                "balance": "12.50"
+            }
+        }));
+
+        merge_rate_limit_snapshot(
+            &mut snapshot,
+            &json!({
+                "limitId": "codex",
+                "primary": {
+                    "usedPercent": 25,
+                    "resetsAt": 1_800_000_000,
+                    "windowDurationMins": 300
+                },
+                "secondary": null,
+                "planType": null
+            }),
+        );
+
+        let snapshot = snapshot.expect("rate limits");
+        assert_eq!(
+            snapshot.primary.as_ref().map(|value| value.used_percent),
+            Some(25)
+        );
+        assert_eq!(
+            snapshot.secondary.as_ref().map(|value| value.used_percent),
+            Some(42)
+        );
+        assert_eq!(snapshot.plan_type.as_deref(), Some("plus"));
+        assert_eq!(
+            snapshot.credits.and_then(|credits| credits.balance),
+            Some("12.50".to_string())
+        );
+    }
+
+    #[test]
     fn parses_markdown_blocks_for_native_rendering() {
         let blocks = parse_markdown_blocks(
             "msg",
@@ -5854,6 +7237,33 @@ mod tests {
             Some("file:///tmp/chart.png")
         );
         assert_eq!(message.blocks[0].image_alt.as_deref(), Some("Chart"));
+    }
+
+    #[test]
+    fn upserts_replayed_image_events_by_item_id() {
+        let mut messages = vec![CodexMessage::image_event(
+            "item-6",
+            "Viewed image",
+            "file:///tmp/old.png",
+            Some("Old".to_string()),
+        )];
+        let mut event_message_indices = HashMap::new();
+
+        let index = upsert_image_message(
+            &mut messages,
+            &mut event_message_indices,
+            "item-6",
+            "Viewed image",
+            "file:///tmp/new.png",
+            Some("New".to_string()),
+        );
+
+        assert_eq!(index, 0);
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].id, "item-6");
+        assert_eq!(messages[0].detail.as_deref(), Some("file:///tmp/new.png"));
+        assert_eq!(messages[0].blocks[0].image_alt.as_deref(), Some("New"));
+        assert_eq!(event_message_indices.get("item-6"), Some(&0));
     }
 
     #[test]

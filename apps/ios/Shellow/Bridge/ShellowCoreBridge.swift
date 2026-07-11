@@ -112,6 +112,16 @@ final class ShellowCoreSession: @unchecked Sendable {
         }
     }
 
+    func setTransportOptions(keepAliveSeconds: Double, detectRemotePorts: Bool) {
+        withLockedEngine {
+            shellow_engine_set_transport_options(
+                engine,
+                UInt64(min(max(keepAliveSeconds.rounded(), 10), 120)),
+                detectRemotePorts
+            )
+        }
+    }
+
     func attachCoreAnimationLayer(rawHandle: UInt64, width: Int, height: Int) -> String {
         withLockedEngine {
             takeString(
@@ -353,6 +363,17 @@ final class ShellowCoreSession: @unchecked Sendable {
         }
     }
 
+    func dismissDetectedRemotePort(_ port: Int) -> TerminalSession {
+        withLockedEngine {
+            decode(
+                shellow_engine_dismiss_detected_remote_port_json(
+                    engine,
+                    UInt16(clamping: port)
+                )
+            )
+        }
+    }
+
     func disconnectLiveShell() -> TerminalSession {
         withLockedEngine {
             decode(shellow_engine_disconnect_live_shell_json(engine))
@@ -565,7 +586,9 @@ final class ShellowCoreSession: @unchecked Sendable {
         await withCheckedContinuation { continuation in
             DispatchQueue.global(qos: .userInitiated).async {
                 let started = monotonicNanos()
+#if DEBUG
                 print("[Shellow Codex] bridge resume start threadId=\(threadId)")
+#endif
                 let result = self.withLockedEngine {
                     threadId.withCString { threadId in
                         self.decodeCodex(
@@ -574,7 +597,9 @@ final class ShellowCoreSession: @unchecked Sendable {
                         )
                     }
                 }
+#if DEBUG
                 print("[Shellow Codex] bridge resume done elapsed_ms=\(elapsedMs(since: started)) snapshotThreadId=\(result.threadId ?? "nil") messages=\(result.messages.count) opError=\(result.operation.lastError ?? "")")
+#endif
                 continuation.resume(returning: result)
             }
         }
@@ -895,7 +920,9 @@ final class ShellowCoreSession: @unchecked Sendable {
         let json = String(cString: pointer)
         let stringMs = elapsedMs(since: stringStarted)
         guard !hasRootError(json) else {
+#if DEBUG
             print("[Shellow Codex] bridge decode root_error label=\(label) bytes=\(json.utf8.count) total_ms=\(elapsedMs(since: started))")
+#endif
             return .bridgeFailure(json)
         }
 
@@ -907,10 +934,14 @@ final class ShellowCoreSession: @unchecked Sendable {
             let snapshot = try decoder.decode(CodexSnapshot.self, from: data)
             let messageTextBytes = snapshot.messages.reduce(0) { $0 + $1.text.utf8.count }
             let maxMessageTextBytes = snapshot.messages.map { $0.text.utf8.count }.max() ?? 0
+#if DEBUG
             print("[Shellow Codex] bridge decode label=\(label) bytes=\(data.count) string_ms=\(stringMs) data_ms=\(dataMs) decode_ms=\(elapsedMs(since: decodeStarted)) total_ms=\(elapsedMs(since: started)) threadId=\(snapshot.threadId ?? "nil") detailThreadId=\(snapshot.threadDetail.thread?.id ?? "nil") messages=\(snapshot.messages.count) messageTextBytes=\(messageTextBytes) maxMessageTextBytes=\(maxMessageTextBytes) opError=\(snapshot.operation.lastError ?? "")")
+#endif
             return snapshot
         } catch {
+#if DEBUG
             print("[Shellow Codex] bridge decode failed label=\(label) bytes=\(json.utf8.count) total_ms=\(elapsedMs(since: started)) error=\(error)")
+#endif
             return .bridgeFailure("Failed to decode Rust Codex snapshot: \(error)")
         }
     }

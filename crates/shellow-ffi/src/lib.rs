@@ -1,3 +1,5 @@
+#![allow(clippy::not_unsafe_ptr_arg_deref)]
+
 use std::ffi::{CStr, CString, c_char};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::ptr;
@@ -113,6 +115,20 @@ pub extern "C" fn shellow_engine_set_terminal_theme_json(
         let theme_id = read_c_string(theme_id);
         encode_json(&engine.set_terminal_theme(&theme_id))
     })
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn shellow_engine_set_transport_options(
+    engine: *mut ShellowEngine,
+    keepalive_interval_secs: u64,
+    remote_port_detection_enabled: bool,
+) {
+    if engine.is_null() {
+        return;
+    }
+    let _ = catch_unwind(AssertUnwindSafe(|| unsafe {
+        (*engine).set_transport_options(keepalive_interval_secs, remote_port_detection_enabled);
+    }));
 }
 
 #[unsafe(no_mangle)]
@@ -333,6 +349,16 @@ pub extern "C" fn shellow_engine_start_private_key_shell_json(
 #[unsafe(no_mangle)]
 pub extern "C" fn shellow_engine_poll_live_shell_json(engine: *mut ShellowEngine) -> *mut c_char {
     with_engine_mut(engine, |engine| encode_json(&engine.poll_live_shell()))
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn shellow_engine_dismiss_detected_remote_port_json(
+    engine: *mut ShellowEngine,
+    port: u16,
+) -> *mut c_char {
+    with_engine_mut(engine, |engine| {
+        encode_json(&engine.dismiss_detected_remote_port(port))
+    })
 }
 
 #[unsafe(no_mangle)]
@@ -944,9 +970,13 @@ fn encode_json<T: serde::Serialize>(value: &T) -> *mut c_char {
 }
 
 fn encode_codex_json<T: serde::Serialize>(label: &str, started: Instant, value: &T) -> *mut c_char {
+    #[cfg(debug_assertions)]
     let encode_started = Instant::now();
+    #[cfg(not(debug_assertions))]
+    let _ = (label, started);
     match serde_json::to_string(value) {
         Ok(json) => {
+            #[cfg(debug_assertions)]
             println!(
                 "[Shellow Codex] ffi {label} bytes={} encode_ms={} total_ms={}",
                 json.len(),
@@ -968,5 +998,30 @@ fn into_c_string(value: String) -> *mut c_char {
     match CString::new(value) {
         Ok(value) => value.into_raw(),
         Err(_) => ptr::null_mut(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ffi_engine_lifecycle_and_snapshot_contract() {
+        let engine = shellow_engine_create();
+        assert!(!engine.is_null());
+
+        shellow_engine_set_transport_options(engine, 45, false);
+        let snapshot = shellow_engine_snapshot_json(engine);
+        assert!(!snapshot.is_null());
+
+        let json = unsafe { CStr::from_ptr(snapshot) }
+            .to_str()
+            .expect("snapshot should be UTF-8");
+        let value: serde_json::Value = serde_json::from_str(json).expect("snapshot should be JSON");
+        assert!(value.get("state").is_some());
+        assert!(value.get("detected_remote_ports").is_some());
+
+        shellow_string_free(snapshot);
+        shellow_engine_destroy(engine);
     }
 }

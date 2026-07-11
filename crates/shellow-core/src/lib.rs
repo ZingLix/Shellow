@@ -57,6 +57,8 @@ pub struct TerminalSnapshot {
     pub pending_clipboard_text: Option<String>,
     pub clipboard_sequence: u64,
     pub bell_count: usize,
+    #[serde(default)]
+    pub detected_remote_ports: Vec<u16>,
     pub rows: Vec<TerminalRow>,
     pub grid: Option<TerminalGridSnapshot>,
     pub cursor_column: usize,
@@ -235,6 +237,7 @@ pub struct ShellowEngine {
     observed_host_key_sha256: Option<String>,
     pending_clipboard_text: Option<String>,
     clipboard_sequence: u64,
+    detected_remote_ports: Vec<u16>,
     local_input: String,
     local_cursor: usize,
     command_history: Vec<String>,
@@ -259,6 +262,8 @@ pub struct ShellowEngine {
     last_grid_signature: RefCell<Option<GridRenderSignature>>,
     renderer: RefCell<renderer::TerminalRenderer>,
     terminal_theme: terminal_theme::TerminalTheme,
+    live_keepalive_interval_secs: u64,
+    remote_port_detection_enabled: bool,
     integration: IntegrationReport,
     #[cfg(feature = "native-integrations")]
     live_shell: Option<ssh::LiveShellHandle>,
@@ -430,6 +435,7 @@ impl ShellowEngine {
             observed_host_key_sha256: None,
             pending_clipboard_text: None,
             clipboard_sequence: 0,
+            detected_remote_ports: Vec::new(),
             local_input: String::new(),
             local_cursor: 0,
             command_history: Vec::new(),
@@ -454,6 +460,8 @@ impl ShellowEngine {
             last_grid_signature: RefCell::new(None),
             renderer: RefCell::new(renderer::TerminalRenderer::new(80, 24)),
             terminal_theme: terminal_theme::default_terminal_theme(),
+            live_keepalive_interval_secs: ssh::DEFAULT_LIVE_KEEPALIVE_INTERVAL_SECS,
+            remote_port_detection_enabled: false,
             integration,
             #[cfg(feature = "native-integrations")]
             live_shell: None,
@@ -473,6 +481,7 @@ impl ShellowEngine {
             pending_clipboard_text: self.pending_clipboard_text.clone(),
             clipboard_sequence: self.clipboard_sequence,
             bell_count: self.bell_count,
+            detected_remote_ports: self.detected_remote_ports.clone(),
             rows: self.rows.clone(),
             grid: self.grid_snapshot(),
             cursor_column: self.cursor_column,
@@ -563,6 +572,15 @@ impl ShellowEngine {
         }
         self.last_grid_signature.replace(None);
         terminal_theme::TerminalThemeUpdate::accepted(&theme)
+    }
+
+    pub fn set_transport_options(
+        &mut self,
+        keepalive_interval_secs: u64,
+        remote_port_detection_enabled: bool,
+    ) {
+        self.live_keepalive_interval_secs = keepalive_interval_secs.clamp(10, 120);
+        self.remote_port_detection_enabled = remote_port_detection_enabled;
     }
 
     pub fn attach_core_animation_layer_renderer_surface(
@@ -674,6 +692,7 @@ impl ShellowEngine {
                 expected_host_key_sha256: profile.trusted_host_key_sha256,
                 keepalive_interval_secs: None,
                 keepalive_max: ssh::DEFAULT_KEEPALIVE_MAX,
+                detect_remote_ports: false,
                 cols: self.terminal_cols,
                 rows: self.terminal_rows,
                 inactivity_timeout_secs: 12,
@@ -748,6 +767,7 @@ impl ShellowEngine {
                 expected_host_key_sha256: profile.trusted_host_key_sha256,
                 keepalive_interval_secs: None,
                 keepalive_max: ssh::DEFAULT_KEEPALIVE_MAX,
+                detect_remote_ports: false,
                 cols: self.terminal_cols,
                 rows: self.terminal_rows,
                 inactivity_timeout_secs: 12,
@@ -823,8 +843,9 @@ impl ShellowEngine {
                     username: profile.username,
                     auth: ssh::RusshAuthMethod::Password(password),
                     expected_host_key_sha256: profile.trusted_host_key_sha256,
-                    keepalive_interval_secs: Some(ssh::DEFAULT_LIVE_KEEPALIVE_INTERVAL_SECS),
+                    keepalive_interval_secs: Some(self.live_keepalive_interval_secs),
                     keepalive_max: ssh::DEFAULT_KEEPALIVE_MAX,
+                    detect_remote_ports: self.remote_port_detection_enabled,
                     cols: self.terminal_cols,
                     rows: self.terminal_rows,
                     inactivity_timeout_secs: 3_600,
@@ -909,8 +930,9 @@ impl ShellowEngine {
                             passphrase,
                         },
                         expected_host_key_sha256: profile.trusted_host_key_sha256,
-                        keepalive_interval_secs: Some(ssh::DEFAULT_LIVE_KEEPALIVE_INTERVAL_SECS),
+                        keepalive_interval_secs: Some(self.live_keepalive_interval_secs),
                         keepalive_max: ssh::DEFAULT_KEEPALIVE_MAX,
+                        detect_remote_ports: self.remote_port_detection_enabled,
                         cols: self.terminal_cols,
                         rows: self.terminal_rows,
                         inactivity_timeout_secs: 3_600,
@@ -951,6 +973,12 @@ impl ShellowEngine {
                 if let Some(live_terminal) = self.live_terminal.as_mut() {
                     live_terminal.write(&poll.output);
                 }
+                for port in poll.detected_ports {
+                    if !self.detected_remote_ports.contains(&port) {
+                        self.detected_remote_ports.push(port);
+                    }
+                }
+                self.detected_remote_ports.sort_unstable();
                 self.apply_live_vt_side_effects(&poll.output);
                 self.rebuild_live_shell_rows(&poll.status);
             }
@@ -980,6 +1008,12 @@ impl ShellowEngine {
         self.snapshot()
     }
 
+    pub fn dismiss_detected_remote_port(&mut self, port: u16) -> TerminalSnapshot {
+        self.detected_remote_ports
+            .retain(|detected| *detected != port);
+        self.snapshot()
+    }
+
     pub fn codex_snapshot(&self) -> codex::CodexSnapshot {
         self.codex_session
             .as_ref()
@@ -1006,14 +1040,19 @@ impl ShellowEngine {
         #[cfg(feature = "native-integrations")]
         {
             self.codex_session = None;
-            return match codex::CodexSession::start_password(profile, password, cwd) {
+            match codex::CodexSession::start_password(
+                profile,
+                password,
+                cwd,
+                self.live_keepalive_interval_secs,
+            ) {
                 Ok(mut session) => {
                     let snapshot = session.poll();
                     self.codex_session = Some(session);
                     snapshot
                 }
                 Err(error) => codex::CodexSnapshot::failure(error),
-            };
+            }
         }
 
         #[cfg(not(feature = "native-integrations"))]
@@ -1037,11 +1076,12 @@ impl ShellowEngine {
         #[cfg(feature = "native-integrations")]
         {
             self.codex_session = None;
-            return match codex::CodexSession::start_private_key(
+            match codex::CodexSession::start_private_key(
                 profile,
                 private_key_pem,
                 passphrase,
                 cwd,
+                self.live_keepalive_interval_secs,
             ) {
                 Ok(mut session) => {
                     let snapshot = session.poll();
@@ -1049,7 +1089,7 @@ impl ShellowEngine {
                     snapshot
                 }
                 Err(error) => codex::CodexSnapshot::failure(error),
-            };
+            }
         }
 
         #[cfg(not(feature = "native-integrations"))]
@@ -1513,14 +1553,14 @@ impl ShellowEngine {
                 self.cursor_column = 0;
                 return self.snapshot();
             }
-            if let Some(live_terminal) = self.live_terminal.as_mut() {
-                if !live_terminal.resize(cols, rows) {
-                    self.live_terminal = ghostty_adapter::LiveTerminalState::new_with_theme(
-                        cols,
-                        rows,
-                        &self.terminal_theme,
-                    );
-                }
+            if let Some(live_terminal) = self.live_terminal.as_mut()
+                && !live_terminal.resize(cols, rows)
+            {
+                self.live_terminal = ghostty_adapter::LiveTerminalState::new_with_theme(
+                    cols,
+                    rows,
+                    &self.terminal_theme,
+                );
             }
             return self.poll_live_shell();
         }
@@ -1546,14 +1586,13 @@ impl ShellowEngine {
                 && !self.demo_pager_active
                 && !self.demo_mouse_active
                 && self.demo_tui.is_none()
+                && self.live_shell.is_some()
             {
-                if self.live_shell.is_some() {
-                    self.live_terminal = ghostty_adapter::LiveTerminalState::new_with_theme(
-                        self.terminal_cols,
-                        self.terminal_rows,
-                        &self.terminal_theme,
-                    );
-                }
+                self.live_terminal = ghostty_adapter::LiveTerminalState::new_with_theme(
+                    self.terminal_cols,
+                    self.terminal_rows,
+                    &self.terminal_theme,
+                );
             }
         }
         self.last_grid_signature.replace(None);
@@ -2120,6 +2159,7 @@ impl ShellowEngine {
     }
 
     fn disconnect_live_shell_handle(&mut self) {
+        self.detected_remote_ports.clear();
         #[cfg(feature = "native-integrations")]
         {
             if let Some(handle) = self.live_shell.take() {
@@ -2705,14 +2745,12 @@ impl ShellowEngine {
             ))
         } else {
             #[cfg(feature = "native-integrations")]
-            if let Some(live_terminal) = &self.live_terminal {
-                if let Some(snapshot) = live_terminal.snapshot() {
-                    if snapshot.has_visible_content()
-                        || snapshot.active_screen == TerminalScreenKind::Alternate
-                    {
-                        return Some(self.annotate_dirty_rows(snapshot));
-                    }
-                }
+            if let Some(live_terminal) = &self.live_terminal
+                && let Some(snapshot) = live_terminal.snapshot()
+                && (snapshot.has_visible_content()
+                    || snapshot.active_screen == TerminalScreenKind::Alternate)
+            {
+                return Some(self.annotate_dirty_rows(snapshot));
             }
 
             None
@@ -2739,18 +2777,14 @@ impl ShellowEngine {
                 && !self.demo_mouse_active
                 && self.demo_tui.is_none()
                 && self.demo_grid_bytes.is_none();
-            if live_terminal_is_primary_source {
-                if let Some(live_terminal) = &self.live_terminal {
-                    if let Some(snapshot) =
-                        live_terminal.snapshot_viewport(requested_first_row, requested_row_count)
-                    {
-                        if snapshot.has_visible_content()
-                            || snapshot.active_screen == TerminalScreenKind::Alternate
-                        {
-                            return Some(snapshot);
-                        }
-                    }
-                }
+            if live_terminal_is_primary_source
+                && let Some(live_terminal) = &self.live_terminal
+                && let Some(snapshot) =
+                    live_terminal.snapshot_viewport(requested_first_row, requested_row_count)
+                && (snapshot.has_visible_content()
+                    || snapshot.active_screen == TerminalScreenKind::Alternate)
+            {
+                return Some(snapshot);
             }
         }
 
@@ -2882,11 +2916,11 @@ fn dirty_rows_between(previous: &GridRenderSignature, current: &GridRenderSignat
     }
 
     let mut dirty = vec![false; current.lines.len()];
-    for row in 0..current.lines.len() {
+    for (row, is_dirty) in dirty.iter_mut().enumerate() {
         if previous.lines.get(row) != current.lines.get(row)
             || previous.styled_lines.get(row) != current.styled_lines.get(row)
         {
-            dirty[row] = true;
+            *is_dirty = true;
         }
     }
 
@@ -2928,7 +2962,7 @@ where
     let mut parameters = String::new();
     let mut final_byte = None;
 
-    while let Some(character) = chars.next() {
+    for character in chars.by_ref() {
         match character {
             'M' | 'm' => {
                 final_byte = Some(character);
@@ -3286,7 +3320,7 @@ where
 {
     let mut parameters = String::new();
 
-    while let Some(character) = chars.next() {
+    for character in chars.by_ref() {
         match character {
             'A' => return "Up",
             'B' => return "Down",
@@ -3369,6 +3403,20 @@ fn control_name(character: char) -> char {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn detected_remote_ports_are_snapshotted_and_dismissible() {
+        let mut engine = ShellowEngine::new();
+        engine.detected_remote_ports = vec![3000, 8080];
+
+        assert_eq!(engine.snapshot().detected_remote_ports, vec![3000, 8080]);
+        assert_eq!(
+            engine
+                .dismiss_detected_remote_port(3000)
+                .detected_remote_ports,
+            vec![8080]
+        );
+    }
 
     #[test]
     fn terminal_theme_switch_updates_renderer_and_rejects_unknown_ids() {

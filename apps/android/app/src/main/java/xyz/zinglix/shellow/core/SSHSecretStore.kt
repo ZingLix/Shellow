@@ -4,6 +4,7 @@ import android.content.Context
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
 import android.util.Base64
+import androidx.core.content.edit
 import java.security.KeyStore
 import javax.crypto.Cipher
 import javax.crypto.KeyGenerator
@@ -88,24 +89,21 @@ class SSHSecretStore(context: Context) {
         Base64.encodeToString(ciphertext, Base64.NO_WRAP),
       ).joinToString(":")
 
-    preferences
-      .edit()
-      .putString(account, encoded)
-      .apply()
+    preferences.edit { putString(account, encoded) }
   }
 
   fun deleteSecret(
     profile: HostProfile,
     kind: SSHSecretKind,
   ) {
-    preferences.edit().remove(account(profile, kind)).apply()
+    preferences.edit { remove(account(profile, kind)) }
   }
 
   fun deleteKeySecret(
     keyId: String,
     kind: SSHSecretKind,
   ) {
-    preferences.edit().remove(keyAccount(keyId, kind)).apply()
+    preferences.edit { remove(keyAccount(keyId, kind)) }
   }
 
   private fun account(

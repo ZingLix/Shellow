@@ -8,6 +8,10 @@ FRAMEWORK_DIR="$OUTPUT_DIR/ShellowCore.xcframework"
 
 source "$ROOT_DIR/scripts/libghostty-vt-env.sh"
 
+# Keep Rust/C dependencies compatible with the app target instead of inheriting the
+# host Xcode SDK version (which can make the static archive require a newer iOS).
+export IPHONEOS_DEPLOYMENT_TARGET="${IPHONEOS_DEPLOYMENT_TARGET:-17.0}"
+
 cargo build --manifest-path "$ROOT_DIR/Cargo.toml" -p shellow-ffi --release --features native-integrations --target aarch64-apple-ios
 cargo build --manifest-path "$ROOT_DIR/Cargo.toml" -p shellow-ffi --release --features native-integrations --target aarch64-apple-ios-sim
 

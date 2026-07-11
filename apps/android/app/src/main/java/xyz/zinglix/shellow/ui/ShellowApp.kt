@@ -12,7 +12,9 @@ import android.view.Surface
 import android.view.SurfaceHolder
 import android.view.SurfaceView
 import xyz.zinglix.shellow.BuildConfig
+import androidx.activity.BackEventCompat
 import androidx.activity.compose.BackHandler
+import androidx.activity.compose.PredictiveBackHandler
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.ExperimentalFoundationApi
@@ -59,6 +61,7 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Slider
@@ -72,6 +75,8 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
@@ -86,8 +91,10 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color as ComposeColor
 import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.drawscope.drawIntoCanvas
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.nativeCanvas
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.input.key.Key
@@ -110,6 +117,11 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.LiveRegionMode
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.liveRegion
+import androidx.compose.ui.semantics.role
+import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.layout.ContentScale
@@ -132,8 +144,12 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.unit.Velocity
 import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.zIndex
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.compose.LifecycleEventEffect
+import androidx.core.content.edit
 import xyz.zinglix.shellow.core.AuthenticationKind
 import xyz.zinglix.shellow.core.CodexApproval
+import xyz.zinglix.shellow.core.CodexApprovalKind
 import xyz.zinglix.shellow.core.CodexDirectoryEntry
 import xyz.zinglix.shellow.core.CodexMarkdownBlock
 import xyz.zinglix.shellow.core.CodexMarkdownBlockKind
@@ -142,12 +158,15 @@ import xyz.zinglix.shellow.core.CodexMarkdownInlineStyle
 import xyz.zinglix.shellow.core.CodexMarkdownTableCell
 import xyz.zinglix.shellow.core.CodexMessage
 import xyz.zinglix.shellow.core.CodexMessageKind
+import xyz.zinglix.shellow.core.CodexMessageDelivery
 import xyz.zinglix.shellow.core.CodexMessageRole
 import xyz.zinglix.shellow.core.CodexMessageVisibility
 import xyz.zinglix.shellow.core.CodexModelOption
+import xyz.zinglix.shellow.core.CodexRateLimitWindow
 import xyz.zinglix.shellow.core.CodexSnapshot
 import xyz.zinglix.shellow.core.CodexStatus
 import xyz.zinglix.shellow.core.CodexThreadSummary
+import xyz.zinglix.shellow.core.CodexUsageState
 import xyz.zinglix.shellow.core.ConnectionState
 import xyz.zinglix.shellow.core.HostProfile
 import xyz.zinglix.shellow.core.IntegrationReport
@@ -186,6 +205,7 @@ import java.util.Locale
 import java.util.UUID
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
@@ -194,6 +214,24 @@ import kotlin.math.abs
 import kotlin.math.floor
 import kotlin.math.roundToInt
 
+private fun Modifier.predictiveBackTransform(
+  progress: Float,
+  swipeEdge: Int,
+): Modifier =
+  graphicsLayer {
+    val clampedProgress = progress.coerceIn(0f, 1f)
+    val direction = if (swipeEdge == BackEventCompat.EDGE_RIGHT) -1f else 1f
+    val scale = 1f - (0.08f * clampedProgress)
+    scaleX = scale
+    scaleY = scale
+    translationX = size.width * 0.06f * clampedProgress * direction
+    transformOrigin =
+      TransformOrigin(
+        pivotFractionX = if (direction > 0f) 1f else 0f,
+        pivotFractionY = 0.5f,
+      )
+    alpha = 1f - (0.04f * clampedProgress)
+  }
 private enum class TerminalDestructiveAction {
   Clear,
   Reset,
@@ -285,6 +323,10 @@ private data class AppDisplaySettings(
   val lineHeightScale: Float = 1f,
   val colorScheme: ShellowColorScheme = ShellowColorScheme.System,
   val terminalTheme: TerminalThemeSelection = TerminalThemeSelection.ShellowDark,
+  val confirmPaste: Boolean = true,
+  val showKeyboardToolbar: Boolean = true,
+  val keepAliveSeconds: Float = 30f,
+  val detectRemotePorts: Boolean = false,
 )
 
 private enum class TerminalThemeSelection(
@@ -324,6 +366,12 @@ private data class ConnectionNotice(
   val message: String,
 )
 
+private data class PendingHostKeyTrust(
+  val fingerprint: String,
+  val mode: HostConnectMode,
+)
+
+private const val HostKeyConfirmationPrefix = "ssh host key confirmation required: "
 private sealed class ReconnectTarget {
   data class Preview(val profile: HostProfile) : ReconnectTarget()
   data class Password(
@@ -423,8 +471,14 @@ fun ShellowApp() {
     }
   var navigation by remember { mutableStateOf(AppNavigationState()) }
   val screen = navigation.currentScreen
+  var topLevelBackProgress by remember { mutableStateOf(0f) }
+  var topLevelBackEdge by remember { mutableStateOf(BackEventCompat.EDGE_LEFT) }
   var session by remember {
     core.setTerminalTheme(initialDisplaySettings.terminalTheme.wire)
+    core.setTransportOptions(
+      initialDisplaySettings.keepAliveSeconds.roundToInt().toLong(),
+      initialDisplaySettings.detectRemotePorts,
+    )
     mutableStateOf(core.snapshot())
   }
   var codexSnapshot by remember { mutableStateOf(CodexSnapshot.disconnected()) }
@@ -442,6 +496,11 @@ fun ShellowApp() {
   fun navigateBack() {
     navigation = navigation.navigateBack()
   }
+  var codexBootstrapPromptEndpoint by remember { mutableStateOf<String?>(null) }
+  var codexBootstrapError by remember { mutableStateOf<String?>(null) }
+  var pendingHostKeyTrust by remember { mutableStateOf<PendingHostKeyTrust?>(null) }
+  var reconnectTerminalAfterBackground by remember { mutableStateOf(false) }
+  var reconnectCodexAfterBackground by remember { mutableStateOf(false) }
 
   fun updateStoredProfile(updated: HostProfile) {
     val index = profiles.indexOfFirst { it.id == updated.id }
@@ -602,6 +661,13 @@ fun ShellowApp() {
 
   fun updateSession(next: TerminalSession) {
     session = next
+    if (pendingHostKeyTrust == null && reconnectTarget?.profile()?.trustedHostKeySha256.isNullOrBlank()) {
+      next.rows.asReversed().firstNotNullOfOrNull { row ->
+        row.text.hostKeyFingerprintOrNull()
+      }?.let { fingerprint ->
+        pendingHostKeyTrust = PendingHostKeyTrust(fingerprint, HostConnectMode.Terminal)
+      }
+    }
     captureObservedHostKeyIfNeeded(next)
   }
 
@@ -617,14 +683,43 @@ fun ShellowApp() {
   }
 
   fun updateCodexSnapshot(next: CodexSnapshot) {
-    codexSnapshot = next
-    rememberCodexResumePoint(next)
-    captureObservedHostKeyIfNeeded(next)
+    val resolved =
+      if (!next.messagesReplaceAll && next.messagesStartIndex <= codexSnapshot.messages.size) {
+        next.copy(
+          messages = codexSnapshot.messages.take(next.messagesStartIndex) + next.messages,
+          messagesStartIndex = 0,
+          messagesReplaceAll = true,
+        )
+      } else {
+        next
+      }
+    codexSnapshot = resolved
+    if (pendingHostKeyTrust == null && codexReconnectTarget?.profile()?.trustedHostKeySha256.isNullOrBlank()) {
+      (next.lastError?.hostKeyFingerprintOrNull()
+        ?: next.messages.asReversed().firstNotNullOfOrNull { it.text.hostKeyFingerprintOrNull() })
+        ?.let { fingerprint ->
+          pendingHostKeyTrust = PendingHostKeyTrust(fingerprint, HostConnectMode.Codex)
+        }
+    }
+    rememberCodexResumePoint(resolved)
+    captureObservedHostKeyIfNeeded(resolved)
+    if (resolved.lastError?.contains("daemon bootstrap --remote-control") == true &&
+      codexBootstrapPromptEndpoint == null && codexBootstrapError == null
+    ) {
+      codexBootstrapPromptEndpoint = codexReconnectTarget?.profile()?.endpoint ?: resolved.endpoint
+    }
   }
 
   fun updateClaudeSnapshot(next: CodexSnapshot) {
     claudeSnapshot = next
     var target = claudeReconnectTarget
+    if (pendingHostKeyTrust == null && target?.profile()?.trustedHostKeySha256.isNullOrBlank()) {
+      (next.lastError?.hostKeyFingerprintOrNull()
+        ?: next.messages.asReversed().firstNotNullOfOrNull { it.text.hostKeyFingerprintOrNull() })
+        ?.let { fingerprint ->
+          pendingHostKeyTrust = PendingHostKeyTrust(fingerprint, HostConnectMode.Claude)
+        }
+    }
     next.cwd?.trim()?.takeUnless { it.isEmpty() }?.let { cwd -> target = target?.withCwd(cwd) }
     next.threadId?.trim()?.takeUnless { it.isEmpty() }?.let { sessionId -> target = target?.withThreadId(sessionId) }
     val observed = next.observedHostKeySha256?.trim().takeUnless { it.isNullOrEmpty() }
@@ -646,6 +741,7 @@ fun ShellowApp() {
     var lastLiveRevision = withContext(Dispatchers.IO) { core.liveShellEventRevision() }
     var lastCodexRevision = withContext(Dispatchers.IO) { core.codexEventRevision() }
     var lastClaudeRevision = withContext(Dispatchers.IO) { core.claudeEventRevision() }
+    var codexConnectingPollTicks = 0
     while (true) {
       delay(50)
       val revision = withContext(Dispatchers.IO) { core.liveShellEventRevision() }
@@ -660,9 +756,16 @@ fun ShellowApp() {
       val codexRevision = withContext(Dispatchers.IO) { core.codexEventRevision() }
       if (codexRevision != lastCodexRevision) {
         lastCodexRevision = codexRevision
+        codexConnectingPollTicks = 0
         val next = withContext(Dispatchers.IO) { core.pollCodex() }
         if (next != codexSnapshot) {
           updateCodexSnapshot(next)
+        }
+      } else if (codexSnapshot.status == CodexStatus.Connecting) {
+        codexConnectingPollTicks += 1
+        if (codexConnectingPollTicks >= 5) {
+          codexConnectingPollTicks = 0
+          updateCodexSnapshot(withContext(Dispatchers.IO) { core.pollCodex() })
         }
       }
 
@@ -683,6 +786,10 @@ fun ShellowApp() {
 
   LaunchedEffect(displaySettings) {
     saveDisplaySettings(context, displaySettings)
+    core.setTransportOptions(
+      displaySettings.keepAliveSeconds.roundToInt().toLong(),
+      displaySettings.detectRemotePorts,
+    )
   }
 
   fun connectPasswordShell(profile: HostProfile, password: String, startupCommand: String) {
@@ -926,6 +1033,8 @@ fun ShellowApp() {
         return true
       }
 
+      if (pendingHostKeyTrust != null) return true
+
       withContext(Dispatchers.IO) { core.disconnectLiveShell() }
     }
 
@@ -957,6 +1066,8 @@ fun ShellowApp() {
       if (result.status == CodexStatus.Connected) {
         return true
       }
+
+      if (pendingHostKeyTrust != null) return true
 
       withContext(Dispatchers.IO) { core.disconnectCodex() }
     }
@@ -1044,6 +1155,7 @@ fun ShellowApp() {
         }
 
       if (!didConnect) {
+        if (pendingHostKeyTrust != null) return@launch
         reconnectTarget = null
         codexReconnectTarget = null
         claudeReconnectTarget = null
@@ -1159,13 +1271,91 @@ fun ShellowApp() {
     }
   }
 
+  LifecycleEventEffect(Lifecycle.Event.ON_PAUSE) {
+    reconnectTerminalAfterBackground = session.state != ConnectionState.Disconnected && reconnectTarget != null
+    reconnectCodexAfterBackground = codexSnapshot.status != CodexStatus.Disconnected && codexReconnectTarget != null
+  }
+  LifecycleEventEffect(Lifecycle.Event.ON_RESUME) {
+    scope.launch {
+      val terminal = withContext(Dispatchers.IO) { core.pollLiveShell() }
+      updateSession(terminal)
+      val codex = withContext(Dispatchers.IO) { core.pollCodex() }
+      updateCodexSnapshot(codex)
+      if (reconnectTerminalAfterBackground && terminal.state == ConnectionState.Disconnected) reconnect()
+      if (reconnectCodexAfterBackground &&
+        (codex.status == CodexStatus.Disconnected || codex.status == CodexStatus.Failed)
+      ) reconnectCodex()
+      reconnectTerminalAfterBackground = false
+      reconnectCodexAfterBackground = false
+    }
+  }
+
   val activeTerminalProfile = reconnectTarget?.profile()
 
-  BackHandler(enabled = navigation.canNavigateBack) {
+  PredictiveBackHandler(enabled = screen == AppScreen.Terminal || screen == AppScreen.Settings) { events ->
+    try {
+      events.collect { event ->
+        topLevelBackProgress = event.progress
+        topLevelBackEdge = event.swipeEdge
+      }
+      navigateBack()
+    } finally {
+      topLevelBackProgress = 0f
+    }
+  }
+  BackHandler(enabled = navigation.canNavigateBack && screen != AppScreen.Terminal && screen != AppScreen.Settings) {
     navigateBack()
   }
 
   ShellowTheme(colorScheme = displaySettings.colorScheme) {
+    val hostsContent: @Composable () -> Unit = {
+      HostsScreen(
+        profiles = profiles,
+        sshKeys = sshKeys,
+        secretStore = secretStore,
+        onOpenSettings = { navigateTo(AppScreen.Settings) },
+        onAddProfile = { profile ->
+          profiles.add(profile)
+          saveHostProfiles(context, profiles)
+        },
+        onUpdateProfile = ::updateStoredProfile,
+        onDeleteProfile = { profile ->
+          if (reconnectTarget?.profile()?.id == profile.id) reconnectTarget = null
+          if (codexReconnectTarget?.profile()?.id == profile.id) codexReconnectTarget = null
+          if (claudeReconnectTarget?.profile()?.id == profile.id) claudeReconnectTarget = null
+          secretStore.deleteSecret(profile, SSHSecretKind.Password)
+          secretStore.deleteSecret(profile, SSHSecretKind.PrivateKey)
+          secretStore.deleteSecret(profile, SSHSecretKind.Passphrase)
+          profiles.removeAll { it.id == profile.id }
+          saveHostProfiles(context, profiles)
+        },
+        onProbeCapabilities = { profile ->
+          val outcome = probeWithStoredCredential(profile)
+          applyCapabilityOutcome(profile, outcome)
+          outcome
+        },
+        onAddKey = { credential ->
+          sshKeys.add(credential)
+          saveSSHKeyCredentials(context, sshKeys)
+        },
+        onDeleteKey = { credential ->
+          sshKeys.removeAll { it.id == credential.id }
+          secretStore.deleteKeySecret(credential.id, SSHSecretKind.PrivateKey)
+          secretStore.deleteKeySecret(credential.id, SSHSecretKind.Passphrase)
+          saveSSHKeyCredentials(context, sshKeys)
+        },
+        onConnectTerminal = { profile ->
+          connectHost(profile, HostConnectMode.Terminal)
+        },
+        onConnectCodex = { profile ->
+          connectHost(profile, HostConnectMode.Codex)
+        },
+        onConnectClaude = { profile ->
+          connectHost(profile, HostConnectMode.Claude)
+        },
+      )
+    }
+
     Box(
       modifier =
         Modifier
@@ -1174,192 +1364,181 @@ fun ShellowApp() {
           .statusBarsPadding()
           .navigationBarsPadding()
     ) {
+      if (screen == AppScreen.Hosts || topLevelBackProgress > 0f) {
+        hostsContent()
+      }
+
+      val outgoingScreenModifier =
+        Modifier
+          .fillMaxSize()
+          .predictiveBackTransform(topLevelBackProgress, topLevelBackEdge)
+
       when (screen) {
         AppScreen.Terminal ->
-          TerminalScreen(
-            session = session,
-            displaySettings = displaySettings,
-            profileName = activeTerminalProfile?.name ?: session.title,
-            persistentTerminal = activeTerminalProfile?.persistentTerminal,
-            loadPersistentSessions =
-              activeTerminalProfile?.let { profile ->
-                profile.persistentTerminal?.let { configuration ->
-                  {
-                    loadRemoteTerminalSessions(profile, configuration)
+          Box(outgoingScreenModifier) {
+            TerminalScreen(
+              session = session,
+              displaySettings = displaySettings,
+              profileName = activeTerminalProfile?.name ?: session.title,
+              persistentTerminal = activeTerminalProfile?.persistentTerminal,
+              loadPersistentSessions =
+                activeTerminalProfile?.let { profile ->
+                  profile.persistentTerminal?.let { configuration ->
+                    {
+                      loadRemoteTerminalSessions(profile, configuration)
+                    }
                   }
+                },
+              onBackToHosts = ::navigateBack,
+              onInput = { input -> updateSession(core.sendTerminalInput(input)) },
+              onReconnect = if (reconnectTarget == null) null else ::reconnect,
+              onDisconnect = { updateSession(core.disconnectLiveShell()) },
+              onResize = { cols, rows -> updateSession(core.resizeTerminal(cols, rows)) },
+              onAttachRendererSurface = { surface, width, height -> core.attachAndroidSurface(surface, width, height) },
+              onSetRendererOverlay = { overlay -> core.setRendererOverlayJson(overlay) },
+              onRenderRendererSurface = { width, height, firstRow, rowCount ->
+                core.renderRendererSurfaceFrame(width, height, firstRow, rowCount)
+              },
+              onDetachRendererSurface = { core.detachRendererSurface() },
+              onClearTerminal = { updateSession(core.clearTerminal()) },
+              onResetTerminal = { updateSession(core.resetTerminal()) },
+            )
+          }
+        AppScreen.Codex ->
+          Box(outgoingScreenModifier) {
+            CodexScreen(
+              snapshot = codexSnapshot,
+              onBackToHosts = ::navigateBack,
+              onRootBackProgress = { progress, edge ->
+                topLevelBackProgress = progress
+                topLevelBackEdge = edge
+              },
+              onSendMessage = { message ->
+                updateCodexSnapshot(core.sendCodexMessage(message))
+              },
+              onUpdateSettings = { model, reasoningEffort, serviceTier, approvalPolicy, sandbox ->
+                updateCodexSnapshot(
+                  core.updateCodexSettings(
+                    model,
+                    reasoningEffort,
+                    serviceTier,
+                    approvalPolicy,
+                    sandbox,
+                  ),
+                )
+              },
+              onBrowseDirectory = { path ->
+                updateCodexSnapshot(withContext(Dispatchers.IO) { core.browseCodexDirectory(path) })
+              },
+              onListThreads = { cwd, searchTerm, cursor, archived, append ->
+                updateCodexSnapshot(
+                  withContext(Dispatchers.IO) {
+                    core.listCodexThreadsPage(cwd, searchTerm, cursor, archived, append)
+                  },
+                )
+              },
+              onStartThread = { cwd ->
+                codexReconnectTarget = codexReconnectTarget?.withCwd(cwd)?.withThreadId(null)
+                updateCodexSnapshot(withContext(Dispatchers.IO) { core.startCodexThread(cwd) })
+              },
+              onStartThreadAndSend = { cwd, message ->
+                codexReconnectTarget = codexReconnectTarget?.withCwd(cwd)?.withThreadId(null)
+                val started = withContext(Dispatchers.IO) { core.startCodexThread(cwd) }
+                updateCodexSnapshot(started)
+                if (started.threadId != null && started.operation.lastError == null) {
+                  updateCodexSnapshot(core.sendCodexMessage(message))
                 }
               },
-            onBackToHosts = ::navigateBack,
-            onInput = { input -> updateSession(core.sendTerminalInput(input)) },
-            onReconnect = if (reconnectTarget == null) null else ::reconnect,
-            onDisconnect = { updateSession(core.disconnectLiveShell()) },
-            onResize = { cols, rows -> updateSession(core.resizeTerminal(cols, rows)) },
-            onAttachRendererSurface = { surface, width, height -> core.attachAndroidSurface(surface, width, height) },
-            onSetRendererOverlay = { overlay -> core.setRendererOverlayJson(overlay) },
-            onRenderRendererSurface = { width, height, firstRow, rowCount ->
-              core.renderRendererSurfaceFrame(width, height, firstRow, rowCount)
-            },
-            onDetachRendererSurface = { core.detachRendererSurface() },
-            onClearTerminal = { updateSession(core.clearTerminal()) },
-            onResetTerminal = { updateSession(core.resetTerminal()) },
-          )
-        AppScreen.Codex ->
-          CodexScreen(
-            snapshot = codexSnapshot,
-            onBackToHosts = ::navigateBack,
-            onSendMessage = { message ->
-              updateCodexSnapshot(core.sendCodexMessage(message))
-            },
-            onUpdateSettings = { model, reasoningEffort, serviceTier, approvalPolicy, sandbox ->
-              updateCodexSnapshot(
-                core.updateCodexSettings(
-                  model,
-                  reasoningEffort,
-                  serviceTier,
-                  approvalPolicy,
-                  sandbox,
-                ),
-              )
-            },
-            onBrowseDirectory = { path ->
-              updateCodexSnapshot(withContext(Dispatchers.IO) { core.browseCodexDirectory(path) })
-            },
-            onListThreads = { cwd, searchTerm, cursor, archived, append ->
-              updateCodexSnapshot(
-                withContext(Dispatchers.IO) {
-                  core.listCodexThreadsPage(cwd, searchTerm, cursor, archived, append)
-                },
-              )
-            },
-            onStartThread = { cwd ->
-              codexReconnectTarget = codexReconnectTarget?.withCwd(cwd)?.withThreadId(null)
-              updateCodexSnapshot(withContext(Dispatchers.IO) { core.startCodexThread(cwd) })
-            },
-            onStartThreadAndSend = { cwd, message ->
-              codexReconnectTarget = codexReconnectTarget?.withCwd(cwd)?.withThreadId(null)
-              val started = withContext(Dispatchers.IO) { core.startCodexThread(cwd) }
-              updateCodexSnapshot(started)
-              if (started.threadId != null && started.operation.lastError == null) {
-                updateCodexSnapshot(core.sendCodexMessage(message))
-              }
-            },
-            onResumeThread = { threadId ->
-              updateCodexSnapshot(withContext(Dispatchers.IO) { core.resumeCodexThread(threadId) })
-              codexSnapshot.cwd?.let { cwd ->
-                codexReconnectTarget = codexReconnectTarget?.withCwd(cwd)
-              }
-            },
-            onReadThread = { threadId ->
-              updateCodexSnapshot(withContext(Dispatchers.IO) { core.readCodexThread(threadId) })
-            },
-            onLoadMoreThreadTurns = { threadId, cursor ->
-              updateCodexSnapshot(withContext(Dispatchers.IO) { core.loadMoreCodexThreadTurns(threadId, cursor) })
-            },
-            onRenameThread = { threadId, name ->
-              updateCodexSnapshot(withContext(Dispatchers.IO) { core.renameCodexThread(threadId, name) })
-            },
-            onArchiveThread = { threadId ->
-              updateCodexSnapshot(withContext(Dispatchers.IO) { core.archiveCodexThread(threadId) })
-            },
-            onUnarchiveThread = { threadId ->
-              updateCodexSnapshot(withContext(Dispatchers.IO) { core.unarchiveCodexThread(threadId) })
-            },
-            onDeleteThread = { threadId ->
-              updateCodexSnapshot(withContext(Dispatchers.IO) { core.deleteCodexThread(threadId) })
-            },
-            onForkThread = { threadId, cwd ->
-              updateCodexSnapshot(withContext(Dispatchers.IO) { core.forkCodexThread(threadId, cwd) })
-              codexSnapshot.cwd?.let { nextCwd ->
-                codexReconnectTarget = codexReconnectTarget?.withCwd(nextCwd)
-              }
-            },
-            onInterruptTurn = {
-              updateCodexSnapshot(core.interruptCodexTurn())
-            },
-            onApprovalDecision = { requestId, decision ->
-              updateCodexSnapshot(core.answerCodexApproval(requestId, decision))
-            },
-            onDisconnect = {
-              updateCodexSnapshot(core.disconnectCodex())
-            },
-            onReconnect = if (codexReconnectTarget == null) null else ::reconnectCodex,
-          )
+              onResumeThread = { threadId ->
+                updateCodexSnapshot(withContext(Dispatchers.IO) { core.resumeCodexThread(threadId) })
+                codexSnapshot.cwd?.let { cwd ->
+                  codexReconnectTarget = codexReconnectTarget?.withCwd(cwd)
+                }
+              },
+              onReadThread = { threadId ->
+                updateCodexSnapshot(withContext(Dispatchers.IO) { core.readCodexThread(threadId) })
+              },
+              onLoadMoreThreadTurns = { threadId, cursor ->
+                updateCodexSnapshot(withContext(Dispatchers.IO) { core.loadMoreCodexThreadTurns(threadId, cursor) })
+              },
+              onRenameThread = { threadId, name ->
+                updateCodexSnapshot(withContext(Dispatchers.IO) { core.renameCodexThread(threadId, name) })
+              },
+              onArchiveThread = { threadId ->
+                updateCodexSnapshot(withContext(Dispatchers.IO) { core.archiveCodexThread(threadId) })
+              },
+              onUnarchiveThread = { threadId ->
+                updateCodexSnapshot(withContext(Dispatchers.IO) { core.unarchiveCodexThread(threadId) })
+              },
+              onDeleteThread = { threadId ->
+                updateCodexSnapshot(withContext(Dispatchers.IO) { core.deleteCodexThread(threadId) })
+              },
+              onForkThread = { threadId, cwd ->
+                updateCodexSnapshot(withContext(Dispatchers.IO) { core.forkCodexThread(threadId, cwd) })
+                codexSnapshot.cwd?.let { nextCwd ->
+                  codexReconnectTarget = codexReconnectTarget?.withCwd(nextCwd)
+                }
+              },
+              onInterruptTurn = {
+                updateCodexSnapshot(core.interruptCodexTurn())
+              },
+              onApprovalDecision = { requestId, decision ->
+                updateCodexSnapshot(core.answerCodexApproval(requestId, decision))
+              },
+              onDisconnect = {
+                updateCodexSnapshot(core.disconnectCodex())
+              },
+              onReconnect = if (codexReconnectTarget == null) null else ::reconnectCodex,
+            )
+          }
         AppScreen.Claude ->
-          CodexScreen(
-            snapshot = claudeSnapshot,
-            onBackToHosts = ::navigateBack,
-            onSendMessage = { message ->
-              updateClaudeSnapshot(core.sendClaudeMessage(message))
-            },
-            onUpdateSettings = { model, _, _, approvalPolicy, _ ->
-              updateClaudeSnapshot(core.updateClaudeSettings(model, approvalPolicy))
-            },
-            onBrowseDirectory = { _ -> Unit },
-            onListThreads = { _, _, _, _, _ -> Unit },
-            onStartThread = { cwd -> startFreshClaude(cwd) },
-            onStartThreadAndSend = { cwd, message -> startFreshClaude(cwd, message) },
-            onResumeThread = { _ -> Unit },
-            onReadThread = { _ -> Unit },
-            onLoadMoreThreadTurns = { _, _ -> Unit },
-            onRenameThread = { _, _ -> Unit },
-            onArchiveThread = { _ -> Unit },
-            onUnarchiveThread = { _ -> Unit },
-            onDeleteThread = { _ -> Unit },
-            onForkThread = { _, _ -> Unit },
-            onInterruptTurn = {
-              updateClaudeSnapshot(core.interruptClaudeTurn())
-            },
-            onApprovalDecision = { requestId, decision ->
-              updateClaudeSnapshot(core.answerClaudeApproval(requestId, decision))
-            },
-            onDisconnect = {
-              updateClaudeSnapshot(core.disconnectClaude())
-            },
-            onReconnect = if (claudeReconnectTarget == null) null else ::reconnectClaude,
-          )
-        AppScreen.Hosts ->
-          HostsScreen(
-            profiles = profiles,
-            sshKeys = sshKeys,
-            secretStore = secretStore,
-            onOpenSettings = { navigateTo(AppScreen.Settings) },
-            onAddProfile = { profile ->
-              profiles.add(profile)
-              saveHostProfiles(context, profiles)
-            },
-            onUpdateProfile = ::updateStoredProfile,
-            onAddKey = { credential ->
-              sshKeys.add(credential)
-              saveSSHKeyCredentials(context, sshKeys)
-            },
-            onDeleteKey = { credential ->
-              sshKeys.removeAll { it.id == credential.id }
-              secretStore.deleteKeySecret(credential.id, SSHSecretKind.PrivateKey)
-              secretStore.deleteKeySecret(credential.id, SSHSecretKind.Passphrase)
-              saveSSHKeyCredentials(context, sshKeys)
-            },
-            onConnectTerminal = { profile ->
-              connectHost(profile, HostConnectMode.Terminal)
-            },
-            onConnectCodex = { profile ->
-              connectHost(profile, HostConnectMode.Codex)
-            },
-            onConnectClaude = { profile ->
-              connectHost(profile, HostConnectMode.Claude)
-            },
-          )
+          Box(outgoingScreenModifier) {
+            CodexScreen(
+              snapshot = claudeSnapshot,
+              onBackToHosts = ::navigateBack,
+              onRootBackProgress = { progress, edge ->
+                topLevelBackProgress = progress
+                topLevelBackEdge = edge
+              },
+              onSendMessage = { message -> updateClaudeSnapshot(core.sendClaudeMessage(message)) },
+              onUpdateSettings = { model, _, _, approvalPolicy, _ ->
+                updateClaudeSnapshot(core.updateClaudeSettings(model, approvalPolicy))
+              },
+              onBrowseDirectory = { _ -> Unit },
+              onListThreads = { _, _, _, _, _ -> Unit },
+              onStartThread = { cwd -> startFreshClaude(cwd) },
+              onStartThreadAndSend = { cwd, message -> startFreshClaude(cwd, message) },
+              onResumeThread = { _ -> Unit },
+              onReadThread = { _ -> Unit },
+              onLoadMoreThreadTurns = { _, _ -> Unit },
+              onRenameThread = { _, _ -> Unit },
+              onArchiveThread = { _ -> Unit },
+              onUnarchiveThread = { _ -> Unit },
+              onDeleteThread = { _ -> Unit },
+              onForkThread = { _, _ -> Unit },
+              onInterruptTurn = { updateClaudeSnapshot(core.interruptClaudeTurn()) },
+              onApprovalDecision = { requestId, decision ->
+                updateClaudeSnapshot(core.answerClaudeApproval(requestId, decision))
+              },
+              onDisconnect = { updateClaudeSnapshot(core.disconnectClaude()) },
+              onReconnect = if (claudeReconnectTarget == null) null else ::reconnectClaude,
+            )
+          }
+        AppScreen.Hosts -> Unit
         AppScreen.Settings ->
-          SettingsScreen(
-            report = session.integration,
-            displaySettings = displaySettings,
-            onBack = ::navigateBack,
-            onDisplaySettingsChange = { updated ->
-              if (updated.terminalTheme != displaySettings.terminalTheme) {
-                core.setTerminalTheme(updated.terminalTheme.wire)
-              }
-              displaySettings = updated
-            },
-          )
+          Box(outgoingScreenModifier) {
+            SettingsScreen(
+              report = session.integration,
+              displaySettings = displaySettings,
+              onBack = ::navigateBack,
+              onDisplaySettingsChange = { updated ->
+                if (updated.terminalTheme != displaySettings.terminalTheme) {
+                  core.setTerminalTheme(updated.terminalTheme.wire)
+                }
+                displaySettings = updated
+              },
+            )
+          }
       }
 
       passwordPrompt?.let { request ->
@@ -1386,6 +1565,95 @@ fun ShellowApp() {
         )
       }
 
+      pendingHostKeyTrust?.let { pending ->
+        AlertDialog(
+          onDismissRequest = { pendingHostKeyTrust = null },
+          title = { Text("Trust SSH host key?") },
+          text = {
+            Text("Verify this SHA-256 fingerprint with the server administrator before continuing:\n\n${pending.fingerprint}")
+          },
+          confirmButton = {
+            TextButton(
+              onClick = {
+                pendingHostKeyTrust = null
+                when (pending.mode) {
+                  HostConnectMode.Terminal -> {
+                    val target = reconnectTarget ?: return@TextButton
+                    val updated = target.profile().copy(trustedHostKeySha256 = pending.fingerprint)
+                    updateStoredProfile(updated)
+                    reconnectTarget = target.withProfile(updated)
+                    reconnect()
+                  }
+                  HostConnectMode.Codex -> {
+                    val target = codexReconnectTarget ?: return@TextButton
+                    val updated = target.profile().copy(trustedHostKeySha256 = pending.fingerprint)
+                    updateStoredProfile(updated)
+                    codexReconnectTarget = target.withProfile(updated)
+                    reconnectCodex()
+                  }
+                  HostConnectMode.Claude -> {
+                    val target = claudeReconnectTarget ?: return@TextButton
+                    val updated = target.profile().copy(trustedHostKeySha256 = pending.fingerprint)
+                    updateStoredProfile(updated)
+                    claudeReconnectTarget = target.withProfile(updated)
+                    reconnectClaude()
+                  }
+                }
+              },
+            ) { Text("Trust and connect") }
+          },
+          dismissButton = {
+            TextButton(
+              onClick = {
+                pendingHostKeyTrust = null
+                when (pending.mode) {
+                  HostConnectMode.Terminal -> {
+                    reconnectTarget = null
+                    updateSession(core.disconnectLiveShell())
+                  }
+                  HostConnectMode.Codex -> {
+                    codexReconnectTarget = null
+                    updateCodexSnapshot(core.disconnectCodex())
+                  }
+                  HostConnectMode.Claude -> {
+                    claudeReconnectTarget = null
+                    updateClaudeSnapshot(core.disconnectClaude())
+                  }
+                }
+              },
+            ) { Text("Cancel") }
+          },
+        )
+      }
+
+      codexBootstrapError?.let { error ->
+        AlertDialog(
+          onDismissRequest = { codexBootstrapError = null },
+          title = { Text("Could not enable remote Codex") },
+          text = { Text(error) },
+          confirmButton = {
+            TextButton(onClick = { codexBootstrapError = null }) { Text("OK") }
+          },
+        )
+      }
+
+      session.detectedRemotePorts.firstOrNull()?.let { port ->
+        AlertDialog(
+          onDismissRequest = { updateSession(core.dismissDetectedRemotePort(port)) },
+          title = { Text("New remote port detected") },
+          text = {
+            Text(
+              "The remote host started listening on port $port. " +
+                "Shellow has not exposed or forwarded this port.",
+            )
+          },
+          confirmButton = {
+            TextButton(onClick = { updateSession(core.dismissDetectedRemotePort(port)) }) {
+              Text("Got it")
+            }
+          },
+        )
+      }
     }
   }
 }
@@ -1394,6 +1662,7 @@ fun ShellowApp() {
 private fun CodexScreen(
   snapshot: CodexSnapshot,
   onBackToHosts: () -> Unit,
+  onRootBackProgress: (Float, Int) -> Unit,
   onSendMessage: (String) -> Unit,
   onUpdateSettings: (String, String, String, String, String) -> Unit,
   onBrowseDirectory: suspend (String) -> Unit,
@@ -1439,6 +1708,8 @@ private fun CodexScreen(
   var isStartingDraftThread by remember { mutableStateOf(false) }
   var codexActionsExpanded by remember { mutableStateOf(false) }
   var chatAutoFollow by remember { mutableStateOf(true) }
+  var nestedBackProgress by remember { mutableStateOf(0f) }
+  var nestedBackEdge by remember { mutableStateOf(BackEventCompat.EDGE_LEFT) }
   val listState = rememberLazyListState()
   val density = LocalDensity.current
   val imeBottomInset = WindowInsets.ime.getBottom(density)
@@ -1486,15 +1757,19 @@ private fun CodexScreen(
         }
       }
     }
+  val visibleChatMessages =
+    remember(snapshot.messages) {
+      snapshot.messages.filter { it.isVisibleInChat }.distinctBy { it.id }
+    }
 
   val chatScrollSignature =
-    remember(snapshot.messages, snapshot.pendingApprovals, snapshot.turnActive) {
-      codexChatScrollSignature(snapshot.messages, snapshot.pendingApprovals.size, snapshot.turnActive)
+    remember(visibleChatMessages, snapshot.pendingApprovals, snapshot.turnActive) {
+      codexChatScrollSignature(visibleChatMessages, snapshot.pendingApprovals.size, snapshot.turnActive)
     }
 
   val chatItemCount =
     snapshot.pendingApprovals.size +
-      snapshot.messages.count { it.isVisibleInChat } +
+      visibleChatMessages.size +
       1
   val isAtChatBottom by remember(listState, chatItemCount) {
     derivedStateOf {
@@ -1617,7 +1892,26 @@ private fun CodexScreen(
     }
   }
 
-  BackHandler(onBack = handleCodexBack)
+  PredictiveBackHandler { events ->
+    val returnsToHosts = !isShowingThread && homeRoute == CodexHomeRoute.Overview
+    try {
+      events.collect { event ->
+        if (returnsToHosts) {
+          onRootBackProgress(event.progress, event.swipeEdge)
+        } else {
+          nestedBackProgress = event.progress
+          nestedBackEdge = event.swipeEdge
+        }
+      }
+      handleCodexBack()
+    } finally {
+      if (returnsToHosts) {
+        onRootBackProgress(0f, BackEventCompat.EDGE_LEFT)
+      } else {
+        nestedBackProgress = 0f
+      }
+    }
+  }
 
   if (showDirectoryPicker) {
     CodexDirectoryPickerDialog(
@@ -1672,14 +1966,13 @@ private fun CodexScreen(
     CodexSessionSwitcherDialog(
       profileName = snapshot.title,
       threads = codexSessionThreads,
-      selectedThreadId = snapshot.threadId,
+      selectedThreadId = snapshot.threadId.takeIf { isShowingThread },
       pendingApprovalCount = snapshot.pendingApprovals.size,
       loading = snapshot.threads.isLoading,
       errorMessage = snapshot.threads.error,
       onDismiss = { showSessionSwitcher = false },
       onRefresh = {
-        val cwd = selectedProjectPath.ifEmpty { snapshot.cwd.orEmpty() }
-        scope.launch { onListThreads(cwd, "", "", false, false) }
+        scope.launch { onListThreads("", "", "", false, false) }
       },
       onNewConversation = {
         showSessionSwitcher = false
@@ -1761,6 +2054,7 @@ private fun CodexScreen(
     modifier =
       Modifier
         .fillMaxSize()
+        .predictiveBackTransform(nestedBackProgress, nestedBackEdge)
         .background(ShellowColors.TerminalBackground),
   ) {
     Column(
@@ -1777,8 +2071,7 @@ private fun CodexScreen(
             .weight(1f)
             .clickable(enabled = snapshot.status == CodexStatus.Connected) {
               showSessionSwitcher = true
-              val cwd = selectedProjectPath.ifEmpty { snapshot.cwd.orEmpty() }
-              scope.launch { onListThreads(cwd, "", "", false, false) }
+              scope.launch { onListThreads("", "", "", false, false) }
             },
         ) {
           Text(
@@ -1898,6 +2191,8 @@ private fun CodexScreen(
         modifier = Modifier.padding(horizontal = 14.dp),
       )
     }
+
+    CodexUsageSummary(snapshot.usage)
 
     if (!isShowingThread || snapshot.threadId == null) {
       val refreshCurrentHistory = {
@@ -2064,7 +2359,7 @@ private fun CodexScreen(
             )
           }
 
-          items(snapshot.messages.filter { it.isVisibleInChat }, key = { it.id }) { message ->
+          items(visibleChatMessages, key = { it.id }) { message ->
             CodexMessageBubble(message)
           }
 
@@ -2131,6 +2426,147 @@ private fun CodexScreen(
       }
     }
   }
+}
+
+private data class CodexUsageMetricValue(
+  val id: String,
+  val title: String,
+  val value: String,
+  val detail: String,
+  val progress: Float?,
+)
+
+@Composable
+private fun CodexUsageSummary(usage: CodexUsageState) {
+  val metrics = remember(usage) { codexUsageMetrics(usage) }
+  if (metrics.isEmpty()) return
+
+  Row(
+    modifier =
+      Modifier
+        .fillMaxWidth()
+        .horizontalScroll(rememberScrollState())
+        .background(ShellowColors.PanelBackground.copy(alpha = 0.72f))
+        .padding(horizontal = 14.dp, vertical = 8.dp),
+    horizontalArrangement = Arrangement.spacedBy(10.dp),
+  ) {
+    metrics.forEach { metric ->
+      Column(
+        modifier = Modifier.width(116.dp).semantics(mergeDescendants = true) {},
+        verticalArrangement = Arrangement.spacedBy(3.dp),
+      ) {
+        Text(
+          metric.title,
+          color = ShellowColors.TerminalMuted,
+          style = MaterialTheme.typography.labelSmall,
+          maxLines = 1,
+        )
+        Text(
+          metric.value,
+          color = ShellowColors.TerminalText,
+          style = MaterialTheme.typography.labelMedium,
+          fontWeight = FontWeight.SemiBold,
+          maxLines = 1,
+        )
+        metric.progress?.let { progress ->
+          LinearProgressIndicator(
+            progress = { progress },
+            modifier = Modifier.width(104.dp).height(3.dp),
+            color = if (progress >= 0.9f) ShellowColors.Warning else ShellowColors.Accent,
+            trackColor = ShellowColors.KeyBackground,
+          )
+        }
+        Text(
+          metric.detail,
+          color = ShellowColors.TerminalMuted,
+          style = MaterialTheme.typography.labelSmall,
+          maxLines = 1,
+          overflow = TextOverflow.Ellipsis,
+        )
+      }
+    }
+  }
+}
+
+private fun codexUsageMetrics(usage: CodexUsageState): List<CodexUsageMetricValue> =
+  buildList {
+    usage.thread?.let { thread ->
+      val used = thread.last.totalTokens.coerceAtLeast(0)
+      val window = thread.modelContextWindow?.takeIf { it > 0 }
+      val progress = window?.let { (used.toDouble() / it.toDouble()).coerceIn(0.0, 1.0).toFloat() }
+      add(
+        CodexUsageMetricValue(
+          id = "context",
+          title = "Context",
+          value = window?.let { "${compactCodexCount(used)} / ${compactCodexCount(it)}" } ?: compactCodexCount(used),
+          detail = progress?.let { "${(it * 100).roundToInt()}% used" } ?: "Latest turn",
+          progress = progress,
+        ),
+      )
+    }
+
+    usage.rateLimits?.let { limits ->
+      limits.primary?.let { add(codexRateLimitMetric(it, "Primary limit", "primary")) }
+      limits.secondary?.let { add(codexRateLimitMetric(it, "Secondary limit", "secondary")) }
+      limits.credits?.takeIf { it.unlimited || it.balance != null }?.let { credits ->
+        add(
+          CodexUsageMetricValue(
+            id = "credits",
+            title = "Credits",
+            value = if (credits.unlimited) "Unlimited" else credits.balance.orEmpty().ifEmpty { "—" },
+            detail = if (credits.hasCredits || credits.unlimited) "Available" else "Depleted",
+            progress = null,
+          ),
+        )
+      }
+      limits.individualLimit?.let { spend ->
+        add(
+          CodexUsageMetricValue(
+            id = "spend",
+            title = "Spend limit",
+            value = "${spend.used} / ${spend.limit}",
+            detail = codexResetLabel(spend.resetsAt),
+            progress = ((100 - spend.remainingPercent.coerceIn(0, 100)) / 100f),
+          ),
+        )
+      }
+    }
+  }
+
+private fun codexRateLimitMetric(
+  window: CodexRateLimitWindow,
+  fallbackTitle: String,
+  id: String,
+): CodexUsageMetricValue {
+  val used = window.usedPercent.coerceIn(0, 100)
+  return CodexUsageMetricValue(
+    id = id,
+    title = window.windowDurationMins?.let(::codexLimitTitle) ?: fallbackTitle,
+    value = "${100 - used}% left",
+    detail = window.resetsAt?.let(::codexResetLabel) ?: "Reset time unavailable",
+    progress = used / 100f,
+  )
+}
+
+private fun codexLimitTitle(minutes: Long): String =
+  when {
+    minutes == 300L -> "5h limit"
+    minutes == 10_080L -> "Weekly limit"
+    minutes >= 1_440L && minutes % 1_440L == 0L -> "${minutes / 1_440L}d limit"
+    minutes >= 60L && minutes % 60L == 0L -> "${minutes / 60L}h limit"
+    else -> "${minutes}m limit"
+  }
+
+private fun compactCodexCount(value: Long): String =
+  when {
+    value >= 1_000_000L -> String.format(Locale.getDefault(), "%.1fM", value / 1_000_000.0)
+    value >= 1_000L -> String.format(Locale.getDefault(), "%.1fK", value / 1_000.0)
+    else -> value.toString()
+  }
+
+private fun codexResetLabel(timestampSeconds: Long): String {
+  val formatted = SimpleDateFormat("MMM d, HH:mm", Locale.getDefault()).format(Date(timestampSeconds * 1_000))
+  return "Resets $formatted"
 }
 
 private enum class CodexHomeRoute {
@@ -2495,6 +2931,11 @@ private fun CodexDirectoryPickerDialog(
   onDismiss: () -> Unit,
 ) {
   val currentPath = snapshot.directory.path?.trim().orEmpty().ifBlank { selectedPath.trim() }
+  var searchQuery by remember { mutableStateOf("") }
+  var showHidden by remember { mutableStateOf(false) }
+  val quickPaths = remember(snapshot.projects.favorites, snapshot.projects.recent) {
+    (snapshot.projects.favorites + snapshot.projects.recent).distinct().take(5)
+  }
 
   AlertDialog(
     onDismissRequest = onDismiss,
@@ -2517,9 +2958,35 @@ private fun CodexDirectoryPickerDialog(
             overflow = TextOverflow.Ellipsis,
           )
         }
+        if (quickPaths.isNotEmpty()) {
+          Row(
+            modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+          ) {
+            quickPaths.forEach { path ->
+              TextButton(onClick = { onOpenDirectory(path) }) {
+                Text(lastPathComponent(path), maxLines = 1)
+              }
+            }
+          }
+        }
+        CodexInlineTextField(
+          value = searchQuery,
+          onValueChange = { searchQuery = it },
+          placeholder = "Search folders",
+          imeAction = ImeAction.Search,
+          onSubmit = {},
+          modifier = Modifier.fillMaxWidth(),
+        )
+        Row(verticalAlignment = Alignment.CenterVertically) {
+          Checkbox(checked = showHidden, onCheckedChange = { showHidden = it })
+          Text("Show hidden folders", style = MaterialTheme.typography.bodySmall)
+        }
         CodexDirectoryList(
           snapshot = snapshot,
           onOpenDirectory = onOpenDirectory,
+          searchQuery = searchQuery,
+          showHidden = showHidden,
           modifier = Modifier.fillMaxWidth().heightIn(min = 180.dp, max = 420.dp),
         )
       }
@@ -2846,7 +3313,9 @@ private fun CodexInlineStatusRow(
 @Composable
 private fun CodexTurnStatusRow(onStop: () -> Unit) {
   Row(
-    modifier = Modifier.fillMaxWidth().padding(horizontal = 4.dp, vertical = 1.dp),
+    modifier = Modifier.fillMaxWidth().padding(horizontal = 4.dp, vertical = 1.dp).semantics {
+      liveRegion = LiveRegionMode.Polite
+    },
     horizontalArrangement = Arrangement.spacedBy(6.dp),
     verticalAlignment = Alignment.CenterVertically,
   ) {
@@ -2861,17 +3330,9 @@ private fun CodexTurnStatusRow(onStop: () -> Unit) {
       modifier = Modifier.weight(1f),
       style = MaterialTheme.typography.labelSmall,
     )
-    Text(
-      "Stop",
-      color = ShellowColors.Warning,
-      style = MaterialTheme.typography.labelSmall,
-      fontWeight = FontWeight.SemiBold,
-      modifier =
-        Modifier
-          .clickable(onClick = onStop)
-          .padding(horizontal = 8.dp, vertical = 2.dp)
-          .semantics { contentDescription = "Interrupt Codex Turn" },
-    )
+    TextButton(onClick = onStop, modifier = Modifier.semantics { contentDescription = "Interrupt Codex Turn" }) {
+      Text("Stop", color = ShellowColors.Warning, style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.SemiBold)
+    }
   }
 }
 
@@ -3182,6 +3643,8 @@ private fun CodexProjectChip(
 private fun CodexDirectoryList(
   snapshot: CodexSnapshot,
   onOpenDirectory: (String) -> Unit,
+  searchQuery: String,
+  showHidden: Boolean,
   modifier: Modifier = Modifier,
 ) {
   LazyColumn(
@@ -3203,7 +3666,12 @@ private fun CodexDirectoryList(
         CodexDirectoryRow("..", parent) { onOpenDirectory(parent) }
       }
     }
-    val folders = snapshot.directory.entries.filter { it.isDirectory }
+    val query = searchQuery.trim()
+    val folders = snapshot.directory.entries.filter { entry ->
+      entry.isDirectory &&
+        (showHidden || !entry.name.startsWith(".")) &&
+        (query.isEmpty() || entry.name.contains(query, ignoreCase = true))
+    }
     items(folders, key = { it.path }) { entry ->
       CodexDirectoryRow(entry.name, entry.path) { onOpenDirectory(entry.path) }
     }
@@ -3637,8 +4105,14 @@ private fun CodexSettingsDialog(
             modifier = Modifier.padding(bottom = 4.dp),
           )
         }
-        CodexOptionRow("Approval", approvalPolicy, listOf("" to "Default", "untrusted" to "Untrusted", "on-failure" to "On failure", "on-request" to "On request", "never" to "Never"), onApprovalPolicyChange)
+        CodexOptionRow("Approval", approvalPolicy, listOf("" to "Default", "untrusted" to "Untrusted", "on-request" to "On request", "never" to "Never"), onApprovalPolicyChange)
         CodexOptionRow("Sandbox", sandbox, listOf("" to "Default", "read-only" to "Read only", "workspace-write" to "Workspace write", "danger-full-access" to "Danger full access"), onSandboxChange)
+        Text(
+          "Model, reasoning, speed, and approval apply to the next turn. Sandbox applies when a thread starts or resumes.",
+          color = ShellowColors.TerminalMuted,
+          style = MaterialTheme.typography.labelSmall,
+          modifier = Modifier.padding(top = 8.dp),
+        )
       }
     },
     confirmButton = { TextButton(onClick = onApply, enabled = canApply) { Text("Apply") } },
@@ -3836,6 +4310,18 @@ private fun CodexMessageBubble(message: CodexMessage) {
       Text(label, color = ShellowColors.TerminalMuted, style = MaterialTheme.typography.labelSmall)
     }
     CodexMarkdownContent(message)
+    if (message.role == CodexMessageRole.User) {
+      when (message.delivery) {
+        CodexMessageDelivery.Queued -> Text("Queued…", color = ShellowColors.TerminalMuted, style = MaterialTheme.typography.labelSmall)
+        CodexMessageDelivery.Sent -> Text("Sending…", color = ShellowColors.TerminalMuted, style = MaterialTheme.typography.labelSmall)
+        CodexMessageDelivery.Failed -> Text(
+          message.detail?.let { "Failed · $it" } ?: "Failed to send",
+          color = MaterialTheme.colorScheme.error,
+          style = MaterialTheme.typography.labelSmall,
+        )
+        CodexMessageDelivery.Committed, null -> Unit
+      }
+    }
   }
 }
 
@@ -3860,6 +4346,12 @@ private fun CodexCompactMessageRow(message: CodexMessage) {
       Modifier
         .fillMaxWidth()
         .clickable(enabled = hasDetails) { expanded = !expanded }
+        .semantics {
+          if (hasDetails) {
+            role = Role.Button
+            stateDescription = if (expanded) "Expanded" else "Collapsed"
+          }
+        }
         .padding(horizontal = 4.dp, vertical = if (isRoutineCommandCompletion) 3.dp else 6.dp),
     verticalArrangement = Arrangement.spacedBy(if (isRoutineCommandCompletion) 4.dp else 5.dp),
   ) {
@@ -3935,7 +4427,7 @@ private fun CodexCompactMessageRow(message: CodexMessage) {
 }
 
 private val CodexMessage.hidesCompactSecondaryText: Boolean
-  get() = title?.trim() == "Command completed"
+  get() = title?.trim()?.startsWith("Completed ·") == true
 
 private fun normalizedCompactStatusText(text: String): String {
   val trimmed = text.trim()
@@ -4256,14 +4748,14 @@ private fun CodexApprovalCard(
 ) {
   var selections by remember(approval.requestId) { mutableStateOf<Map<String, Set<String>>>(emptyMap()) }
   var customAnswers by remember(approval.requestId) { mutableStateOf<Map<String, String>>(emptyMap()) }
+  var toolResult by remember(approval.requestId) { mutableStateOf("") }
 
-  fun answerFor(question: xyz.zinglix.shellow.core.CodexUserQuestion): String? {
-    val custom = customAnswers[question.question].orEmpty().trim()
-    if (custom.isNotEmpty()) return custom
-    val selected = selections[question.question].orEmpty()
-    return question.options.map { it.label }.filter { it in selected }.takeIf { it.isNotEmpty() }?.joinToString(", ")
+  fun answerFor(question: xyz.zinglix.shellow.core.CodexUserInputQuestion): List<String>? {
+    val custom = customAnswers[question.id].orEmpty().trim()
+    if (custom.isNotEmpty()) return listOf(custom)
+    val selected = selections[question.id].orEmpty()
+    return question.options.map { it.label }.filter { it in selected }.takeIf { it.isNotEmpty() }
   }
-
   Row(
     modifier =
       Modifier
@@ -4308,7 +4800,7 @@ private fun CodexApprovalCard(
             fontWeight = FontWeight.Medium,
           )
           question.options.forEach { option ->
-            val selected = option.label in selections[question.question].orEmpty()
+            val selected = option.label in selections[question.id].orEmpty()
             Row(
               modifier =
                 Modifier
@@ -4318,15 +4810,15 @@ private fun CodexApprovalCard(
                     RoundedCornerShape(7.dp),
                   )
                   .clickable {
-                    val current = selections[question.question].orEmpty()
+                    val current = selections[question.id].orEmpty()
                     val next =
                       if (question.multiSelect) {
                         if (option.label in current) current - option.label else current + option.label
                       } else {
                         setOf(option.label)
                       }
-                    selections = selections + (question.question to next)
-                    customAnswers = customAnswers + (question.question to "")
+                    selections = selections + (question.id to next)
+                    customAnswers = customAnswers + (question.id to "")
                   }
                   .padding(horizontal = 10.dp, vertical = 8.dp),
               horizontalArrangement = Arrangement.spacedBy(9.dp),
@@ -4356,14 +4848,17 @@ private fun CodexApprovalCard(
               )
             }
           }
-          OutlinedTextField(
-            value = customAnswers[question.question].orEmpty(),
-            onValueChange = { value -> customAnswers = customAnswers + (question.question to value) },
-            modifier = Modifier.fillMaxWidth(),
-            label = { Text("Other answer") },
-            minLines = 1,
-            maxLines = 3,
-          )
+          if (question.options.isEmpty() || question.isOther) {
+            OutlinedTextField(
+              value = customAnswers[question.id].orEmpty(),
+              onValueChange = { value -> customAnswers = customAnswers + (question.id to value) },
+              modifier = Modifier.fillMaxWidth(),
+              label = { Text(if (question.isSecret) "Private answer" else "Other answer") },
+              visualTransformation = if (question.isSecret) PasswordVisualTransformation() else androidx.compose.ui.text.input.VisualTransformation.None,
+              minLines = 1,
+              maxLines = 3,
+            )
+          }
         }
       }
       approval.cwd?.let {
@@ -4375,40 +4870,114 @@ private fun CodexApprovalCard(
           overflow = TextOverflow.Ellipsis,
         )
       }
-      if (approval.questions.isEmpty()) Row(
-        modifier = Modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.spacedBy(2.dp),
-        verticalAlignment = Alignment.CenterVertically,
-      ) {
-        TextButton(onClick = { onDecision("accept") }) {
-          Text("Allow", fontWeight = FontWeight.SemiBold)
+      when (approval.kind) {
+        CodexApprovalKind.UserInput -> {
+          Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+            TextButton(
+              enabled = approval.questions.all { answerFor(it) != null },
+              onClick = {
+                val payload = JSONObject()
+                approval.questions.forEach { question ->
+                  val values = JSONArray()
+                  answerFor(question).orEmpty().forEach(values::put)
+                  payload.put(question.id, values)
+                }
+                onDecision(payload.toString())
+              },
+            ) { Text("Submit", fontWeight = FontWeight.SemiBold) }
+          }
         }
-        TextButton(onClick = { onDecision("acceptForSession") }) {
-          Text("Session")
+        CodexApprovalKind.Permissions -> {
+          approval.permissions?.let {
+            Text(
+              it,
+              style = MaterialTheme.typography.labelSmall.copy(fontFamily = FontFamily.Monospace),
+              color = ShellowColors.TerminalMuted,
+            )
+          }
+          CodexApprovalActions(
+            showSession = "acceptForSession" in approval.availableDecisions,
+            allowLabel = "Allow for this turn",
+            onDecision = onDecision,
+          )
         }
-        Spacer(modifier = Modifier.weight(1f))
-        TextButton(onClick = { onDecision("decline") }) {
-          Text("Deny", color = MaterialTheme.colorScheme.error)
+        CodexApprovalKind.Elicitation -> {
+          approval.permissions?.let {
+            Text(
+              it,
+              style = MaterialTheme.typography.labelSmall.copy(fontFamily = FontFamily.Monospace),
+              color = ShellowColors.TerminalMuted,
+            )
+          }
+          OutlinedTextField(
+            value = toolResult,
+            onValueChange = { toolResult = it },
+            modifier = Modifier.fillMaxWidth(),
+            label = { Text("JSON response") },
+          )
+          Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+            TextButton(onClick = { onDecision("decline") }) { Text("Decline") }
+            TextButton(enabled = toolResult.isNotBlank(), onClick = { onDecision(toolResult) }) {
+              Text("Submit")
+            }
+          }
         }
-      } else Row(
-        modifier = Modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.spacedBy(8.dp),
-        verticalAlignment = Alignment.CenterVertically,
-      ) {
-        TextButton(onClick = { onDecision("decline") }) {
-          Text("Cancel", color = MaterialTheme.colorScheme.error)
+        CodexApprovalKind.Tool -> {
+          OutlinedTextField(
+            value = toolResult,
+            onValueChange = { toolResult = it },
+            modifier = Modifier.fillMaxWidth(),
+            label = { Text("Tool result") },
+          )
+          Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+            TextButton(onClick = { onDecision("decline") }) { Text("Decline") }
+            TextButton(
+              enabled = toolResult.isNotBlank(),
+              onClick = {
+                onDecision(
+                  JSONObject()
+                    .put("success", true)
+                    .put("contentItems", JSONArray().put(JSONObject().put("type", "inputText").put("text", toolResult)))
+                    .toString(),
+                )
+              },
+            ) { Text("Submit") }
+          }
         }
-        Spacer(modifier = Modifier.weight(1f))
-        Button(
-          enabled = approval.questions.all { answerFor(it) != null },
-          onClick = {
-            val answers = approval.questions.associate { it.question to answerFor(it).orEmpty() }
-            onDecision(JSONObject().put("answers", JSONObject(answers)).toString())
-          },
-        ) {
-          Text("Submit")
+        CodexApprovalKind.Command, CodexApprovalKind.FileChange -> {
+          CodexApprovalActions(
+            showSession = "acceptForSession" in approval.availableDecisions,
+            allowLabel = if (approval.kind == CodexApprovalKind.Command) "Run command" else "Apply changes",
+            onDecision = onDecision,
+          )
         }
       }
+    }
+  }
+}
+
+@Composable
+private fun CodexApprovalActions(
+  showSession: Boolean,
+  allowLabel: String,
+  onDecision: (String) -> Unit,
+) {
+  Row(
+    modifier = Modifier.fillMaxWidth(),
+    horizontalArrangement = Arrangement.spacedBy(2.dp),
+    verticalAlignment = Alignment.CenterVertically,
+  ) {
+    TextButton(onClick = { onDecision("accept") }) {
+      Text(allowLabel, fontWeight = FontWeight.SemiBold)
+    }
+    if (showSession) {
+      TextButton(onClick = { onDecision("acceptForSession") }) {
+        Text("Allow for session")
+      }
+    }
+    Spacer(modifier = Modifier.weight(1f))
+    TextButton(onClick = { onDecision("decline") }) {
+      Text("Deny", color = MaterialTheme.colorScheme.error)
     }
   }
 }
@@ -4434,13 +5003,13 @@ private fun TerminalScreen(
 ) {
   var ctrlArmed by remember { mutableStateOf(false) }
   var altArmed by remember { mutableStateOf(false) }
-  var reportedCols by remember { mutableStateOf(session.terminalCols) }
-  var reportedRows by remember { mutableStateOf(session.terminalRows) }
+  var reportedCols by remember { mutableIntStateOf(session.terminalCols) }
+  var reportedRows by remember { mutableIntStateOf(session.terminalRows) }
   var selection by remember { mutableStateOf<TerminalSelection?>(null) }
   var pendingPaste by remember { mutableStateOf<String?>(null) }
   var pendingRemoteClipboard by remember { mutableStateOf<RemoteClipboardRequest?>(null) }
   var transcriptSaveResult by remember { mutableStateOf<TranscriptSaveResult?>(null) }
-  var handledClipboardSequence by remember { mutableStateOf(0L) }
+  var handledClipboardSequence by remember { mutableLongStateOf(0L) }
   var searchVisible by remember { mutableStateOf(false) }
   var toolsExpanded by remember { mutableStateOf(false) }
   var persistentToolsVisible by remember { mutableStateOf(false) }
@@ -4452,9 +5021,9 @@ private fun TerminalScreen(
   var refreshingPersistentSessions by remember { mutableStateOf(false) }
   var pendingDestructiveAction by remember { mutableStateOf<TerminalDestructiveAction?>(null) }
   var searchQuery by remember { mutableStateOf("") }
-  var searchIndex by remember { mutableStateOf(0) }
-  var viewportWidthPx by remember { mutableStateOf(0) }
-  var viewportHeightPx by remember { mutableStateOf(0) }
+  var searchIndex by remember { mutableIntStateOf(0) }
+  var viewportWidthPx by remember { mutableIntStateOf(0) }
+  var viewportHeightPx by remember { mutableIntStateOf(0) }
   var rendererSurfaceReady by remember { mutableStateOf(false) }
   var terminalInputRevision by remember { mutableStateOf(0) }
   var directInputValue by remember {
@@ -4471,7 +5040,7 @@ private fun TerminalScreen(
   val terminalListState = rememberLazyListState()
   val terminalScope = rememberCoroutineScope()
   val keyboardOffsetPx = WindowInsets.ime.getBottom(density)
-  var layoutKeyboardOffsetPx by remember { mutableStateOf(keyboardOffsetPx) }
+  var layoutKeyboardOffsetPx by remember { mutableIntStateOf(keyboardOffsetPx) }
   val keyboardVisualDeltaDp = with(density) { (keyboardOffsetPx - layoutKeyboardOffsetPx).toDp() }
   val keyboardLayoutOffsetDp = with(density) { layoutKeyboardOffsetPx.toDp() }
   val terminalLiftDp = with(density) { (keyboardOffsetPx - layoutKeyboardOffsetPx).coerceAtLeast(0).toDp() }
@@ -4635,7 +5204,7 @@ private fun TerminalScreen(
       return
     }
 
-    if (value.isRiskyTerminalPaste()) {
+    if (displaySettings.confirmPaste && value.isRiskyTerminalPaste()) {
       pendingPaste = value
       return
     }
@@ -4987,6 +5556,7 @@ private fun TerminalScreen(
         )
       }
     }
+    if (displaySettings.showKeyboardToolbar) {
     Row(
       modifier =
         Modifier
@@ -5154,6 +5724,7 @@ private fun TerminalScreen(
       TerminalFunctionKey.entries.forEach { key ->
         TerminalKey(key.label) { sendToolbarInput(key.sequence) }
       }
+    }
     }
     Spacer(Modifier.height(6.dp + keyboardLayoutOffsetDp).fillMaxWidth().background(ShellowColors.PanelBackground))
   }
@@ -5559,8 +6130,8 @@ private fun TerminalCompactButton(
   Box(
     modifier =
       Modifier
-        .width(width)
-        .height(34.dp)
+        .width(width.coerceAtLeast(48.dp))
+        .height(48.dp)
         .background(
           if (active) ShellowColors.Accent else ShellowColors.KeyBackground,
           RoundedCornerShape(8.dp),
@@ -5769,7 +6340,7 @@ private fun AndroidRendererSurfaceHost(
     }
     val presented = onRenderFrame(width, height, viewportFirstRow, viewportRowCount)
     if (presented) {
-      Log.i(RendererLogTag, "Shellow renderer Android terminal surface frame ${width}x$height")
+      if (BuildConfig.DEBUG) Log.i(RendererLogTag, "Shellow renderer Android terminal surface frame ${width}x$height")
     }
     onPresentationChange(presented)
     return presented
@@ -5778,7 +6349,7 @@ private fun AndroidRendererSurfaceHost(
   DisposableEffect(Unit) {
     onDispose {
       onPresentationChange(false)
-      Log.i(RendererLogTag, "Shellow renderer Android surface detach ${onDetachSurface()}")
+      if (BuildConfig.DEBUG) Log.i(RendererLogTag, "Shellow renderer Android surface detach ${onDetachSurface()}")
     }
   }
 
@@ -5812,13 +6383,13 @@ private fun AndroidRendererSurfaceHost(
               }
 
               val attachResponse = onAttachSurface(holder.surface, width, height)
-              Log.i(RendererLogTag, "Shellow renderer Android surface attach $attachResponse")
+              if (BuildConfig.DEBUG) Log.i(RendererLogTag, "Shellow renderer Android surface attach $attachResponse")
               renderIfReady(this@apply)
             }
 
             override fun surfaceDestroyed(holder: SurfaceHolder) {
               onPresentationChange(false)
-              Log.i(RendererLogTag, "Shellow renderer Android surface detach ${onDetachSurface()}")
+              if (BuildConfig.DEBUG) Log.i(RendererLogTag, "Shellow renderer Android surface detach ${onDetachSurface()}")
             }
           },
         )
@@ -6141,6 +6712,8 @@ private fun HostsScreen(
   onOpenSettings: () -> Unit,
   onAddProfile: (HostProfile) -> Unit,
   onUpdateProfile: (HostProfile) -> Unit,
+  onDeleteProfile: (HostProfile) -> Unit,
+  onProbeCapabilities: suspend (HostProfile) -> RemoteHostProbeOutcome,
   onAddKey: (SSHKeyCredential) -> Unit,
   onDeleteKey: (SSHKeyCredential) -> Unit,
   onConnectTerminal: (HostProfile) -> Unit,
@@ -6268,6 +6841,11 @@ private fun HostsScreen(
         onUpdateProfile(updated)
         selectedProfile = null
       },
+      onDeleteProfile = {
+        selectedProfile = null
+        onDeleteProfile(profile)
+      },
+      onProbeCapabilities = onProbeCapabilities,
       onDismiss = { selectedProfile = null },
     )
   }
@@ -6386,6 +6964,8 @@ private fun HostConnectionDialog(
   profile: HostProfile,
   sshKeys: List<SSHKeyCredential>,
   onSaveProfile: (HostProfile) -> Unit,
+  onDeleteProfile: () -> Unit,
+  onProbeCapabilities: suspend (HostProfile) -> RemoteHostProbeOutcome,
   onDismiss: () -> Unit,
 ) {
   var selectedTab by remember(profile.id) { mutableStateOf(ProfileEditorTab.Connection) }
@@ -6411,6 +6991,11 @@ private fun HostConnectionDialog(
   val normalizedUser = username.trim().ifEmpty { "root" }
   val generatedName = "$normalizedUser@$normalizedHost:${parsedPort ?: 22}"
   val normalizedName = name.trim().ifEmpty { generatedName }
+  var detectedReport by remember(profile.id) { mutableStateOf(profile.capabilityReport) }
+  var probeInProgress by remember(profile.id) { mutableStateOf(false) }
+  var probeError by remember(profile.id) { mutableStateOf<String?>(null) }
+  var confirmingDelete by remember(profile.id) { mutableStateOf(false) }
+  val scope = rememberCoroutineScope()
   val validatedPersistentName = PersistentTerminalConfiguration.validatedName(persistentName)
   val endpointChanged = normalizedHost != profile.host || parsedPort != profile.port || normalizedUser != profile.username
   val workingProfile =
@@ -6608,6 +7193,24 @@ private fun HostConnectionDialog(
             style = MaterialTheme.typography.labelSmall,
           )
         }
+        RemoteCapabilityCard(
+          report = detectedReport,
+          inProgress = probeInProgress,
+          errorMessage = probeError,
+          onRefresh = {
+            scope.launch {
+              probeInProgress = true
+              probeError = null
+              val outcome = onProbeCapabilities(workingProfile)
+              detectedReport = outcome.report
+              probeError = outcome.errorMessage
+              probeInProgress = false
+            }
+          },
+        )
+        TextButton(onClick = { confirmingDelete = true }) {
+          Text("Delete profile", color = MaterialTheme.colorScheme.error)
+        }
       }
     },
     confirmButton = {
@@ -6615,6 +7218,21 @@ private fun HostConnectionDialog(
     },
     dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
   )
+  if (confirmingDelete) {
+    AlertDialog(
+      onDismissRequest = { confirmingDelete = false },
+      title = { Text("Delete this profile?") },
+      text = { Text("The saved profile and its profile-scoped credentials will be removed from this device.") },
+      confirmButton = {
+        TextButton(onClick = onDeleteProfile) {
+          Text("Delete", color = MaterialTheme.colorScheme.error)
+        }
+      },
+      dismissButton = {
+        TextButton(onClick = { confirmingDelete = false }) { Text("Cancel") }
+      },
+    )
+  }
 }
 
 private enum class ProfileEditorTab(val title: String) {
@@ -7000,7 +7618,7 @@ private fun PasswordPromptDialog(
   onConnect: (String) -> Unit,
 ) {
   var password by remember(request.profile.id, request.mode) { mutableStateOf("") }
-  var rememberPassword by remember(request.profile.id, request.mode) { mutableStateOf(true) }
+  var rememberPassword by remember(request.profile.id, request.mode) { mutableStateOf(false) }
   var status by remember(request.profile.id, request.mode) { mutableStateOf<String?>(null) }
 
   AlertDialog(
@@ -7085,6 +7703,7 @@ private fun SettingsScreen(
     Modifier
       .fillMaxSize()
       .background(ShellowColors.TerminalBackground)
+      .verticalScroll(rememberScrollState())
       .padding(16.dp),
     verticalArrangement = Arrangement.spacedBy(12.dp),
   ) {
@@ -7132,11 +7751,47 @@ private fun SettingsScreen(
       PanelDivider()
       SettingsRow("GPU", report.rendererBackend)
     }
+    SettingsSectionLabel("Input")
+    SettingsGroup {
+      SettingsToggleRow(
+        title = "Keyboard Toolbar",
+        checked = displaySettings.showKeyboardToolbar,
+        onCheckedChange = { onDisplaySettingsChange(displaySettings.copy(showKeyboardToolbar = it)) },
+      )
+      PanelDivider()
+      SettingsToggleRow(
+        title = "Confirm Risky Paste",
+        checked = displaySettings.confirmPaste,
+        onCheckedChange = { onDisplaySettingsChange(displaySettings.copy(confirmPaste = it)) },
+      )
+    }
+    SettingsSectionLabel("Transport")
+    SettingsGroup {
+      DisplaySlider(
+        title = "Keep Alive",
+        valueLabel = "${displaySettings.keepAliveSeconds.roundToInt()} s",
+        value = displaySettings.keepAliveSeconds,
+        valueRange = 10f..120f,
+        onValueChange = {
+          onDisplaySettingsChange(displaySettings.copy(keepAliveSeconds = (it / 5).roundToInt() * 5f))
+        },
+      )
+      PanelDivider()
+      SettingsToggleRow(
+        title = "Detect Remote Ports",
+        subtitle = "Opens a second SSH channel and checks listening TCP ports every two seconds.",
+        checked = displaySettings.detectRemotePorts,
+        onCheckedChange = { onDisplaySettingsChange(displaySettings.copy(detectRemotePorts = it)) },
+      )
+    }
     SettingsSectionLabel("Build")
     SettingsGroup {
       SettingsRow("Version", "${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE})")
       PanelDivider()
       SettingsRow("Commit", BuildConfig.GIT_COMMIT)
+    }
+    TextButton(onClick = { onDisplaySettingsChange(AppDisplaySettings()) }) {
+      Text("Restore defaults", color = MaterialTheme.colorScheme.error)
     }
   }
 }
@@ -7280,6 +7935,31 @@ private fun SettingsRow(label: String, value: String) {
 }
 
 @Composable
+private fun SettingsToggleRow(
+  title: String,
+  checked: Boolean,
+  onCheckedChange: (Boolean) -> Unit,
+  subtitle: String? = null,
+) {
+  Row(
+    modifier =
+      Modifier
+        .fillMaxWidth()
+        .clickable { onCheckedChange(!checked) }
+        .padding(horizontal = 14.dp, vertical = 8.dp),
+    verticalAlignment = Alignment.CenterVertically,
+  ) {
+    Column(Modifier.weight(1f)) {
+      Text(title, color = ShellowColors.TerminalText)
+      subtitle?.let {
+        Text(it, color = ShellowColors.TerminalMuted, style = MaterialTheme.typography.bodySmall)
+      }
+    }
+    Checkbox(checked = checked, onCheckedChange = onCheckedChange)
+  }
+}
+
+@Composable
 private fun SettingsValueRow(
   title: String,
   value: String,
@@ -7312,6 +7992,10 @@ private const val DisplayFontSizeMax = 22f
 private const val DisplayLineHeightKey = "lineHeightScale.v1"
 private const val DisplayColorSchemeKey = "colorScheme.v1"
 private const val DisplayTerminalThemeKey = "terminalTheme.v1"
+private const val DisplayConfirmPasteKey = "confirmPaste.v1"
+private const val DisplayKeyboardToolbarKey = "keyboardToolbar.v1"
+private const val DisplayKeepAliveKey = "keepAliveSeconds.v1"
+private const val DisplayDetectRemotePortsKey = "detectRemotePorts.v1"
 
 private fun loadDisplaySettings(context: Context): AppDisplaySettings {
   val preferences = context.getSharedPreferences(DisplaySettingsPrefs, Context.MODE_PRIVATE)
@@ -7320,6 +8004,10 @@ private fun loadDisplaySettings(context: Context): AppDisplaySettings {
     lineHeightScale = preferences.getFloat(DisplayLineHeightKey, 1f).coerceIn(0.9f, 1.35f),
     colorScheme = ShellowColorScheme.fromWire(preferences.getString(DisplayColorSchemeKey, ShellowColorScheme.System.wire)),
     terminalTheme = TerminalThemeSelection.fromWire(preferences.getString(DisplayTerminalThemeKey, TerminalThemeSelection.ShellowDark.wire)),
+    confirmPaste = preferences.getBoolean(DisplayConfirmPasteKey, true),
+    showKeyboardToolbar = preferences.getBoolean(DisplayKeyboardToolbarKey, true),
+    keepAliveSeconds = preferences.getFloat(DisplayKeepAliveKey, 30f).coerceIn(10f, 120f),
+    detectRemotePorts = preferences.getBoolean(DisplayDetectRemotePortsKey, false),
   )
 }
 
@@ -7327,14 +8015,16 @@ private fun saveDisplaySettings(
   context: Context,
   settings: AppDisplaySettings,
 ) {
-  context
-    .getSharedPreferences(DisplaySettingsPrefs, Context.MODE_PRIVATE)
-    .edit()
-    .putFloat(DisplayFontSizeKey, settings.fontSizeSp.coerceIn(DisplayFontSizeMin, DisplayFontSizeMax))
-    .putFloat(DisplayLineHeightKey, settings.lineHeightScale.coerceIn(0.9f, 1.35f))
-    .putString(DisplayColorSchemeKey, settings.colorScheme.wire)
-    .putString(DisplayTerminalThemeKey, settings.terminalTheme.wire)
-    .apply()
+  context.getSharedPreferences(DisplaySettingsPrefs, Context.MODE_PRIVATE).edit {
+    putFloat(DisplayFontSizeKey, settings.fontSizeSp.coerceIn(DisplayFontSizeMin, DisplayFontSizeMax))
+    putFloat(DisplayLineHeightKey, settings.lineHeightScale.coerceIn(0.9f, 1.35f))
+    putString(DisplayColorSchemeKey, settings.colorScheme.wire)
+    putString(DisplayTerminalThemeKey, settings.terminalTheme.wire)
+    putBoolean(DisplayConfirmPasteKey, settings.confirmPaste)
+    putBoolean(DisplayKeyboardToolbarKey, settings.showKeyboardToolbar)
+    putFloat(DisplayKeepAliveKey, settings.keepAliveSeconds.coerceIn(10f, 120f))
+    putBoolean(DisplayDetectRemotePortsKey, settings.detectRemotePorts)
+  }
 }
 
 private const val HostProfilesPrefs = "shellow.hostProfiles"
@@ -7342,29 +8032,7 @@ private const val HostProfilesKey = "profiles.v1"
 private const val SSHKeysPrefs = "shellow.sshKeys"
 private const val SSHKeysKey = "keys.v1"
 
-private fun defaultHostProfiles(): List<HostProfile> =
-  listOf(
-    HostProfile(
-      "Staging",
-      "staging.example.com",
-      22,
-      "deploy",
-      AuthenticationKind.PrivateKey,
-      launchKind = ProfileLaunchKind.Terminal,
-      trustedHostKeySha256 = "SHA256:sample-staging-host-key",
-      id = "sample-staging",
-    ),
-    HostProfile("Build Agent", "build.example.com", 2222, "runner", AuthenticationKind.Password, id = "sample-build-agent"),
-    HostProfile(
-      "Workshop",
-      "shell.example.com",
-      22,
-      "ops",
-      AuthenticationKind.Password,
-      launchKind = ProfileLaunchKind.Codex,
-      id = "sample-workshop",
-    ),
-  )
+private fun defaultHostProfiles(): List<HostProfile> = emptyList()
 
 private fun loadHostProfiles(context: Context): List<HostProfile> {
   val stored =
@@ -7377,7 +8045,6 @@ private fun loadHostProfiles(context: Context): List<HostProfile> {
     val values = JSONArray(stored)
     List(values.length()) { index -> HostProfile.fromJson(values.getJSONObject(index)) }
       .filter { it.name.isNotBlank() && it.host.isNotBlank() && it.username.isNotBlank() }
-      .ifEmpty { defaultHostProfiles() }
   }.getOrElse {
     defaultHostProfiles()
   }
@@ -7389,11 +8056,9 @@ private fun saveHostProfiles(
 ) {
   val json = JSONArray()
   profiles.forEach { profile -> json.put(profile.toJson()) }
-  context
-    .getSharedPreferences(HostProfilesPrefs, Context.MODE_PRIVATE)
-    .edit()
-    .putString(HostProfilesKey, json.toString())
-    .apply()
+  context.getSharedPreferences(HostProfilesPrefs, Context.MODE_PRIVATE).edit {
+    putString(HostProfilesKey, json.toString())
+  }
 }
 
 private fun loadSSHKeyCredentials(context: Context): List<SSHKeyCredential> {
@@ -7429,11 +8094,9 @@ private fun saveSSHKeyCredentials(
         .put("name", credential.name),
     )
   }
-  context
-    .getSharedPreferences(SSHKeysPrefs, Context.MODE_PRIVATE)
-    .edit()
-    .putString(SSHKeysKey, json.toString())
-    .apply()
+  context.getSharedPreferences(SSHKeysPrefs, Context.MODE_PRIVATE).edit {
+    putString(SSHKeysKey, json.toString())
+  }
 }
 
 private fun translateTerminalInput(value: String, ctrlArmed: Boolean): String =
@@ -7465,6 +8128,16 @@ private fun String.isRiskyTerminalPaste(): Boolean =
 
 private fun String.terminalPasteLineCount(): Int =
   if (isEmpty()) 0 else count { it == '\n' } + 1
+
+private fun String.hostKeyFingerprintOrNull(): String? {
+  val markerIndex = indexOf(HostKeyConfirmationPrefix)
+  if (markerIndex < 0) return null
+  return substring(markerIndex + HostKeyConfirmationPrefix.length)
+    .trim()
+    .substringBefore(' ')
+    .substringBefore('\n')
+    .takeIf { it.startsWith("SHA256:") && it.length > "SHA256:".length }
+}
 
 private fun saveTerminalTranscript(
   context: Context,

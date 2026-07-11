@@ -489,6 +489,21 @@ Java_xyz_zinglix_shellow_core_ShellowNative_nativeStartPasswordShellJson(
     );
 }
 
+extern "C" JNIEXPORT void JNICALL
+Java_xyz_zinglix_shellow_core_ShellowNative_nativeSetTransportOptions(
+    JNIEnv *,
+    jobject,
+    jlong handle,
+    jlong keepaliveIntervalSecs,
+    jboolean remotePortDetectionEnabled
+) {
+    shellow_engine_set_transport_options(
+        engineFromHandle(handle),
+        static_cast<uint64_t>(keepaliveIntervalSecs),
+        remotePortDetectionEnabled == JNI_TRUE
+    );
+}
+
 extern "C" JNIEXPORT jstring JNICALL
 Java_xyz_zinglix_shellow_core_ShellowNative_nativeConnectPasswordExecJson(
     JNIEnv *env,
@@ -597,6 +612,22 @@ Java_xyz_zinglix_shellow_core_ShellowNative_nativeStartPrivateKeyShellJson(
 extern "C" JNIEXPORT jstring JNICALL
 Java_xyz_zinglix_shellow_core_ShellowNative_nativePollLiveShellJson(JNIEnv *env, jobject, jlong handle) {
     return takeJson(env, shellow_engine_poll_live_shell_json(engineFromHandle(handle)));
+}
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_xyz_zinglix_shellow_core_ShellowNative_nativeDismissDetectedRemotePortJson(
+    JNIEnv *env,
+    jobject,
+    jlong handle,
+    jint port
+) {
+    return takeJson(
+        env,
+        shellow_engine_dismiss_detected_remote_port_json(
+            engineFromHandle(handle),
+            static_cast<uint16_t>(port)
+        )
+    );
 }
 
 extern "C" JNIEXPORT jstring JNICALL

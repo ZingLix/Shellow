@@ -1,3 +1,5 @@
+#![allow(clippy::too_many_arguments)]
+
 use serde::{Deserialize, Serialize};
 use std::collections::hash_map::DefaultHasher;
 use std::collections::{BTreeMap, BTreeSet};
@@ -2478,10 +2480,10 @@ fn load_system_font_face(bytes: Vec<u8>, collection_index: u32) -> Option<System
 fn system_font_candidates() -> Vec<String> {
     let mut candidates = Vec::new();
 
-    if let Ok(path) = std::env::var("SHELLOW_RENDERER_FONT_PATH") {
-        if !path.trim().is_empty() {
-            candidates.push(path);
-        }
+    if let Ok(path) = std::env::var("SHELLOW_RENDERER_FONT_PATH")
+        && !path.trim().is_empty()
+    {
+        candidates.push(path);
     }
 
     #[cfg(any(target_os = "ios", target_os = "macos"))]
@@ -2765,6 +2767,7 @@ struct RendererRuntime {
 }
 
 #[cfg(feature = "native-integrations")]
+#[allow(clippy::large_enum_variant)]
 enum GpuRuntimeState {
     Pending,
     Ready(GpuRuntime),
@@ -4062,9 +4065,11 @@ mod tests {
     #[cfg(feature = "native-integrations")]
     #[test]
     fn visible_glyph_fallback_skips_spaces_but_keeps_shaped_glyphs_visible() {
-        let mut visible_metrics = fontdue::Metrics::default();
-        visible_metrics.width = 12;
-        visible_metrics.height = 18;
+        let visible_metrics = fontdue::Metrics {
+            width: 12,
+            height: 18,
+            ..Default::default()
+        };
 
         assert!(!should_write_visible_glyph_fallback(
             GlyphKey::Codepoint(' '),

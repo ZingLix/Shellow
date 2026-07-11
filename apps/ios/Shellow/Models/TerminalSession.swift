@@ -8,6 +8,7 @@ struct TerminalSession: Equatable, Decodable {
     var pendingClipboardText: String?
     var clipboardSequence: Int
     var bellCount: Int
+    var detectedRemotePorts: [Int]
     var rows: [TerminalRow]
     var grid: TerminalGridSnapshot?
     var cursorColumn: Int
@@ -24,6 +25,7 @@ struct TerminalSession: Equatable, Decodable {
             pendingClipboardText: nil,
             clipboardSequence: 0,
             bellCount: 0,
+            detectedRemotePorts: [],
             rows: [
                 TerminalRow(prompt: "", text: "Shellow Rust bridge failed", style: .warning),
                 TerminalRow(prompt: "", text: message, style: .muted),
@@ -46,6 +48,7 @@ struct TerminalSession: Equatable, Decodable {
             pendingClipboardText: nil,
             clipboardSequence: 0,
             bellCount: 0,
+            detectedRemotePorts: [],
             rows: [
                 TerminalRow(prompt: "$", text: "ssh \(profile.endpoint)", style: .command),
                 TerminalRow(prompt: "", text: "Connecting...", style: .muted),
@@ -227,6 +230,8 @@ struct CodexSnapshot: Equatable, Decodable {
     var threadId: String?
     var turnActive: Bool
     var messages: [CodexMessage]
+    var messagesStartIndex: Int
+    var messagesReplaceAll: Bool
     var pendingApprovals: [CodexApproval]
     var directory: CodexDirectoryState
     var threads: CodexThreadListState
@@ -235,6 +240,7 @@ struct CodexSnapshot: Equatable, Decodable {
     var activeTurn: CodexActiveTurn?
     var operation: CodexOperationState
     var settings: CodexSettingsState
+    var usage: CodexUsageState
     var lastError: String?
 
     private enum CodingKeys: String, CodingKey {
@@ -246,6 +252,8 @@ struct CodexSnapshot: Equatable, Decodable {
         case threadId
         case turnActive
         case messages
+        case messagesStartIndex
+        case messagesReplaceAll
         case pendingApprovals
         case directory
         case threads
@@ -254,6 +262,7 @@ struct CodexSnapshot: Equatable, Decodable {
         case activeTurn
         case operation
         case settings
+        case usage
         case lastError
     }
 
@@ -274,7 +283,10 @@ struct CodexSnapshot: Equatable, Decodable {
         activeTurn: CodexActiveTurn? = nil,
         operation: CodexOperationState = .idle,
         settings: CodexSettingsState = .empty,
-        lastError: String?
+        usage: CodexUsageState = .empty,
+        lastError: String?,
+        messagesStartIndex: Int = 0,
+        messagesReplaceAll: Bool = true
     ) {
         self.title = title
         self.endpoint = endpoint
@@ -284,6 +296,8 @@ struct CodexSnapshot: Equatable, Decodable {
         self.threadId = threadId
         self.turnActive = turnActive
         self.messages = messages
+        self.messagesStartIndex = messagesStartIndex
+        self.messagesReplaceAll = messagesReplaceAll
         self.pendingApprovals = pendingApprovals
         self.directory = directory
         self.threads = threads
@@ -292,6 +306,7 @@ struct CodexSnapshot: Equatable, Decodable {
         self.activeTurn = activeTurn
         self.operation = operation
         self.settings = settings
+        self.usage = usage
         self.lastError = lastError
     }
 
@@ -305,6 +320,8 @@ struct CodexSnapshot: Equatable, Decodable {
         threadId = try container.decodeIfPresent(String.self, forKey: .threadId)
         turnActive = try container.decodeIfPresent(Bool.self, forKey: .turnActive) ?? false
         messages = try container.decodeIfPresent([CodexMessage].self, forKey: .messages) ?? []
+        messagesStartIndex = try container.decodeIfPresent(Int.self, forKey: .messagesStartIndex) ?? 0
+        messagesReplaceAll = try container.decodeIfPresent(Bool.self, forKey: .messagesReplaceAll) ?? true
         pendingApprovals = try container.decodeIfPresent([CodexApproval].self, forKey: .pendingApprovals) ?? []
         directory = try container.decodeIfPresent(CodexDirectoryState.self, forKey: .directory) ?? .empty
         threads = try container.decodeIfPresent(CodexThreadListState.self, forKey: .threads) ?? .empty
@@ -313,6 +330,7 @@ struct CodexSnapshot: Equatable, Decodable {
         activeTurn = try container.decodeIfPresent(CodexActiveTurn.self, forKey: .activeTurn)
         operation = try container.decodeIfPresent(CodexOperationState.self, forKey: .operation) ?? .idle
         settings = try container.decodeIfPresent(CodexSettingsState.self, forKey: .settings) ?? .empty
+        usage = try container.decodeIfPresent(CodexUsageState.self, forKey: .usage) ?? .empty
         lastError = try container.decodeIfPresent(String.self, forKey: .lastError)
     }
 
@@ -615,6 +633,64 @@ struct CodexSettingsState: Equatable, Decodable {
     }
 }
 
+struct CodexUsageState: Equatable, Decodable {
+    var thread: CodexThreadTokenUsage?
+    var rateLimits: CodexRateLimitSnapshot?
+    var isLoadingRateLimits: Bool
+    var rateLimitsError: String?
+
+    static let empty = CodexUsageState(
+        thread: nil,
+        rateLimits: nil,
+        isLoadingRateLimits: false,
+        rateLimitsError: nil
+    )
+}
+
+struct CodexThreadTokenUsage: Equatable, Decodable {
+    var last: CodexTokenUsageBreakdown
+    var total: CodexTokenUsageBreakdown
+    var modelContextWindow: UInt64?
+}
+
+struct CodexTokenUsageBreakdown: Equatable, Decodable {
+    var cachedInputTokens: UInt64
+    var inputTokens: UInt64
+    var outputTokens: UInt64
+    var reasoningOutputTokens: UInt64
+    var totalTokens: UInt64
+}
+
+struct CodexRateLimitSnapshot: Equatable, Decodable {
+    var limitId: String?
+    var limitName: String?
+    var planType: String?
+    var primary: CodexRateLimitWindow?
+    var secondary: CodexRateLimitWindow?
+    var credits: CodexCreditsSnapshot?
+    var individualLimit: CodexSpendControlLimitSnapshot?
+    var rateLimitReachedType: String?
+}
+
+struct CodexRateLimitWindow: Equatable, Decodable {
+    var usedPercent: UInt32
+    var resetsAt: UInt64?
+    var windowDurationMins: UInt64?
+}
+
+struct CodexCreditsSnapshot: Equatable, Decodable {
+    var hasCredits: Bool
+    var unlimited: Bool
+    var balance: String?
+}
+
+struct CodexSpendControlLimitSnapshot: Equatable, Decodable {
+    var limit: String
+    var used: String
+    var remainingPercent: UInt32
+    var resetsAt: UInt64
+}
+
 enum CodexStatus: String, Equatable, Decodable {
     case disconnected
     case connecting
@@ -644,6 +720,7 @@ struct CodexMessage: Identifiable, Equatable, Decodable {
     var blocks: [CodexMarkdownBlock]
     var isStreaming: Bool
     var truncated: Bool
+    var delivery: CodexMessageDelivery?
 
     private enum CodingKeys: String, CodingKey {
         case id
@@ -658,6 +735,7 @@ struct CodexMessage: Identifiable, Equatable, Decodable {
         case blocks
         case isStreaming
         case truncated
+        case delivery
     }
 
     init(
@@ -672,7 +750,8 @@ struct CodexMessage: Identifiable, Equatable, Decodable {
         format: CodexMessageFormat = .plain,
         blocks: [CodexMarkdownBlock] = [],
         isStreaming: Bool = false,
-        truncated: Bool = false
+        truncated: Bool = false,
+        delivery: CodexMessageDelivery? = nil
     ) {
         self.id = id
         self.role = role
@@ -686,6 +765,7 @@ struct CodexMessage: Identifiable, Equatable, Decodable {
         self.blocks = blocks
         self.isStreaming = isStreaming
         self.truncated = truncated
+        self.delivery = delivery
     }
 
     init(from decoder: Decoder) throws {
@@ -702,7 +782,15 @@ struct CodexMessage: Identifiable, Equatable, Decodable {
         blocks = try container.decodeIfPresent([CodexMarkdownBlock].self, forKey: .blocks) ?? []
         isStreaming = try container.decodeIfPresent(Bool.self, forKey: .isStreaming) ?? false
         truncated = try container.decodeIfPresent(Bool.self, forKey: .truncated) ?? false
+        delivery = try container.decodeIfPresent(CodexMessageDelivery.self, forKey: .delivery)
     }
+}
+
+enum CodexMessageDelivery: String, Equatable, Decodable {
+    case queued
+    case sent
+    case committed
+    case failed
 }
 
 enum CodexMessageKind: String, Equatable, Decodable {
@@ -864,22 +952,29 @@ struct CodexApproval: Identifiable, Equatable, Decodable {
     var command: String?
     var cwd: String?
     var reason: String?
-    var questions: [CodexUserQuestion]
+    var questions: [CodexUserInputQuestion]
+    var availableDecisions: [String]
+    var permissions: String?
 
     var id: String { requestId }
 }
 
-struct CodexUserQuestion: Equatable, Decodable {
-    var question: String
+struct CodexUserInputQuestion: Equatable, Decodable, Identifiable {
+    var id: String
     var header: String
-    var options: [CodexUserQuestionOption]
+    var question: String
+    var isOther: Bool
+    var isSecret: Bool
     var multiSelect: Bool
+    var options: [CodexUserInputOption]
 }
 
-struct CodexUserQuestionOption: Equatable, Decodable {
+struct CodexUserInputOption: Equatable, Decodable, Identifiable {
     var label: String
     var description: String
     var preview: String?
+
+    var id: String { label }
 }
 
 enum CodexApprovalKind: String, Equatable, Decodable {
@@ -887,6 +982,7 @@ enum CodexApprovalKind: String, Equatable, Decodable {
     case fileChange = "file_change"
     case userInput = "user_input"
     case permissions
+    case elicitation
     case tool
 }
 
@@ -1000,6 +1096,7 @@ extension TerminalSession {
         pendingClipboardText: nil,
         clipboardSequence: 0,
         bellCount: 0,
+        detectedRemotePorts: [],
         rows: [
             TerminalRow(prompt: "$", text: "ssh deploy@staging", style: .command),
             TerminalRow(prompt: "", text: "Shellow preview terminal", style: .success),

@@ -16,6 +16,7 @@ struct HostsScreen: View {
     @State private var isAddingProfile = false
     @State private var isManagingKeys = false
     @State private var selectedProfile: HostProfile?
+    private let secretStore = SSHSecretStore.shared
 
     var body: some View {
         List {
@@ -84,7 +85,10 @@ struct HostsScreen: View {
             HostConnectionSheet(
                 profile: profile,
                 sshKeys: sshKeys,
-                updateProfile: updateProfile
+                updateProfile: updateProfile,
+                deleteProfile: {
+                    deleteProfile(profile)
+                }
             )
             .presentationDetents([.fraction(0.72), .large])
             .presentationDragIndicator(.visible)
@@ -166,6 +170,14 @@ struct HostsScreen: View {
         profiles.append(profile.duplicated(existingNames: profiles.map(\.name)))
     }
 
+    private func deleteProfile(_ profile: HostProfile) {
+        secretStore.deleteSecret(for: profile, kind: .password)
+        secretStore.deleteSecret(for: profile, kind: .privateKey)
+        secretStore.deleteSecret(for: profile, kind: .passphrase)
+        profiles.removeAll { $0.id == profile.id }
+        selectedProfile = nil
+    }
+
     private func openProfile(_ profile: HostProfile) {
         switch profile.resolvedLaunchKind {
         case .terminal:
@@ -190,6 +202,7 @@ private struct HostConnectionSheet: View {
     let profile: HostProfile
     let sshKeys: [SSHKeyCredential]
     let updateProfile: (HostProfile) -> Void
+    let deleteProfile: () -> Void
 
     @Environment(\.dismiss) private var dismiss
     @State private var selectedTab = ProfileEditorTab.connection
@@ -203,11 +216,18 @@ private struct HostConnectionSheet: View {
     @State private var usesPersistentTerminal: Bool
     @State private var persistentTerminalBackend: PersistentTerminalBackend
     @State private var persistentSessionName: String
+    @State private var isConfirmingDelete = false
 
-    init(profile: HostProfile, sshKeys: [SSHKeyCredential], updateProfile: @escaping (HostProfile) -> Void) {
+    init(
+        profile: HostProfile,
+        sshKeys: [SSHKeyCredential],
+        updateProfile: @escaping (HostProfile) -> Void,
+        deleteProfile: @escaping () -> Void
+    ) {
         self.profile = profile
         self.sshKeys = sshKeys
         self.updateProfile = updateProfile
+        self.deleteProfile = deleteProfile
 
         let savedConfiguration = profile.persistentTerminal
         _name = State(initialValue: profile.name)
@@ -245,6 +265,13 @@ private struct HostConnectionSheet: View {
                 } else {
                     serverSettings
                 }
+
+                Section {
+                    Button("Delete Profile", role: .destructive) {
+                        isConfirmingDelete = true
+                    }
+                    .frame(maxWidth: .infinity, minHeight: 44)
+                }
             }
             .navigationTitle("Edit Profile")
             .navigationBarTitleDisplayMode(.inline)
@@ -259,6 +286,15 @@ private struct HostConnectionSheet: View {
                     }
                     .disabled(!configurationIsValid)
                 }
+            }
+            .alert("Delete this profile?", isPresented: $isConfirmingDelete) {
+                Button("Cancel", role: .cancel) {}
+                Button("Delete", role: .destructive) {
+                    deleteProfile()
+                    dismiss()
+                }
+            } message: {
+                Text("The saved profile and its profile-scoped credentials will be removed from this device.")
             }
         }
     }
@@ -877,7 +913,7 @@ struct PasswordPromptSheet: View {
 
     @Environment(\.dismiss) private var dismiss
     @State private var password = ""
-    @State private var rememberPassword = true
+    @State private var rememberPassword = false
     @State private var keychainStatus: String?
 
     private let secretStore = SSHSecretStore.shared
@@ -1219,6 +1255,7 @@ struct CodexScreen: View {
             codexHeader
             Divider()
             operationBanner
+            CodexUsageSummary(usage: snapshot.usage)
             if isShowingThread && snapshot.threadId != nil {
                 chatView
                 Divider()
@@ -1299,7 +1336,7 @@ struct CodexScreen: View {
             CodexSessionSwitcherSheet(
                 profileName: snapshot.title,
                 threads: codexSessionThreads,
-                selectedThreadID: snapshot.threadId,
+                selectedThreadID: isShowingThread ? snapshot.threadId : nil,
                 pendingApprovalCount: snapshot.pendingApprovals.count,
                 isLoading: snapshot.threads.isLoading,
                 errorMessage: snapshot.threads.error,
@@ -1315,6 +1352,7 @@ struct CodexScreen: View {
             CodexDirectoryPicker(
                 directory: snapshot.directory,
                 selectedPath: selectedProjectPath,
+                quickPaths: Array(codexUniquePaths(snapshot.projects.favorites + snapshot.projects.recent).prefix(5)),
                 openDirectory: { path in
                     Task { await onBrowseDirectory(path) }
                 },
@@ -1508,8 +1546,7 @@ struct CodexScreen: View {
 
     private func refreshSessionSwitcher() async {
         guard snapshot.status == .connected else { return }
-        let cwd = selectedProjectPath.isEmpty ? (snapshot.cwd ?? "") : selectedProjectPath
-        await onListThreads(cwd, "", "", false, false)
+        await onListThreads("", "", "", false, false)
     }
 
     private func openSessionSwitcherThread(_ thread: CodexThreadSummary) {
@@ -1567,7 +1604,7 @@ struct CodexScreen: View {
                             .id("approval-\(approval.requestId)")
                         }
 
-                        ForEach(snapshot.messages.filter(\.isVisibleInChat)) { message in
+                        ForEach(visibleChatMessages) { message in
                             CodexMessageRow(message: message)
                                 .id(message.id)
                         }
@@ -1618,10 +1655,17 @@ struct CodexScreen: View {
         }
     }
 
+    private var visibleChatMessages: [CodexMessage] {
+        var seenIDs = Set<String>()
+        return snapshot.messages.filter { message in
+            message.isVisibleInChat && seenIDs.insert(message.id).inserted
+        }
+    }
+
     private var chatScrollSignature: Int {
         var signature = snapshot.pendingApprovals.count
         signature = signature &* 31 &+ (snapshot.turnActive ? 1 : 0)
-        for message in snapshot.messages where message.isVisibleInChat {
+        for message in visibleChatMessages {
             signature = signature &* 31 &+ message.id.count
             signature = signature &* 31 &+ message.text.count
             signature = signature &* 31 &+ (message.title?.count ?? 0)
@@ -2221,7 +2265,9 @@ struct CodexScreen: View {
     }
 
     private func openThread(_ thread: CodexThreadSummary) async {
+#if DEBUG
         print("[Shellow Codex] ui open start threadId=\(thread.id) currentThreadId=\(snapshot.threadId ?? "nil")")
+#endif
         threadReturnRoute = homeRoute
         threadReturnScope = historyScope
         openingThreadId = thread.id
@@ -2229,7 +2275,9 @@ struct CodexScreen: View {
         isChatAutoFollowEnabled = true
         await onResumeThread(thread.id)
         isShowingThread = true
+#if DEBUG
         print("[Shellow Codex] ui open returned threadId=\(thread.id) currentThreadId=\(snapshot.threadId ?? "nil")")
+#endif
         if openingThreadId == thread.id {
             openingThreadId = nil
         }
@@ -2296,9 +2344,12 @@ private struct CodexNewConversationPrompt: View {
 
 private struct CodexDirectoryPicker: View {
     @Environment(\.dismiss) private var dismiss
+    @State private var searchQuery = ""
+    @State private var showHiddenFolders = false
 
     let directory: CodexDirectoryState
     let selectedPath: String
+    let quickPaths: [String]
     let openDirectory: (String) -> Void
     let selectDirectory: (String) -> Void
 
@@ -2308,7 +2359,11 @@ private struct CodexDirectoryPicker: View {
     }
 
     private var folders: [CodexDirectoryEntry] {
-        directory.entries.filter(\.isDirectory)
+        directory.entries.filter { entry in
+            entry.isDirectory &&
+                (showHiddenFolders || !entry.name.hasPrefix(".")) &&
+                (searchQuery.isEmpty || entry.name.localizedCaseInsensitiveContains(searchQuery))
+        }
     }
 
     var body: some View {
@@ -2325,7 +2380,24 @@ private struct CodexDirectoryPicker: View {
                     }
                 }
 
+                if !quickPaths.isEmpty {
+                    Section("Recent") {
+                        ScrollView(.horizontal, showsIndicators: false) {
+                            HStack(spacing: 8) {
+                                ForEach(quickPaths, id: \.self) { path in
+                                    Button(lastPathComponent(path)) {
+                                        openDirectory(path)
+                                    }
+                                    .buttonStyle(.bordered)
+                                    .controlSize(.small)
+                                }
+                            }
+                        }
+                    }
+                }
+
                 Section {
+                    Toggle("Show hidden folders", isOn: $showHiddenFolders)
                     if directory.isLoading {
                         HStack(spacing: 10) {
                             ProgressView()
@@ -2367,6 +2439,7 @@ private struct CodexDirectoryPicker: View {
                 }
             }
             .listStyle(.plain)
+            .searchable(text: $searchQuery, prompt: "Search folders")
             .navigationTitle("Choose Directory")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
@@ -2585,6 +2658,157 @@ private struct CodexActionIconButton: View {
     }
 }
 
+private struct CodexUsageSummary: View {
+    let usage: CodexUsageState
+
+    var body: some View {
+        if !metrics.isEmpty {
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 10) {
+                    ForEach(metrics) { metric in
+                        CodexUsageMetric(metric: metric)
+                    }
+                }
+                .padding(.horizontal, 14)
+                .padding(.vertical, 8)
+            }
+            .background(Color(.secondarySystemBackground).opacity(0.72))
+            .overlay(alignment: .bottom) { Divider() }
+        }
+    }
+
+    private var metrics: [CodexUsageMetricValue] {
+        var values: [CodexUsageMetricValue] = []
+
+        if let thread = usage.thread {
+            let used = thread.last.totalTokens
+            let window = thread.modelContextWindow
+            let progress = window.flatMap { limit -> Double? in
+                guard limit > 0 else { return nil }
+                return min(Double(used) / Double(limit), 1)
+            }
+            values.append(CodexUsageMetricValue(
+                id: "context",
+                title: "Context",
+                value: window.map { "\(Self.compactCount(used)) / \(Self.compactCount($0))" }
+                    ?? Self.compactCount(used),
+                detail: progress.map { "\(Int(($0 * 100).rounded()))% used" } ?? "Latest turn",
+                progress: progress
+            ))
+        }
+
+        if let limits = usage.rateLimits {
+            if let primary = limits.primary {
+                values.append(Self.rateLimitMetric(primary, fallbackTitle: "Primary limit", id: "primary"))
+            }
+            if let secondary = limits.secondary {
+                values.append(Self.rateLimitMetric(secondary, fallbackTitle: "Secondary limit", id: "secondary"))
+            }
+            if let credits = limits.credits,
+               credits.unlimited || credits.balance != nil {
+                values.append(CodexUsageMetricValue(
+                    id: "credits",
+                    title: "Credits",
+                    value: credits.unlimited ? "Unlimited" : (credits.balance ?? "—"),
+                    detail: credits.hasCredits || credits.unlimited ? "Available" : "Depleted",
+                    progress: nil
+                ))
+            }
+            if let spend = limits.individualLimit {
+                values.append(CodexUsageMetricValue(
+                    id: "spend",
+                    title: "Spend limit",
+                    value: "\(spend.used) / \(spend.limit)",
+                    detail: Self.resetLabel(spend.resetsAt),
+                    progress: Double(100 - min(spend.remainingPercent, 100)) / 100
+                ))
+            }
+        }
+
+        return values
+    }
+
+    private static func rateLimitMetric(
+        _ window: CodexRateLimitWindow,
+        fallbackTitle: String,
+        id: String
+    ) -> CodexUsageMetricValue {
+        let used = min(window.usedPercent, 100)
+        return CodexUsageMetricValue(
+            id: id,
+            title: window.windowDurationMins.map(limitTitle) ?? fallbackTitle,
+            value: "\(100 - used)% left",
+            detail: window.resetsAt.map(resetLabel) ?? "Reset time unavailable",
+            progress: Double(used) / 100
+        )
+    }
+
+    private static func limitTitle(_ minutes: UInt64) -> String {
+        switch minutes {
+        case 300: "5h limit"
+        case 10_080: "Weekly limit"
+        case let value where value >= 1_440 && value.isMultiple(of: 1_440): "\(value / 1_440)d limit"
+        case let value where value >= 60 && value.isMultiple(of: 60): "\(value / 60)h limit"
+        default: "\(minutes)m limit"
+        }
+    }
+
+    private static func compactCount(_ value: UInt64) -> String {
+        if value >= 1_000_000 {
+            return String(format: "%.1fM", Double(value) / 1_000_000)
+        }
+        if value >= 1_000 {
+            return String(format: "%.1fK", Double(value) / 1_000)
+        }
+        return String(value)
+    }
+
+    private static func resetLabel(_ timestamp: UInt64) -> String {
+        "Resets \(resetFormatter.string(from: Date(timeIntervalSince1970: TimeInterval(timestamp))))"
+    }
+
+    private static let resetFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "MMM d, HH:mm"
+        return formatter
+    }()
+}
+
+private struct CodexUsageMetricValue: Identifiable {
+    let id: String
+    let title: String
+    let value: String
+    let detail: String
+    let progress: Double?
+}
+
+private struct CodexUsageMetric: View {
+    let metric: CodexUsageMetricValue
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 3) {
+            Text(metric.title)
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+            Text(metric.value)
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.primary)
+                .monospacedDigit()
+            if let progress = metric.progress {
+                ProgressView(value: progress)
+                    .tint(progress >= 0.9 ? ShellowTheme.warning : ShellowTheme.accent)
+                    .frame(width: 104)
+            }
+            Text(metric.detail)
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+        }
+        .frame(minWidth: 112, alignment: .leading)
+        .accessibilityElement(children: .combine)
+    }
+}
+
 private struct CodexTurnStatusRow: View {
     let onStop: () -> Void
 
@@ -2600,13 +2824,14 @@ private struct CodexTurnStatusRow: View {
                 Text("Stop")
                     .font(.caption2.weight(.semibold))
                     .foregroundStyle(.red)
-                    .padding(.vertical, 2)
+                    .frame(minWidth: 44, minHeight: 44)
             }
             .buttonStyle(.plain)
             .accessibilityLabel("Interrupt Codex Turn")
         }
         .padding(.horizontal, 4)
         .padding(.vertical, 1)
+        .accessibilityAddTraits(.updatesFrequently)
     }
 }
 
@@ -3018,9 +3243,15 @@ private struct CodexMessageRow: View {
                     .foregroundStyle(tint)
                     .background(iconBackground, in: RoundedRectangle(cornerRadius: 6))
 
-                CodexMarkdownContent(message: message)
-                    .foregroundStyle(foreground)
-                    .frame(maxWidth: .infinity, alignment: .leading)
+                VStack(alignment: .leading, spacing: 4) {
+                    CodexMarkdownContent(message: message)
+                        .foregroundStyle(foreground)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    if message.role == .user {
+                        deliveryStatus
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
             .padding(.horizontal, primaryHorizontalPadding)
             .padding(.vertical, primaryVerticalPadding)
@@ -3031,6 +3262,26 @@ private struct CodexMessageRow: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(.horizontal, primaryHorizontalPadding)
                 .padding(.vertical, primaryVerticalPadding)
+        }
+    }
+
+    @ViewBuilder
+    private var deliveryStatus: some View {
+        switch message.delivery {
+        case .queued:
+            Text("Queued…")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+        case .sent:
+            Text("Sending…")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+        case .failed:
+            Text(message.detail.map { "Failed · \($0)" } ?? "Failed to send")
+                .font(.caption2)
+                .foregroundStyle(.red)
+        case .committed, .none:
+            EmptyView()
         }
     }
 
@@ -3109,6 +3360,10 @@ private struct CodexMessageRow: View {
                 isExpanded.toggle()
             }
         }
+        .accessibilityElement(children: .combine)
+        .accessibilityAddTraits(hasCompactDetails ? .isButton : [])
+        .accessibilityValue(hasCompactDetails ? (isExpanded ? "Expanded" : "Collapsed") : "")
+        .accessibilityHint(hasCompactDetails ? "Double tap to \(isExpanded ? "collapse" : "expand") details" : "")
     }
 
     private var compactText: String {
@@ -3143,7 +3398,7 @@ private struct CodexMessageRow: View {
     }
 
     private var hidesCompactSecondaryText: Bool {
-        message.title?.trimmingCharacters(in: .whitespacesAndNewlines) == "Command completed"
+        message.title?.trimmingCharacters(in: .whitespacesAndNewlines).hasPrefix("Completed ·") == true
     }
 
     private var isRoutineCommandCompletion: Bool {
@@ -3637,6 +3892,8 @@ private func attributedRuns(
 private struct CodexApprovalRow: View {
     let approval: CodexApproval
     let decide: (String) -> Void
+    @State private var answers: [String: String] = [:]
+    @State private var toolResult = ""
 
     var body: some View {
         VStack(alignment: .leading, spacing: 9) {
@@ -3669,40 +3926,7 @@ private struct CodexApprovalRow: View {
             }
 
             if approval.questions.isEmpty {
-                HStack(spacing: 14) {
-                Button {
-                    decide("accept")
-                } label: {
-                    Label("Allow", systemImage: "checkmark")
-                        .font(.caption.weight(.semibold))
-                        .labelStyle(.titleAndIcon)
-                        .padding(.vertical, 4)
-                }
-                .buttonStyle(.plain)
-                .foregroundStyle(ShellowTheme.accent)
-
-                Button {
-                    decide("acceptForSession")
-                } label: {
-                    Text("Session")
-                        .font(.caption.weight(.semibold))
-                        .padding(.vertical, 4)
-                }
-                .buttonStyle(.plain)
-                .foregroundStyle(.secondary)
-
-                Spacer(minLength: 4)
-
-                Button(role: .destructive) {
-                    decide("decline")
-                } label: {
-                    Text("Deny")
-                        .font(.caption.weight(.semibold))
-                        .padding(.vertical, 4)
-                }
-                .buttonStyle(.plain)
-                }
-                .padding(.top, 2)
+                approvalControls
             }
         }
         .padding(.horizontal, 14)
@@ -3715,10 +3939,152 @@ private struct CodexApprovalRow: View {
         }
         .clipShape(RoundedRectangle(cornerRadius: 8))
     }
+
+    @ViewBuilder
+    private var approvalControls: some View {
+        switch approval.kind {
+        case .userInput:
+            VStack(alignment: .leading, spacing: 10) {
+                ForEach(approval.questions) { question in
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text(question.header)
+                            .font(.caption.weight(.semibold))
+                        Text(question.question)
+                            .font(.callout)
+                            .foregroundStyle(.secondary)
+                        ForEach(question.options) { option in
+                            Button {
+                                answers[question.id] = option.label
+                            } label: {
+                                HStack(alignment: .top, spacing: 8) {
+                                    Image(systemName: answers[question.id] == option.label ? "largecircle.fill.circle" : "circle")
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        Text(option.label)
+                                        if !option.description.isEmpty {
+                                            Text(option.description)
+                                                .font(.caption)
+                                                .foregroundStyle(.secondary)
+                                        }
+                                    }
+                                    Spacer()
+                                }
+                                .contentShape(Rectangle())
+                            }
+                            .buttonStyle(.plain)
+                        }
+                        if question.options.isEmpty || question.isOther {
+                            if question.isSecret {
+                                SecureField("Private answer", text: answerBinding(for: question.id))
+                                    .textFieldStyle(.roundedBorder)
+                            } else {
+                                TextField("Answer", text: answerBinding(for: question.id))
+                                    .textFieldStyle(.roundedBorder)
+                            }
+                        }
+                    }
+                }
+                HStack {
+                    Spacer()
+                    Button("Submit") {
+                        decide(encodedAnswers)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(!approval.questions.allSatisfy { !(answers[$0.id] ?? "").isEmpty })
+                }
+            }
+        case .permissions:
+            if let permissions = approval.permissions, !permissions.isEmpty {
+                Text(permissions)
+                    .font(.caption.monospaced())
+                    .foregroundStyle(.secondary)
+                    .textSelection(.enabled)
+            }
+            standardActions(
+                allowLabel: "Allow for this turn",
+                showSession: approval.availableDecisions.contains("acceptForSession")
+            )
+        case .elicitation:
+            if let schema = approval.permissions, !schema.isEmpty {
+                Text(schema)
+                    .font(.caption.monospaced())
+                    .foregroundStyle(.secondary)
+                    .textSelection(.enabled)
+            }
+            TextField("JSON response", text: $toolResult, axis: .vertical)
+                .textFieldStyle(.roundedBorder)
+            HStack {
+                Button("Decline", role: .destructive) { decide("decline") }
+                Spacer()
+                Button("Submit") { decide(toolResult) }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(toolResult.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            }
+        case .tool:
+            TextField("Tool result", text: $toolResult, axis: .vertical)
+                .textFieldStyle(.roundedBorder)
+            HStack {
+                Button("Decline", role: .destructive) { decide("decline") }
+                Spacer()
+                Button("Submit") { decide(encodedToolResult) }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(toolResult.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            }
+        case .command:
+            standardActions(
+                allowLabel: "Run command",
+                showSession: approval.availableDecisions.contains("acceptForSession")
+            )
+        case .fileChange:
+            standardActions(
+                allowLabel: "Apply changes",
+                showSession: approval.availableDecisions.contains("acceptForSession")
+            )
+        }
+    }
+
+    private func standardActions(allowLabel: String, showSession: Bool) -> some View {
+        HStack(spacing: 12) {
+            Button(allowLabel) { decide("accept") }
+                .buttonStyle(.borderedProminent)
+            if showSession {
+                Button("Allow for session") { decide("acceptForSession") }
+                    .buttonStyle(.bordered)
+            }
+            Spacer(minLength: 4)
+            Button("Deny", role: .destructive) { decide("decline") }
+                .buttonStyle(.borderless)
+        }
+        .controlSize(.small)
+        .padding(.top, 2)
+    }
+
+    private func answerBinding(for id: String) -> Binding<String> {
+        Binding(
+            get: { answers[id] ?? "" },
+            set: { answers[id] = $0 }
+        )
+    }
+
+    private var encodedAnswers: String {
+        let payload = answers.mapValues { [$0] }
+        guard let data = try? JSONSerialization.data(withJSONObject: payload),
+              let value = String(data: data, encoding: .utf8) else { return "{}" }
+        return value
+    }
+
+    private var encodedToolResult: String {
+        let payload: [String: Any] = [
+            "success": true,
+            "contentItems": [["type": "inputText", "text": toolResult]]
+        ]
+        guard let data = try? JSONSerialization.data(withJSONObject: payload),
+              let value = String(data: data, encoding: .utf8) else { return "{}" }
+        return value
+    }
 }
 
 private struct CodexUserQuestionForm: View {
-    let questions: [CodexUserQuestion]
+    let questions: [CodexUserInputQuestion]
     let submit: (String) -> Void
 
     @State private var selections: [String: Set<String>] = [:]
@@ -3769,16 +4135,29 @@ private struct CodexUserQuestionForm: View {
                         }
                     }
 
-                    TextField(
-                        "Other answer",
-                        text: Binding(
-                            get: { customAnswers[question.question, default: ""] },
-                            set: { customAnswers[question.question] = $0 }
-                        ),
-                        axis: .vertical
-                    )
-                    .textFieldStyle(.roundedBorder)
-                    .lineLimit(1...3)
+                    if question.options.isEmpty || question.isOther {
+                        if question.isSecret {
+                            SecureField(
+                                "Private answer",
+                                text: Binding(
+                                    get: { customAnswers[question.id, default: ""] },
+                                    set: { customAnswers[question.id] = $0 }
+                                )
+                            )
+                            .textFieldStyle(.roundedBorder)
+                        } else {
+                            TextField(
+                                "Other answer",
+                                text: Binding(
+                                    get: { customAnswers[question.id, default: ""] },
+                                    set: { customAnswers[question.id] = $0 }
+                                ),
+                                axis: .vertical
+                            )
+                            .textFieldStyle(.roundedBorder)
+                            .lineLimit(1...3)
+                        }
+                    }
                 }
             }
 
@@ -3808,47 +4187,47 @@ private struct CodexUserQuestionForm: View {
         questions.allSatisfy { answer(for: $0) != nil }
     }
 
-    private func isSelected(_ label: String, for question: CodexUserQuestion) -> Bool {
-        selections[question.question, default: []].contains(label)
+    private func isSelected(_ label: String, for question: CodexUserInputQuestion) -> Bool {
+        selections[question.id, default: []].contains(label)
     }
 
-    private func selectionIcon(_ label: String, for question: CodexUserQuestion) -> String {
+    private func selectionIcon(_ label: String, for question: CodexUserInputQuestion) -> String {
         if question.multiSelect {
             return isSelected(label, for: question) ? "checkmark.square.fill" : "square"
         }
         return isSelected(label, for: question) ? "largecircle.fill.circle" : "circle"
     }
 
-    private func toggle(_ label: String, for question: CodexUserQuestion) {
+    private func toggle(_ label: String, for question: CodexUserInputQuestion) {
         if question.multiSelect {
-            var current = selections[question.question, default: []]
+            var current = selections[question.id, default: []]
             if current.contains(label) {
                 current.remove(label)
             } else {
                 current.insert(label)
             }
-            selections[question.question] = current
+            selections[question.id] = current
         } else {
-            selections[question.question] = [label]
+            selections[question.id] = [label]
         }
-        customAnswers[question.question] = ""
+        customAnswers[question.id] = ""
     }
 
-    private func answer(for question: CodexUserQuestion) -> String? {
-        let custom = customAnswers[question.question, default: ""]
+    private func answer(for question: CodexUserInputQuestion) -> [String]? {
+        let custom = customAnswers[question.id, default: ""]
             .trimmingCharacters(in: .whitespacesAndNewlines)
-        if !custom.isEmpty { return custom }
-        let selected = selections[question.question, default: []]
+        if !custom.isEmpty { return [custom] }
+        let selected = selections[question.id, default: []]
         let ordered = question.options.map(\.label).filter(selected.contains)
-        return ordered.isEmpty ? nil : ordered.joined(separator: ", ")
+        return ordered.isEmpty ? nil : ordered
     }
 
     private func submitAnswers() {
         let answers = Dictionary(uniqueKeysWithValues: questions.compactMap { question in
-            answer(for: question).map { (question.question, $0) }
+            answer(for: question).map { (question.id, $0) }
         })
         guard answers.count == questions.count,
-              let data = try? JSONSerialization.data(withJSONObject: ["answers": answers]),
+              let data = try? JSONSerialization.data(withJSONObject: answers),
               let json = String(data: data, encoding: .utf8)
         else { return }
         submit(json)
@@ -3922,7 +4301,6 @@ private struct CodexSettingsSheet: View {
                     Picker("Policy", selection: $approvalPolicy) {
                         Text("Default").tag("")
                         Text("Untrusted").tag("untrusted")
-                        Text("On failure").tag("on-failure")
                         Text("On request").tag("on-request")
                         Text("Never").tag("never")
                     }
@@ -3935,6 +4313,12 @@ private struct CodexSettingsSheet: View {
                         Text("Workspace write").tag("workspace-write")
                         Text("Danger full access").tag("danger-full-access")
                     }
+                }
+
+                Section {
+                    Text("Model, reasoning, speed, and approval apply to the next turn. Sandbox applies when a thread starts or resumes.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
                 }
             }
             .navigationTitle("Codex Settings")
@@ -4045,6 +4429,11 @@ private func codexCompactPath(_ path: String) -> String {
     }
 
     return trimmed.hasPrefix("/") ? "/" + components.joined(separator: "/") : components.joined(separator: "/")
+}
+
+private func codexUniquePaths(_ paths: [String]) -> [String] {
+    var seen = Set<String>()
+    return paths.filter { seen.insert($0).inserted }
 }
 
 func privateKeyLooksUsable(_ value: String) -> Bool {

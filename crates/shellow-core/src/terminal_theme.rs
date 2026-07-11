@@ -4,8 +4,9 @@ use crate::TerminalGridColor;
 
 pub const DEFAULT_TERMINAL_THEME_ID: &str = "shellow_dark";
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum TerminalThemeId {
+    #[default]
     ShellowDark,
     Midnight,
     Amber,
@@ -40,12 +41,6 @@ impl TerminalThemeId {
 
     pub fn from_wire(value: &str) -> Option<Self> {
         Self::ALL.into_iter().find(|theme| theme.wire() == value)
-    }
-}
-
-impl Default for TerminalThemeId {
-    fn default() -> Self {
-        Self::ShellowDark
     }
 }
 

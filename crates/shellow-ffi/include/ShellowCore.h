@@ -21,6 +21,7 @@ char *shellow_engine_renderer_info_json(const ShellowEngine *engine);
 uint64_t shellow_engine_live_shell_event_revision(const ShellowEngine *engine);
 char *shellow_engine_set_renderer_overlay_json(ShellowEngine *engine, const char *overlay_json);
 char *shellow_engine_set_terminal_theme_json(ShellowEngine *engine, const char *theme_id);
+void shellow_engine_set_transport_options(ShellowEngine *engine, uint64_t keepalive_interval_secs, bool remote_port_detection_enabled);
 char *shellow_engine_attach_core_animation_layer_json(ShellowEngine *engine, uint64_t raw_handle, uint32_t width_px, uint32_t height_px);
 char *shellow_engine_attach_android_native_window_json(ShellowEngine *engine, uint64_t raw_handle, uint32_t width_px, uint32_t height_px);
 char *shellow_engine_detach_renderer_surface_json(ShellowEngine *engine);
@@ -79,6 +80,7 @@ char *shellow_engine_start_private_key_shell_json(
     const char *passphrase
 );
 char *shellow_engine_poll_live_shell_json(ShellowEngine *engine);
+char *shellow_engine_dismiss_detected_remote_port_json(ShellowEngine *engine, uint16_t port);
 char *shellow_engine_disconnect_live_shell_json(ShellowEngine *engine);
 char *shellow_engine_codex_snapshot_json(const ShellowEngine *engine);
 uint64_t shellow_engine_codex_event_revision(const ShellowEngine *engine);

@@ -23,6 +23,7 @@ exposed through native SwiftUI and Jetpack Compose interfaces.
 | Transcript export | Supported | Supported | Exports visible terminal text as UTF-8. |
 | tmux, GNU screen, and Zellij | Supported | Supported | Named persistent sessions and common controls. |
 | Host capability detection | Supported | Supported | Detects available persistent-session backends. |
+| New listening-port detection | Opt-in | Opt-in | Disabled by default; when enabled, active terminal sessions prompt after a new remote TCP port remains present across two scans. |
 
 ## Input
 
@@ -62,6 +63,17 @@ then expose backend-specific create, switch, split, and detach controls.
 
 Capability results are cached with the host profile and can be refreshed
 without disturbing the active interactive terminal.
+
+## Listening-port detection
+
+Listening-port detection is disabled by default. When the user enables it in
+Settings, Shellow opens a second SSH channel while an interactive terminal is
+connected and observes remote TCP
+listeners using `ss`, `lsof`, or `netstat`. The first scan establishes a
+baseline. A port must appear in two consecutive later scans before either
+native application prompts, which filters out short-lived listeners. Detection
+does not expose or forward a port, and dismissing a prompt suppresses repeats
+for that SSH connection.
 
 ## Current limitations
 

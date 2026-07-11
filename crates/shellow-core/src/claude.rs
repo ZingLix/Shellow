@@ -13,7 +13,8 @@ use crate::{
         CodexMessageFormat, CodexMessageKind, CodexMessageRole, CodexMessageVisibility,
         CodexModelOption, CodexOperationState, CodexProjectState, CodexSettingOption,
         CodexSettingsState, CodexSnapshot, CodexStatus, CodexThreadDetailState,
-        CodexThreadListState, CodexThreadSummary, CodexUserQuestion, CodexUserQuestionOption,
+        CodexThreadListState, CodexThreadSummary, CodexUsageState, CodexUserInputOption,
+        CodexUserInputQuestion,
     },
     ssh,
 };
@@ -129,6 +130,8 @@ impl ClaudeConversation {
             thread_id: Some(self.session_id.clone()),
             turn_active: self.turn_active,
             messages: self.messages.clone(),
+            messages_start_index: 0,
+            messages_replace_all: true,
             pending_approvals: self
                 .pending_approvals
                 .iter()
@@ -156,6 +159,7 @@ impl ClaudeConversation {
             }),
             operation: self.operation.clone(),
             settings: self.settings.clone(),
+            usage: CodexUsageState::default(),
             last_error: self.last_error.clone(),
         }
     }
@@ -322,10 +326,10 @@ impl ClaudeConversation {
                 }
             }
             "content_block_start" => {
-                if let Some(block) = event.get("content_block") {
-                    if block.get("type").and_then(Value::as_str) == Some("tool_use") {
-                        self.upsert_tool_use(block);
-                    }
+                if let Some(block) = event.get("content_block")
+                    && block.get("type").and_then(Value::as_str) == Some("tool_use")
+                {
+                    self.upsert_tool_use(block);
                 }
             }
             "content_block_delta" => {
@@ -456,6 +460,8 @@ impl ClaudeConversation {
                     .and_then(Value::as_str)
                     .map(str::to_string),
                 questions,
+                available_decisions: vec!["accept".to_string(), "decline".to_string()],
+                permissions: None,
             },
             original_input: input,
         });
@@ -612,6 +618,7 @@ impl ClaudeConversation {
             blocks: Vec::new(),
             is_streaming: true,
             truncated: false,
+            delivery: None,
         });
         self.reasoning_indices.insert(id.to_string(), index);
         index
@@ -659,6 +666,7 @@ impl ClaudeConversation {
                 blocks: Vec::new(),
                 is_streaming: false,
                 truncated: false,
+                delivery: None,
             });
             self.event_indices.insert(id.to_string(), index);
         }
@@ -785,6 +793,7 @@ impl ClaudeSession {
             expected_host_key_sha256: profile.trusted_host_key_sha256,
             keepalive_interval_secs: Some(ssh::DEFAULT_LIVE_KEEPALIVE_INTERVAL_SECS),
             keepalive_max: ssh::DEFAULT_KEEPALIVE_MAX,
+            detect_remote_ports: false,
             cols: 80,
             rows: 24,
             inactivity_timeout_secs: 86_400,
@@ -1152,7 +1161,7 @@ fn enqueue_command(remote_dir: &str, name: &str) -> String {
     )
 }
 
-fn parse_user_questions(input: &Value) -> Vec<CodexUserQuestion> {
+fn parse_user_questions(input: &Value) -> Vec<CodexUserInputQuestion> {
     input
         .get("questions")
         .and_then(Value::as_array)
@@ -1173,7 +1182,7 @@ fn parse_user_questions(input: &Value) -> Vec<CodexUserQuestion> {
                     if label.is_empty() {
                         return None;
                     }
-                    Some(CodexUserQuestionOption {
+                    Some(CodexUserInputOption {
                         label,
                         description: option
                             .get("description")
@@ -1187,13 +1196,28 @@ fn parse_user_questions(input: &Value) -> Vec<CodexUserQuestion> {
                     })
                 })
                 .collect();
-            Some(CodexUserQuestion {
+            Some(CodexUserInputQuestion {
+                id: value
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .unwrap_or(&question)
+                    .to_string(),
                 question,
                 header: value
                     .get("header")
                     .and_then(Value::as_str)
                     .unwrap_or("Question")
                     .to_string(),
+                is_other: value
+                    .get("isOther")
+                    .or_else(|| value.get("is_other"))
+                    .and_then(Value::as_bool)
+                    .unwrap_or(true),
+                is_secret: value
+                    .get("isSecret")
+                    .or_else(|| value.get("is_secret"))
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false),
                 options,
                 multi_select: value
                     .get("multiSelect")
@@ -1207,29 +1231,41 @@ fn parse_user_questions(input: &Value) -> Vec<CodexUserQuestion> {
 
 fn answered_question_input(
     mut input: Value,
-    questions: &[CodexUserQuestion],
+    questions: &[CodexUserInputQuestion],
     decision: &str,
 ) -> Result<Value, String> {
     let payload: Value = serde_json::from_str(decision)
         .map_err(|error| format!("Claude question answers are invalid JSON: {error}"))?;
-    let answers = payload
+    let submitted = payload
         .get("answers")
-        .and_then(Value::as_object)
+        .unwrap_or(&payload)
+        .as_object()
         .ok_or_else(|| "Claude question answers are missing.".to_string())?;
+    let mut answers = serde_json::Map::new();
     for question in questions {
-        let answer = answers
-            .get(&question.question)
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .unwrap_or_default();
+        let value = submitted
+            .get(&question.id)
+            .or_else(|| submitted.get(&question.question));
+        let answer = match value {
+            Some(Value::Array(values)) => values
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .collect::<Vec<_>>()
+                .join(", "),
+            Some(Value::String(value)) => value.trim().to_string(),
+            _ => String::new(),
+        };
         if answer.is_empty() {
             return Err(format!("Answer required for: {}", question.question));
         }
+        answers.insert(question.question.clone(), Value::String(answer));
     }
     let object = input
         .as_object_mut()
         .ok_or_else(|| "Claude question input is not an object.".to_string())?;
-    object.insert("answers".to_string(), Value::Object(answers.clone()));
+    object.insert("answers".to_string(), Value::Object(answers));
     if let Some(annotations) = payload.get("annotations") {
         object.insert("annotations".to_string(), annotations.clone());
     }

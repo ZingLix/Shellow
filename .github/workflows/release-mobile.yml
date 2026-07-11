@@ -56,9 +56,27 @@ env:
   XCODE_VERSION: 26.4.1
 
 jobs:
+  validate:
+    name: Validate source
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt,clippy
+      - name: Rust formatting
+        run: cargo fmt --all --check
+      - name: Rust lint
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+      - name: Rust tests
+        run: cargo test --workspace --all-features
+
   android-google-play:
     name: Android to Google Play
     runs-on: ubuntu-latest
+    needs: validate
     environment: mobile-release
     if: ${{ github.event_name == 'push' || contains(fromJSON('["all","android"]'), github.event.inputs.platform) }}
     env:
@@ -363,6 +381,7 @@ jobs:
   ios-app-store-connect:
     name: iOS to App Store Connect
     runs-on: macos-26
+    needs: validate
     environment: mobile-release
     if: ${{ github.event_name == 'push' || contains(fromJSON('["all","ios"]'), github.event.inputs.platform) }}
     env:

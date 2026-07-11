@@ -1,1 +1,2 @@
-# Release-specific keep rules can be added here when minification is enabled.
+# JNI entry points use the fully qualified class and method names.
+-keep class xyz.zinglix.shellow.core.ShellowNative { *; }

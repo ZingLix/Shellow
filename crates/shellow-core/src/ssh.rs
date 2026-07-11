@@ -28,8 +28,24 @@ pub fn demo_transport_summary() -> String {
 
 pub const DEFAULT_LIVE_KEEPALIVE_INTERVAL_SECS: u64 = 30;
 pub const DEFAULT_KEEPALIVE_MAX: usize = 3;
+pub const DEFAULT_CONNECT_TIMEOUT_SECS: u64 = 12;
 const DEFAULT_PTY_TERM: &str = "xterm-256color";
 const DEFAULT_COLORTERM: &str = "truecolor";
+const PORT_SCAN_BEGIN: &str = "SHELLOW_PORTS_BEGIN";
+const PORT_SCAN_END: &str = "SHELLOW_PORTS_END";
+pub const HOST_KEY_CONFIRMATION_REQUIRED_PREFIX: &str = "ssh host key confirmation required: ";
+const REMOTE_PORT_WATCH_COMMAND: &str = r#"while :; do
+printf 'SHELLOW_PORTS_BEGIN\n'
+if command -v ss >/dev/null 2>&1; then
+  ss -H -ltn 2>/dev/null | awk '{ value=$4; sub(/^.*:/, "", value); if (value ~ /^[0-9]+$/) print value }'
+elif command -v lsof >/dev/null 2>&1; then
+  lsof -nP -iTCP -sTCP:LISTEN -F n 2>/dev/null | awk '/^n/ { value=substr($0, 2); sub(/^.*:/, "", value); if (value ~ /^[0-9]+$/) print value }'
+elif command -v netstat >/dev/null 2>&1; then
+  netstat -lnt 2>/dev/null | awk 'NR > 2 { value=$4; sub(/^.*:/, "", value); if (value ~ /^[0-9]+$/) print value }'
+fi
+printf 'SHELLOW_PORTS_END\n'
+sleep 2
+done"#;
 
 pub fn keepalive_policy_summary(interval_secs: Option<u64>, max: usize) -> String {
     match interval_secs {
@@ -118,6 +134,7 @@ pub enum LiveShellStatus {
 pub struct LiveShellPoll {
     pub output: Vec<u8>,
     pub status: LiveShellStatus,
+    pub detected_ports: Vec<u16>,
 }
 
 #[cfg(feature = "native-integrations")]
@@ -157,6 +174,7 @@ pub struct LiveShellHandle {
     input: tokio::sync::mpsc::UnboundedSender<LiveShellInput>,
     output: std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
     status: std::sync::Arc<std::sync::Mutex<LiveShellStatus>>,
+    detected_ports: std::sync::Arc<std::sync::Mutex<Vec<u16>>>,
     revision: std::sync::Arc<std::sync::atomic::AtomicU64>,
 }
 
@@ -170,9 +188,11 @@ impl LiveShellHandle {
         let (input, receiver) = tokio::sync::mpsc::unbounded_channel();
         let output = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let status = std::sync::Arc::new(std::sync::Mutex::new(LiveShellStatus::Connecting));
+        let detected_ports = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let revision = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(1));
         let thread_output = std::sync::Arc::clone(&output);
         let thread_status = std::sync::Arc::clone(&status);
+        let thread_detected_ports = std::sync::Arc::clone(&detected_ports);
         let thread_revision = std::sync::Arc::clone(&revision);
 
         std::thread::Builder::new()
@@ -199,6 +219,7 @@ impl LiveShellHandle {
                     receiver,
                     thread_output,
                     thread_status,
+                    thread_detected_ports,
                     thread_revision,
                 ));
             })
@@ -208,6 +229,7 @@ impl LiveShellHandle {
             input,
             output,
             status,
+            detected_ports,
             revision,
         })
     }
@@ -232,6 +254,7 @@ impl LiveShellHandle {
         LiveShellPoll {
             output: take_live_output(&self.output),
             status: get_live_status(&self.status),
+            detected_ports: take_detected_ports(&self.detected_ports),
         }
     }
 
@@ -335,7 +358,7 @@ impl Drop for ExecStdioHandle {
 }
 
 #[cfg(feature = "native-integrations")]
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct RusshConnectOptions {
     pub host: String,
     pub port: u16,
@@ -344,6 +367,7 @@ pub struct RusshConnectOptions {
     pub expected_host_key_sha256: Option<String>,
     pub keepalive_interval_secs: Option<u64>,
     pub keepalive_max: usize,
+    pub detect_remote_ports: bool,
     pub cols: u32,
     pub rows: u32,
     pub inactivity_timeout_secs: u64,
@@ -391,6 +415,16 @@ pub fn exec_input_blocking(
 }
 
 #[cfg(feature = "native-integrations")]
+impl std::fmt::Debug for RusshAuthMethod {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::Password(_) => "Password(<redacted>)",
+            Self::PrivateKey { .. } => "PrivateKey(<redacted>)",
+        })
+    }
+}
+
+#[cfg(feature = "native-integrations")]
 impl RusshAuthMethod {
     fn label(&self) -> &'static str {
         match self {
@@ -406,8 +440,10 @@ async fn run_live_shell(
     mut receiver: tokio::sync::mpsc::UnboundedReceiver<LiveShellInput>,
     output: std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
     status: std::sync::Arc<std::sync::Mutex<LiveShellStatus>>,
+    detected_ports: std::sync::Arc<std::sync::Mutex<Vec<u16>>>,
     revision: std::sync::Arc<std::sync::atomic::AtomicU64>,
 ) {
+    let detect_remote_ports = options.detect_remote_ports;
     let mut actor = match RusshSessionActor::connect(options).await {
         Ok(actor) => actor,
         Err(error) => {
@@ -449,6 +485,19 @@ async fn run_live_shell(
             observed_host_key_sha256: actor.observed_host_key_sha256.clone(),
         },
     );
+    let mut port_watch_channel = if detect_remote_ports {
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            let channel = actor.session.channel_open_session().await?;
+            channel.exec(true, REMOTE_PORT_WATCH_COMMAND).await?;
+            Ok::<_, russh::Error>(channel)
+        })
+        .await
+        .ok()
+        .and_then(Result::ok)
+    } else {
+        None
+    };
+    let mut port_detector = RemotePortDetector::default();
 
     loop {
         while let Ok(message) = receiver.try_recv() {
@@ -484,20 +533,39 @@ async fn run_live_shell(
             }
         }
 
-        match tokio::time::timeout(std::time::Duration::from_millis(40), read_half.wait()).await {
-            Ok(Some(russh::ChannelMsg::Data { data })) => {
-                append_live_output(&output, &revision, &data)
-            }
-            Ok(Some(russh::ChannelMsg::ExtendedData { data, .. })) => {
-                append_live_output(&output, &revision, &data)
-            }
-            Ok(Some(russh::ChannelMsg::ExitStatus { .. })) => {}
-            Ok(Some(russh::ChannelMsg::Close)) | Ok(None) => {
-                set_live_status(&status, &revision, LiveShellStatus::Closed);
-                let _ = actor.disconnect().await;
-                return;
-            }
-            Ok(Some(_)) | Err(_) => {}
+        tokio::select! {
+            message = read_half.wait() => match message {
+                Some(russh::ChannelMsg::Data { data }) => {
+                    append_live_output(&output, &revision, &data)
+                }
+                Some(russh::ChannelMsg::ExtendedData { data, .. }) => {
+                    append_live_output(&output, &revision, &data)
+                }
+                Some(russh::ChannelMsg::ExitStatus { .. }) => {}
+                Some(russh::ChannelMsg::Close) | None => {
+                    set_live_status(&status, &revision, LiveShellStatus::Closed);
+                    let _ = actor.disconnect().await;
+                    return;
+                }
+                Some(_) => {}
+            },
+            message = async {
+                match port_watch_channel.as_mut() {
+                    Some(channel) => channel.wait().await,
+                    None => std::future::pending().await,
+                }
+            } => match message {
+                Some(russh::ChannelMsg::Data { data })
+                | Some(russh::ChannelMsg::ExtendedData { data, .. }) => {
+                    let newly_detected = port_detector.push(&data);
+                    append_detected_ports(&detected_ports, &revision, newly_detected);
+                }
+                Some(russh::ChannelMsg::Close) | None => {
+                    port_watch_channel = None;
+                }
+                Some(_) => {}
+            },
+            _ = tokio::time::sleep(std::time::Duration::from_millis(40)) => {}
         }
     }
 }
@@ -592,12 +660,108 @@ async fn run_exec_stdio(
 }
 
 #[cfg(feature = "native-integrations")]
+#[derive(Default)]
+struct RemotePortDetector {
+    buffer: Vec<u8>,
+    collecting: bool,
+    current: std::collections::BTreeSet<u16>,
+    observed: std::collections::BTreeSet<u16>,
+    candidates: std::collections::BTreeSet<u16>,
+    initialized: bool,
+}
+
+#[cfg(feature = "native-integrations")]
+impl RemotePortDetector {
+    fn push(&mut self, bytes: &[u8]) -> Vec<u16> {
+        self.buffer.extend_from_slice(bytes);
+        let mut detected = Vec::new();
+
+        while let Some(newline) = self.buffer.iter().position(|byte| *byte == b'\n') {
+            let line = self.buffer.drain(..=newline).collect::<Vec<_>>();
+            let line = String::from_utf8_lossy(&line);
+            let line = line.trim();
+
+            if line == PORT_SCAN_BEGIN {
+                self.collecting = true;
+                self.current.clear();
+            } else if line == PORT_SCAN_END {
+                if self.collecting {
+                    detected.extend(self.finish_scan());
+                }
+                self.collecting = false;
+            } else if self.collecting
+                && let Ok(port) = line.parse::<u16>()
+                && port != 0
+            {
+                self.current.insert(port);
+            }
+        }
+
+        if self.buffer.len() > 64 * 1024 {
+            self.buffer.clear();
+            self.collecting = false;
+            self.current.clear();
+        }
+
+        detected
+    }
+
+    fn finish_scan(&mut self) -> Vec<u16> {
+        if !self.initialized {
+            self.observed.extend(self.current.iter().copied());
+            self.initialized = true;
+            return Vec::new();
+        }
+
+        let previous_candidates = std::mem::take(&mut self.candidates);
+        let mut detected = Vec::new();
+        for port in self.current.iter().copied() {
+            if self.observed.contains(&port) {
+                continue;
+            }
+            if previous_candidates.contains(&port) {
+                self.observed.insert(port);
+                detected.push(port);
+            } else {
+                self.candidates.insert(port);
+            }
+        }
+        detected
+    }
+}
+
+#[cfg(feature = "native-integrations")]
 fn append_live_output(
     output: &std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
     revision: &std::sync::Arc<std::sync::atomic::AtomicU64>,
     bytes: &[u8],
 ) {
     append_buffered_output(output, revision, bytes, 128 * 1024);
+}
+
+#[cfg(feature = "native-integrations")]
+fn append_detected_ports(
+    pending: &std::sync::Arc<std::sync::Mutex<Vec<u16>>>,
+    revision: &std::sync::Arc<std::sync::atomic::AtomicU64>,
+    ports: Vec<u16>,
+) {
+    if ports.is_empty() {
+        return;
+    }
+
+    if let Ok(mut pending) = pending.lock() {
+        let mut changed = false;
+        for port in ports {
+            if !pending.contains(&port) {
+                pending.push(port);
+                changed = true;
+            }
+        }
+        pending.sort_unstable();
+        if changed {
+            revision.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        }
+    }
 }
 
 #[cfg(feature = "native-integrations")]
@@ -639,16 +803,24 @@ fn take_live_output(output: &std::sync::Arc<std::sync::Mutex<Vec<u8>>>) -> Vec<u
 }
 
 #[cfg(feature = "native-integrations")]
+fn take_detected_ports(ports: &std::sync::Arc<std::sync::Mutex<Vec<u16>>>) -> Vec<u16> {
+    ports
+        .lock()
+        .map(|mut ports| std::mem::take(&mut *ports))
+        .unwrap_or_default()
+}
+
+#[cfg(feature = "native-integrations")]
 fn set_live_status(
     status: &std::sync::Arc<std::sync::Mutex<LiveShellStatus>>,
     revision: &std::sync::Arc<std::sync::atomic::AtomicU64>,
     next: LiveShellStatus,
 ) {
-    if let Ok(mut status) = status.lock() {
-        if *status != next {
-            *status = next;
-            revision.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
-        }
+    if let Ok(mut status) = status.lock()
+        && *status != next
+    {
+        *status = next;
+        revision.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
     }
 }
 
@@ -666,11 +838,11 @@ fn set_exec_status(
     revision: &std::sync::Arc<std::sync::atomic::AtomicU64>,
     next: ExecStdioStatus,
 ) {
-    if let Ok(mut status) = status.lock() {
-        if *status != next {
-            *status = next;
-            revision.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
-        }
+    if let Ok(mut status) = status.lock()
+        && *status != next
+    {
+        *status = next;
+        revision.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
     }
 }
 
@@ -716,16 +888,20 @@ impl RusshSessionActor {
         let expected_host_key_sha256 = options.expected_host_key_sha256.clone();
         let observed_host_key_sha256 = std::sync::Arc::new(std::sync::Mutex::new(None));
 
-        let mut session = russh::client::connect(
-            std::sync::Arc::new(config),
-            (options.host.as_str(), options.port),
-            ShellowClient {
-                expected_host_key_sha256,
-                observed_host_key_sha256: std::sync::Arc::clone(&observed_host_key_sha256),
-            },
+        let connect_result = tokio::time::timeout(
+            std::time::Duration::from_secs(DEFAULT_CONNECT_TIMEOUT_SECS),
+            russh::client::connect(
+                std::sync::Arc::new(config),
+                (options.host.as_str(), options.port),
+                ShellowClient {
+                    expected_host_key_sha256,
+                    observed_host_key_sha256: std::sync::Arc::clone(&observed_host_key_sha256),
+                },
+            ),
         )
         .await
-        .map_err(|error| {
+        .map_err(|_| format!("ssh connection timed out after {DEFAULT_CONNECT_TIMEOUT_SECS}s"))?;
+        let mut session = connect_result.map_err(|error| {
             describe_connect_error(
                 error,
                 &options.expected_host_key_sha256,
@@ -748,7 +924,7 @@ impl RusshSessionActor {
                     .authenticate_publickey(
                         options.username,
                         russh::keys::PrivateKeyWithHashAlg::new(
-                            std::sync::Arc::new(private_key),
+                            std::sync::Arc::new(*private_key),
                             hash_alg,
                         ),
                     )
@@ -835,7 +1011,7 @@ impl RusshSessionActor {
 #[cfg(feature = "native-integrations")]
 enum PreparedRusshAuth {
     Password(String),
-    PrivateKey(russh::keys::PrivateKey),
+    PrivateKey(Box<russh::keys::PrivateKey>),
 }
 
 #[cfg(feature = "native-integrations")]
@@ -846,6 +1022,7 @@ fn prepare_auth(auth: RusshAuthMethod) -> Result<PreparedRusshAuth, String> {
             private_key_pem,
             passphrase,
         } => private_key_from_openssh(&private_key_pem, passphrase.as_deref())
+            .map(Box::new)
             .map(PreparedRusshAuth::PrivateKey),
     }
 }
@@ -870,12 +1047,18 @@ fn describe_connect_error(
         .ok()
         .and_then(|observed| observed.clone());
 
-    if let (Some(expected), Some(observed)) = (expected, observed.as_deref()) {
-        if !sha256_fingerprints_match(observed, expected) {
-            let expected =
-                normalize_sha256_fingerprint(expected).unwrap_or_else(|| expected.to_string());
-            return format!("ssh host key mismatch: expected {expected}, got {observed}");
-        }
+    if let (Some(expected), Some(observed)) = (expected, observed.as_deref())
+        && !sha256_fingerprints_match(observed, expected)
+    {
+        let expected =
+            normalize_sha256_fingerprint(expected).unwrap_or_else(|| expected.to_string());
+        return format!("ssh host key mismatch: expected {expected}, got {observed}");
+    }
+
+    if expected.is_none()
+        && let Some(observed) = observed
+    {
+        return format!("{HOST_KEY_CONFIRMATION_REQUIRED_PREFIX}{observed}");
     }
 
     format!("ssh connection failed: {error}")
@@ -925,9 +1108,66 @@ impl russh::client::Handler for ShellowClient {
         }
 
         let Some(expected) = self.expected_host_key_sha256.as_deref() else {
-            return Ok(true);
+            return Ok(false);
         };
 
         Ok(sha256_fingerprints_match(&actual, expected))
+    }
+}
+
+#[cfg(all(test, feature = "native-integrations"))]
+mod tests {
+    use super::RemotePortDetector;
+
+    #[test]
+    fn port_detector_uses_first_scan_as_baseline_and_debounces_new_ports() {
+        let mut detector = RemotePortDetector::default();
+
+        assert!(
+            detector
+                .push(b"SHELLOW_PORTS_BEGIN\n22\n5432\nSHELLOW_PORTS_END\n")
+                .is_empty()
+        );
+        assert!(
+            detector
+                .push(b"SHELLOW_PORTS_BEGIN\n22\n3000\n5432\nSHELLOW_PORTS_END\n")
+                .is_empty()
+        );
+        assert_eq!(
+            detector.push(b"SHELLOW_PORTS_BEGIN\n22\n3000\n5432\nSHELLOW_PORTS_END\n"),
+            vec![3000]
+        );
+        assert!(
+            detector
+                .push(b"SHELLOW_PORTS_BEGIN\n22\n3000\n5432\nSHELLOW_PORTS_END\n")
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn port_detector_handles_partial_frames_and_drops_transient_candidates() {
+        let mut detector = RemotePortDetector::default();
+
+        assert!(detector.push(b"SHELLOW_PORTS_BEG").is_empty());
+        assert!(
+            detector
+                .push(b"IN\n22\nSHELLOW_PORTS_END\nSHELLOW_PORTS_BEGIN\n8080\n")
+                .is_empty()
+        );
+        assert!(detector.push(b"SHELLOW_PORTS_END\n").is_empty());
+        assert!(
+            detector
+                .push(b"SHELLOW_PORTS_BEGIN\n22\nSHELLOW_PORTS_END\n")
+                .is_empty()
+        );
+        assert!(
+            detector
+                .push(b"SHELLOW_PORTS_BEGIN\n8080\nSHELLOW_PORTS_END\n")
+                .is_empty()
+        );
+        assert_eq!(
+            detector.push(b"SHELLOW_PORTS_BEGIN\n8080\nSHELLOW_PORTS_END\n"),
+            vec![8080]
+        );
     }
 }

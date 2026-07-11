@@ -50,6 +50,16 @@ struct SettingsScreen: View {
                         range: ShellowSettings.keepAliveRange,
                         step: 5
                     )
+                    Toggle("Detect Remote Ports", isOn: $settings.detectRemotePorts)
+                    Text("Optional. Opens a second SSH channel and checks listening TCP ports every two seconds. No ports are forwarded automatically.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
+
+                Section {
+                    Button("Restore Defaults", role: .destructive) {
+                        settings = ShellowSettings()
+                    }
                 }
             }
             .navigationTitle("Settings")

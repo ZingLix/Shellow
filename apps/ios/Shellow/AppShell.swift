@@ -45,6 +45,18 @@ private struct ConnectionNotice: Identifiable {
     var message: String
 }
 
+private struct PendingHostKeyTrust {
+    var fingerprint: String
+    var mode: HostConnectMode
+}
+
+private let hostKeyConfirmationPrefix = "ssh host key confirmation required: "
+private let codexRemoteControlBootstrapCommand = """
+PATH="$PATH:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$HOME/.local/bin:$HOME/.cargo/bin:$HOME/.bun/bin:$HOME/.npm-global/bin:/home/linuxbrew/.linuxbrew/bin"
+export PATH
+codex app-server daemon bootstrap --remote-control && printf '\n__SHELLOW_CODEX_BOOTSTRAP_OK__\n'
+"""
+
 private struct StoredPrivateKeyAuth {
     var credential: SSHKeyCredential
     var privateKeyPEM: String
@@ -63,6 +75,7 @@ private enum ShellowRoute: Hashable {
 }
 
 struct AppShell: View {
+    @Environment(\.scenePhase) private var scenePhase
     @State private var path: [ShellowRoute] = []
     @State private var coreSession = ShellowCoreSession()
     @State private var session = TerminalSession.preview
@@ -76,8 +89,13 @@ struct AppShell: View {
     @State private var claudeReconnectTarget: ClaudeReconnectTarget?
     @State private var passwordPrompt: PasswordPromptRequest?
     @State private var connectionNotice: ConnectionNotice?
+    @State private var codexBootstrapPromptEndpoint: String?
+    @State private var codexBootstrapError: String?
+    @State private var pendingHostKeyTrust: PendingHostKeyTrust?
     @State private var isSettingsPresented = false
     @State private var terminalRenderTick = 0
+    @State private var reconnectTerminalAfterBackground = false
+    @State private var reconnectCodexAfterBackground = false
 
     private let secretStore = SSHSecretStore.shared
 
@@ -144,11 +162,67 @@ struct AppShell: View {
         }
         .tint(ShellowTheme.accent)
         .preferredColorScheme(settings.colorScheme.preferredSwiftUIColorScheme)
+        .alert("Enable remote Codex?", isPresented: Binding(
+            get: { codexBootstrapPromptEndpoint != nil },
+            set: { if !$0 { codexBootstrapPromptEndpoint = nil } }
+        )) {
+            Button("Cancel", role: .cancel) {
+                codexBootstrapPromptEndpoint = nil
+            }
+            Button("Enable and reconnect") {
+                codexBootstrapPromptEndpoint = nil
+                Task { await bootstrapRemoteCodexAndReconnect() }
+            }
+        } message: {
+            Text("Shellow needs to enable the persistent Codex remote-control daemon on \(codexBootstrapPromptEndpoint ?? "this host"). This runs `codex app-server daemon bootstrap --remote-control` once over SSH. Only continue on a host you trust.")
+        }
+        .alert("Could not enable remote Codex", isPresented: Binding(
+            get: { codexBootstrapError != nil },
+            set: { if !$0 { codexBootstrapError = nil } }
+        )) {
+            Button("OK", role: .cancel) { codexBootstrapError = nil }
+        } message: {
+            Text(codexBootstrapError ?? "The remote setup command failed.")
+        }
+        .alert("Trust SSH host key?", isPresented: Binding(
+            get: { pendingHostKeyTrust != nil },
+            set: { if !$0 { pendingHostKeyTrust = nil } }
+        )) {
+            Button("Cancel", role: .cancel) {
+                cancelPendingHostKeyTrust()
+            }
+            Button("Trust and connect") {
+                trustPendingHostKeyAndReconnect()
+            }
+        } message: {
+            Text("Verify this SHA-256 fingerprint with the server administrator before continuing:\n\n\(pendingHostKeyTrust?.fingerprint ?? "")")
+        }
+        .alert("New remote port detected", isPresented: Binding(
+            get: { session.detectedRemotePorts.first != nil },
+            set: { presented in
+                guard !presented, let port = session.detectedRemotePorts.first else { return }
+                updateSession(coreSession.dismissDetectedRemotePort(port))
+            }
+        )) {
+            Button("Got it") {}
+        } message: {
+            if let port = session.detectedRemotePorts.first {
+                Text("The remote host started listening on port \(port). Shellow has not exposed or forwarded this port.")
+            }
+        }
         .task {
 #if DEBUG
             await handleSimulatorLaunchRequestIfNeeded()
+            let isSimulatorCodexUsagePreview = ProcessInfo.processInfo.arguments
+                .contains("--shellow-simulator-show-codex-usage")
+#else
+            let isSimulatorCodexUsagePreview = false
 #endif
             _ = coreSession.setTerminalTheme(settings.terminalTheme.rawValue)
+            coreSession.setTransportOptions(
+                keepAliveSeconds: settings.keepAliveSeconds,
+                detectRemotePorts: settings.detectRemotePorts
+            )
             updateSession(coreSession.snapshot())
             var lastLiveRevision = coreSession.liveShellEventRevision()
             var lastCodexRevision = coreSession.codexEventRevision()
@@ -176,16 +250,19 @@ struct AppShell: View {
                     }
                 }
 
-                let codexRevision = coreSession.codexEventRevision()
-                if codexSession.status == .connecting {
-                    codexConnectingPollTicks += 1
-                } else {
-                    codexConnectingPollTicks = 0
-                }
-                if codexRevision != lastCodexRevision || codexConnectingPollTicks >= 5 {
-                    lastCodexRevision = codexRevision
-                    codexConnectingPollTicks = 0
-                    updateCodexSession(coreSession.pollCodex())
+                if !isSimulatorCodexUsagePreview {
+                    let codexRevision = coreSession.codexEventRevision()
+                    if codexRevision != lastCodexRevision {
+                        lastCodexRevision = codexRevision
+                        codexConnectingPollTicks = 0
+                        updateCodexSession(coreSession.pollCodex())
+                    } else if codexSession.status == .connecting {
+                        codexConnectingPollTicks += 1
+                        if codexConnectingPollTicks >= 5 {
+                            codexConnectingPollTicks = 0
+                            updateCodexSession(coreSession.pollCodex())
+                        }
+                    }
                 }
 
                 let claudeRevision = coreSession.claudeEventRevision()
@@ -209,10 +286,17 @@ struct AppShell: View {
         }
         .onChange(of: settings) {
             ShellowSettingsStore.save(settings)
+            coreSession.setTransportOptions(
+                keepAliveSeconds: settings.keepAliveSeconds,
+                detectRemotePorts: settings.detectRemotePorts
+            )
         }
         .onChange(of: settings.terminalTheme) {
             _ = coreSession.setTerminalTheme(settings.terminalTheme.rawValue)
             advanceTerminalRenderTick()
+        }
+        .onChange(of: scenePhase) {
+            handleScenePhaseChange(scenePhase)
         }
     }
 
@@ -333,9 +417,13 @@ struct AppShell: View {
             },
             onResumeThread: { threadId in
                 let started = appShellMonotonicNanos()
+#if DEBUG
                 print("[Shellow Codex] app resume start threadId=\(threadId)")
+#endif
                 let next = await coreSession.resumeCodexThread(threadId: threadId)
+#if DEBUG
                 print("[Shellow Codex] app resume received elapsed_ms=\(appShellElapsedMs(since: started)) threadId=\(next.threadId ?? "nil") messages=\(next.messages.count) opError=\(next.operation.lastError ?? "")")
+#endif
                 updateCodexSession(next)
                 if let cwd = codexSession.cwd {
                     codexReconnectTarget = codexReconnectTarget?.replacingCwd(cwd)
@@ -476,6 +564,9 @@ struct AppShell: View {
         }
 
         if !didConnect {
+            if pendingHostKeyTrust != nil {
+                return
+            }
             reconnectTarget = nil
             codexReconnectTarget = nil
             claudeReconnectTarget = nil
@@ -586,6 +677,10 @@ struct AppShell: View {
                 return true
             }
 
+            if pendingHostKeyTrust != nil {
+                return true
+            }
+
             _ = coreSession.disconnectLiveShell()
         }
 
@@ -627,6 +722,10 @@ struct AppShell: View {
                         )
                     )
                 }
+                return true
+            }
+
+            if pendingHostKeyTrust != nil {
                 return true
             }
 
@@ -922,18 +1021,34 @@ struct AppShell: View {
     private func updateSession(_ next: TerminalSession) {
         session = next
         advanceTerminalRenderTick()
+        captureHostKeyConfirmationIfNeeded(from: next)
         captureObservedHostKeyIfNeeded(from: next)
     }
 
     private func updateCodexSession(_ next: CodexSnapshot) {
+#if DEBUG
         print("[Shellow Codex] app update snapshot status=\(next.status.rawValue) threadId=\(next.threadId ?? "nil") messages=\(next.messages.count) threads=\(next.threads.threads.count) opRunning=\(next.operation.isRunning) opError=\(next.operation.lastError ?? "")")
-        codexSession = next
-        rememberCodexResumePoint(from: next)
-        captureObservedHostKeyIfNeeded(from: next)
+#endif
+        var resolved = next
+        if !next.messagesReplaceAll, next.messagesStartIndex <= codexSession.messages.count {
+            var messages = codexSession.messages
+            messages.replaceSubrange(next.messagesStartIndex..., with: next.messages)
+            resolved.messages = messages
+        }
+        codexSession = resolved
+        captureHostKeyConfirmationIfNeeded(from: resolved)
+        rememberCodexResumePoint(from: resolved)
+        captureObservedHostKeyIfNeeded(from: resolved)
+        if resolved.lastError?.contains("daemon bootstrap --remote-control") == true,
+           codexBootstrapPromptEndpoint == nil,
+           codexBootstrapError == nil {
+            codexBootstrapPromptEndpoint = codexReconnectTarget?.profile.endpoint ?? resolved.endpoint
+        }
     }
 
     private func updateClaudeSession(_ next: CodexSnapshot) {
         claudeSession = next
+        captureHostKeyConfirmationIfNeeded(from: next, mode: .claude)
         if let sessionID = next.threadId?.trimmingCharacters(in: .whitespacesAndNewlines),
            !sessionID.isEmpty,
            let target = claudeReconnectTarget {
@@ -955,6 +1070,126 @@ struct AppShell: View {
                 )
             }
         }
+    }
+
+    private func hostKeyFingerprint(in message: String?) -> String? {
+        guard let message,
+              let range = message.range(of: hostKeyConfirmationPrefix) else { return nil }
+        let fingerprint = message[range.upperBound...]
+            .split(whereSeparator: { $0.isWhitespace })
+            .first
+            .map(String.init)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return fingerprint?.isEmpty == false ? fingerprint : nil
+    }
+
+    private func captureHostKeyConfirmationIfNeeded(from snapshot: TerminalSession) {
+        guard pendingHostKeyTrust == nil,
+              let fingerprint = snapshot.rows.reversed().compactMap({ hostKeyFingerprint(in: $0.text) }).first,
+              reconnectTarget?.profile.trustedHostKeySHA256?.isEmpty ?? true else { return }
+        pendingHostKeyTrust = PendingHostKeyTrust(fingerprint: fingerprint, mode: .terminal)
+    }
+
+    private func captureHostKeyConfirmationIfNeeded(
+        from snapshot: CodexSnapshot,
+        mode: HostConnectMode = .codex
+    ) {
+        let trustedHostKey: String?
+        switch mode {
+        case .terminal:
+            trustedHostKey = reconnectTarget?.profile.trustedHostKeySHA256
+        case .codex:
+            trustedHostKey = codexReconnectTarget?.profile.trustedHostKeySHA256
+        case .claude:
+            trustedHostKey = claudeReconnectTarget?.profile.trustedHostKeySHA256
+        }
+        guard pendingHostKeyTrust == nil,
+              let fingerprint = hostKeyFingerprint(in: snapshot.lastError)
+                ?? snapshot.messages.reversed().compactMap({ hostKeyFingerprint(in: $0.text) }).first,
+              trustedHostKey?.isEmpty ?? true else { return }
+        pendingHostKeyTrust = PendingHostKeyTrust(fingerprint: fingerprint, mode: mode)
+    }
+
+    private func cancelPendingHostKeyTrust() {
+        guard let pending = pendingHostKeyTrust else { return }
+        pendingHostKeyTrust = nil
+        switch pending.mode {
+        case .terminal:
+            reconnectTarget = nil
+            updateSession(coreSession.disconnectLiveShell())
+        case .codex:
+            codexReconnectTarget = nil
+            updateCodexSession(coreSession.disconnectCodex())
+        case .claude:
+            claudeReconnectTarget = nil
+            updateClaudeSession(coreSession.disconnectClaude())
+        }
+    }
+
+    private func trustPendingHostKeyAndReconnect() {
+        guard let pending = pendingHostKeyTrust else { return }
+        pendingHostKeyTrust = nil
+        switch pending.mode {
+        case .terminal:
+            guard let target = reconnectTarget else { return }
+            var profile = target.profile
+            profile.trustedHostKeySHA256 = pending.fingerprint
+            if let index = profiles.firstIndex(where: { $0.id == profile.id }) {
+                profiles[index] = profile
+            }
+            reconnectTarget = target.replacingProfile(profile)
+            reconnect()
+        case .codex:
+            guard let target = codexReconnectTarget else { return }
+            var profile = target.profile
+            profile.trustedHostKeySHA256 = pending.fingerprint
+            if let index = profiles.firstIndex(where: { $0.id == profile.id }) {
+                profiles[index] = profile
+            }
+            codexReconnectTarget = target.replacingProfile(profile)
+            reconnectCodex()
+        case .claude:
+            guard let target = claudeReconnectTarget else { return }
+            var profile = target.profile
+            profile.trustedHostKeySHA256 = pending.fingerprint
+            if let index = profiles.firstIndex(where: { $0.id == profile.id }) {
+                profiles[index] = profile
+            }
+            claudeReconnectTarget = target.replacingProfile(profile)
+            reconnectClaude()
+        }
+    }
+
+    @MainActor
+    private func bootstrapRemoteCodexAndReconnect() async {
+        guard let target = codexReconnectTarget else { return }
+        _ = coreSession.disconnectCodex()
+        let setupSession = ShellowCoreSession()
+        let result: TerminalSession
+        switch target {
+        case .password(let profile, let password, _, _):
+            result = await setupSession.connectPasswordExec(
+                to: profile,
+                password: password,
+                command: codexRemoteControlBootstrapCommand
+            )
+        case .privateKey(let profile, let privateKeyPEM, let passphrase, _, _):
+            result = await setupSession.connectPrivateKeyExec(
+                to: profile,
+                privateKeyPEM: privateKeyPEM,
+                passphrase: passphrase,
+                command: codexRemoteControlBootstrapCommand
+            )
+        }
+        let output = result.rows.map(\.text).joined(separator: "\n")
+        guard output.contains("__SHELLOW_CODEX_BOOTSTRAP_OK__") else {
+            codexBootstrapError = result.rows.reversed()
+                .map(\.text)
+                .first { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+                ?? "The remote setup command did not complete successfully."
+            return
+        }
+        reconnectCodex()
     }
 
     @MainActor
@@ -1015,6 +1250,34 @@ struct AppShell: View {
 
     private func advanceTerminalRenderTick() {
         terminalRenderTick &+= 1
+    }
+
+    private func handleScenePhaseChange(_ phase: ScenePhase) {
+        switch phase {
+        case .background:
+            reconnectTerminalAfterBackground = session.state != .disconnected && reconnectTarget != nil
+            reconnectCodexAfterBackground = codexSession.status != .disconnected && codexReconnectTarget != nil
+        case .active:
+            let terminal = coreSession.pollLiveShell()
+            updateSession(terminal)
+#if DEBUG
+            if ProcessInfo.processInfo.arguments.contains("--shellow-simulator-show-codex-usage") {
+                return
+            }
+#endif
+            let codex = coreSession.pollCodex()
+            updateCodexSession(codex)
+            if reconnectTerminalAfterBackground, terminal.state == .disconnected {
+                reconnect()
+            }
+            if reconnectCodexAfterBackground, codex.status == .disconnected || codex.status == .failed {
+                reconnectCodex()
+            }
+            reconnectTerminalAfterBackground = false
+            reconnectCodexAfterBackground = false
+        default:
+            break
+        }
     }
 
     private func captureObservedHostKeyIfNeeded(from session: TerminalSession) {
@@ -1211,6 +1474,7 @@ struct AppShell: View {
             "--shellow-simulator-seed-local",
             "--shellow-simulator-show-password",
             "--shellow-simulator-show-settings",
+            "--shellow-simulator-show-codex-usage",
             "--shellow-simulator-connect-terminal",
             "--shellow-simulator-connect-codex"
         ]
@@ -1220,6 +1484,76 @@ struct AppShell: View {
 
         if arguments.contains("--shellow-simulator-show-settings") {
             isSettingsPresented = true
+            return
+        }
+
+        if arguments.contains("--shellow-simulator-show-codex-usage") {
+            let resetBase = UInt64(Date().timeIntervalSince1970)
+            var preview = CodexSnapshot.disconnected()
+            preview.title = "Usage Preview"
+            preview.endpoint = "preview.local"
+            preview.cwd = "/Users/demo/Shellow"
+            preview.status = .connected
+            preview.threadId = "preview-thread"
+            preview.messages = [
+                CodexMessage(
+                    id: "preview-user",
+                    role: .user,
+                    text: "Show the current Codex usage.",
+                    kind: .userMessage
+                ),
+                CodexMessage(
+                    id: "preview-assistant",
+                    role: .assistant,
+                    text: "Context and account limits are available above this conversation.",
+                    kind: .finalAnswer
+                )
+            ]
+            preview.usage = CodexUsageState(
+                thread: CodexThreadTokenUsage(
+                    last: CodexTokenUsageBreakdown(
+                        cachedInputTokens: 18_240,
+                        inputTokens: 36_500,
+                        outputTokens: 2_800,
+                        reasoningOutputTokens: 1_120,
+                        totalTokens: 39_300
+                    ),
+                    total: CodexTokenUsageBreakdown(
+                        cachedInputTokens: 42_600,
+                        inputTokens: 81_200,
+                        outputTokens: 7_400,
+                        reasoningOutputTokens: 3_180,
+                        totalTokens: 88_600
+                    ),
+                    modelContextWindow: 128_000
+                ),
+                rateLimits: CodexRateLimitSnapshot(
+                    limitId: "codex",
+                    limitName: "Codex",
+                    planType: "plus",
+                    primary: CodexRateLimitWindow(
+                        usedPercent: 24,
+                        resetsAt: resetBase + 3_600,
+                        windowDurationMins: 300
+                    ),
+                    secondary: CodexRateLimitWindow(
+                        usedPercent: 61,
+                        resetsAt: resetBase + 172_800,
+                        windowDurationMins: 10_080
+                    ),
+                    credits: CodexCreditsSnapshot(
+                        hasCredits: true,
+                        unlimited: false,
+                        balance: "12.50"
+                    ),
+                    individualLimit: nil,
+                    rateLimitReachedType: nil
+                ),
+                isLoadingRateLimits: false,
+                rateLimitsError: nil
+            )
+            updateCodexSession(preview)
+            showCodex()
             return
         }
 
@@ -1350,6 +1684,30 @@ private extension CodexReconnectTarget {
             .password(profile: profile, password: password, cwd: cwd, threadID: threadID)
         case .privateKey(let profile, let privateKeyPEM, let passphrase, let cwd, _):
             .privateKey(profile: profile, privateKeyPEM: privateKeyPEM, passphrase: passphrase, cwd: cwd, threadID: threadID)
+        }
+    }
+}
+
+private extension ClaudeReconnectTarget {
+    var profile: HostProfile {
+        switch self {
+        case .password(let profile, _, _, _), .privateKey(let profile, _, _, _, _):
+            profile
+        }
+    }
+
+    func replacingProfile(_ profile: HostProfile) -> ClaudeReconnectTarget {
+        switch self {
+        case .password(_, let password, let cwd, let sessionID):
+            .password(profile: profile, password: password, cwd: cwd, sessionID: sessionID)
+        case .privateKey(_, let privateKeyPEM, let passphrase, let cwd, let sessionID):
+            .privateKey(
+                profile: profile,
+                privateKeyPEM: privateKeyPEM,
+                passphrase: passphrase,
+                cwd: cwd,
+                sessionID: sessionID
+            )
         }
     }
 }
