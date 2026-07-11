@@ -335,6 +335,7 @@ impl Drop for ExecStdioHandle {
 }
 
 #[cfg(feature = "native-integrations")]
+#[derive(Clone)]
 pub struct RusshConnectOptions {
     pub host: String,
     pub port: u16,
@@ -349,12 +350,44 @@ pub struct RusshConnectOptions {
 }
 
 #[cfg(feature = "native-integrations")]
+#[derive(Clone)]
 pub enum RusshAuthMethod {
     Password(String),
     PrivateKey {
         private_key_pem: String,
         passphrase: Option<String>,
     },
+}
+
+#[cfg(feature = "native-integrations")]
+pub fn exec_input_blocking(
+    options: RusshConnectOptions,
+    command: &str,
+    input: &[u8],
+) -> Result<String, String> {
+    let command = command.to_string();
+    let input = input.to_vec();
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .thread_name("shellow-russh-input")
+        .build()
+        .map_err(|error| format!("tokio runtime failed: {error}"))?;
+
+    runtime.block_on(async move {
+        let mut actor = RusshSessionActor::connect(options).await?;
+        let result = actor.exec_with_input(&command, &input).await;
+        let _ = actor.disconnect().await;
+        let (output, exit_status) =
+            result.map_err(|error| format!("ssh input exec failed: {error}"))?;
+        if exit_status.unwrap_or_default() != 0 {
+            return Err(format!(
+                "remote input command exited with status {}: {}",
+                exit_status.unwrap_or_default(),
+                output.trim()
+            ));
+        }
+        Ok(output)
+    })
 }
 
 #[cfg(feature = "native-integrations")]
@@ -759,6 +792,37 @@ impl RusshSessionActor {
         }
 
         Ok(String::from_utf8_lossy(&output).into_owned())
+    }
+
+    pub async fn exec_with_input(
+        &mut self,
+        command: &str,
+        input: &[u8],
+    ) -> Result<(String, Option<u32>), russh::Error> {
+        let mut channel = self.session.channel_open_session().await?;
+        let _ = channel.set_env(false, "COLORTERM", DEFAULT_COLORTERM).await;
+        channel.exec(true, command).await?;
+        if !input.is_empty() {
+            channel.data_bytes(input.to_vec()).await?;
+        }
+        channel.eof().await?;
+
+        let mut output = Vec::new();
+        let mut exit_status = None;
+        while let Some(message) = channel.wait().await {
+            match message {
+                russh::ChannelMsg::Data { data } | russh::ChannelMsg::ExtendedData { data, .. } => {
+                    output.extend_from_slice(&data)
+                }
+                russh::ChannelMsg::ExitStatus {
+                    exit_status: status,
+                } => {
+                    exit_status = Some(status);
+                }
+                _ => {}
+            }
+        }
+        Ok((String::from_utf8_lossy(&output).into_owned(), exit_status))
     }
 
     pub async fn disconnect(&mut self) -> Result<(), russh::Error> {

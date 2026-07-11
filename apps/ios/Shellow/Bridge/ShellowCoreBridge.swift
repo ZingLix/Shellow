@@ -90,6 +90,12 @@ final class ShellowCoreSession: @unchecked Sendable {
         }
     }
 
+    func claudeEventRevision() -> UInt64 {
+        withLockedEngine {
+            shellow_engine_claude_event_revision(engine)
+        }
+    }
+
     func setRendererOverlayJSON(_ overlayJSON: String) -> String {
         withLockedEngine {
             overlayJSON.withCString { pointer in
@@ -682,6 +688,157 @@ final class ShellowCoreSession: @unchecked Sendable {
     func disconnectCodex() -> CodexSnapshot {
         withLockedEngine {
             decodeCodex(shellow_engine_disconnect_codex_json(engine), label: "disconnect")
+        }
+    }
+
+    func claudeSnapshot() -> CodexSnapshot {
+        withLockedEngine {
+            decodeCodex(shellow_engine_claude_snapshot_json(engine), label: "claude_snapshot")
+        }
+    }
+
+    func startClaudePassword(
+        to profile: HostProfile,
+        password: String,
+        cwd: String,
+        sessionId: String = ""
+    ) async -> CodexSnapshot {
+        await withCheckedContinuation { continuation in
+            DispatchQueue.global(qos: .userInitiated).async {
+                let result = self.withLockedEngine {
+                    let trusted = profile.trustedHostKeySHA256 ?? ""
+                    return profile.name.withCString { name in
+                        profile.host.withCString { host in
+                            profile.username.withCString { username in
+                                trusted.withCString { trusted in
+                                    password.withCString { password in
+                                        cwd.withCString { cwd in
+                                            sessionId.withCString { sessionId in
+                                                self.decodeCodex(
+                                                    shellow_engine_start_claude_password_json(
+                                                        self.engine,
+                                                        name,
+                                                        host,
+                                                        UInt16(clamping: profile.port),
+                                                        username,
+                                                        trusted,
+                                                        password,
+                                                        cwd,
+                                                        sessionId
+                                                    ),
+                                                    label: "start_claude_password"
+                                                )
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                continuation.resume(returning: result)
+            }
+        }
+    }
+
+    func startClaudePrivateKey(
+        to profile: HostProfile,
+        privateKeyPEM: String,
+        passphrase: String?,
+        cwd: String,
+        sessionId: String = ""
+    ) async -> CodexSnapshot {
+        await withCheckedContinuation { continuation in
+            DispatchQueue.global(qos: .userInitiated).async {
+                let result = self.withLockedEngine {
+                    let trusted = profile.trustedHostKeySHA256 ?? ""
+                    let passphrase = passphrase ?? ""
+                    return profile.name.withCString { name in
+                        profile.host.withCString { host in
+                            profile.username.withCString { username in
+                                trusted.withCString { trusted in
+                                    privateKeyPEM.withCString { key in
+                                        passphrase.withCString { passphrase in
+                                            cwd.withCString { cwd in
+                                                sessionId.withCString { sessionId in
+                                                    self.decodeCodex(
+                                                        shellow_engine_start_claude_private_key_json(
+                                                            self.engine,
+                                                            name,
+                                                            host,
+                                                            UInt16(clamping: profile.port),
+                                                            username,
+                                                            trusted,
+                                                            key,
+                                                            passphrase,
+                                                            cwd,
+                                                            sessionId
+                                                        ),
+                                                        label: "start_claude_private_key"
+                                                    )
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                continuation.resume(returning: result)
+            }
+        }
+    }
+
+    func pollClaude() -> CodexSnapshot {
+        withLockedEngine {
+            decodeCodex(shellow_engine_poll_claude_json(engine), label: "poll_claude")
+        }
+    }
+
+    func sendClaudeMessage(_ message: String) -> CodexSnapshot {
+        withLockedEngine {
+            message.withCString { message in
+                decodeCodex(shellow_engine_send_claude_message_json(engine, message), label: "send_claude")
+            }
+        }
+    }
+
+    func updateClaudeSettings(model: String, permissionMode: String) -> CodexSnapshot {
+        withLockedEngine {
+            model.withCString { model in
+                permissionMode.withCString { permissionMode in
+                    decodeCodex(
+                        shellow_engine_update_claude_settings_json(engine, model, permissionMode),
+                        label: "update_claude_settings"
+                    )
+                }
+            }
+        }
+    }
+
+    func interruptClaudeTurn() -> CodexSnapshot {
+        withLockedEngine {
+            decodeCodex(shellow_engine_interrupt_claude_turn_json(engine), label: "interrupt_claude")
+        }
+    }
+
+    func answerClaudeApproval(requestId: String, decision: String) -> CodexSnapshot {
+        withLockedEngine {
+            requestId.withCString { requestId in
+                decision.withCString { decision in
+                    decodeCodex(
+                        shellow_engine_answer_claude_approval_json(engine, requestId, decision),
+                        label: "answer_claude_approval"
+                    )
+                }
+            }
+        }
+    }
+
+    func disconnectClaude() -> CodexSnapshot {
+        withLockedEngine {
+            decodeCodex(shellow_engine_disconnect_claude_json(engine), label: "disconnect_claude")
         }
     }
 

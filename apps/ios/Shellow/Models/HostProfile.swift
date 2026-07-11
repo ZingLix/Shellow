@@ -58,6 +58,7 @@ struct HostProfile: Identifiable, Hashable, Codable {
 enum ProfileLaunchKind: String, CaseIterable, Identifiable, Codable {
     case terminal
     case codex
+    case claude
 
     var id: String { rawValue }
 
@@ -65,6 +66,7 @@ enum ProfileLaunchKind: String, CaseIterable, Identifiable, Codable {
         switch self {
         case .terminal: "Terminal"
         case .codex: "Codex"
+        case .claude: "Claude Code"
         }
     }
 
@@ -72,6 +74,7 @@ enum ProfileLaunchKind: String, CaseIterable, Identifiable, Codable {
         switch self {
         case .terminal: "terminal"
         case .codex: "sparkles"
+        case .claude: "bolt.horizontal.circle"
         }
     }
 
@@ -79,6 +82,7 @@ enum ProfileLaunchKind: String, CaseIterable, Identifiable, Codable {
         switch self {
         case .terminal: "Open a remote shell and persistent workspaces"
         case .codex: "Open remote coding conversations"
+        case .claude: "Open durable Claude Code sessions over SSH"
         }
     }
 }

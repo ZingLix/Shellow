@@ -121,6 +121,37 @@ char *shellow_engine_fork_codex_thread_json(ShellowEngine *engine, const char *t
 char *shellow_engine_interrupt_codex_turn_json(ShellowEngine *engine);
 char *shellow_engine_answer_codex_approval_json(ShellowEngine *engine, const char *request_id, const char *decision);
 char *shellow_engine_disconnect_codex_json(ShellowEngine *engine);
+char *shellow_engine_claude_snapshot_json(const ShellowEngine *engine);
+uint64_t shellow_engine_claude_event_revision(const ShellowEngine *engine);
+char *shellow_engine_start_claude_password_json(
+    ShellowEngine *engine,
+    const char *name,
+    const char *host,
+    uint16_t port,
+    const char *username,
+    const char *trusted_host_key_sha256,
+    const char *password,
+    const char *cwd,
+    const char *session_id
+);
+char *shellow_engine_start_claude_private_key_json(
+    ShellowEngine *engine,
+    const char *name,
+    const char *host,
+    uint16_t port,
+    const char *username,
+    const char *trusted_host_key_sha256,
+    const char *private_key_pem,
+    const char *passphrase,
+    const char *cwd,
+    const char *session_id
+);
+char *shellow_engine_poll_claude_json(ShellowEngine *engine);
+char *shellow_engine_send_claude_message_json(ShellowEngine *engine, const char *message);
+char *shellow_engine_update_claude_settings_json(ShellowEngine *engine, const char *model, const char *permission_mode);
+char *shellow_engine_interrupt_claude_turn_json(ShellowEngine *engine);
+char *shellow_engine_answer_claude_approval_json(ShellowEngine *engine, const char *request_id, const char *decision);
+char *shellow_engine_disconnect_claude_json(ShellowEngine *engine);
 
 void shellow_string_free(char *value);
 
