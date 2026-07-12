@@ -247,8 +247,6 @@ private enum class HostConnectMode(val passwordTitle: String) {
 
 private const val TerminalDirectInputSentinel = "\u2060"
 private const val RendererLogTag = "ShellowRenderer"
-private const val TerminalKeyboardLayoutCommitDelayMs = 260L
-
 private data class TerminalSelectionPoint(
   val row: Int,
   val column: Int,
@@ -5262,10 +5260,6 @@ private fun TerminalScreen(
   val terminalListState = rememberLazyListState()
   val terminalScope = rememberCoroutineScope()
   val keyboardOffsetPx = WindowInsets.ime.getBottom(density)
-  var layoutKeyboardOffsetPx by remember { mutableIntStateOf(keyboardOffsetPx) }
-  val keyboardVisualDeltaDp = with(density) { (keyboardOffsetPx - layoutKeyboardOffsetPx).toDp() }
-  val keyboardLayoutOffsetDp = with(density) { layoutKeyboardOffsetPx.toDp() }
-  val terminalLiftDp = with(density) { (keyboardOffsetPx - layoutKeyboardOffsetPx).coerceAtLeast(0).toDp() }
   val terminalHeaderInsetDp = 76.dp
   val terminalSearchBarTopDp = 64.dp
   val terminalSearchInsetDp = 130.dp
@@ -5284,7 +5278,11 @@ private fun TerminalScreen(
   val gridVisible = visibleGrid != null
   val rustSurfaceEnabled = gridVisible
   val viewportRowCount = visibleGrid?.rows?.toInt()?.coerceAtLeast(1) ?: 1
-  val viewportFirstRow = visibleGrid?.viewportFirstRow(terminalListState.firstVisibleItemIndex) ?: 0
+  val viewportFirstRow =
+    visibleGrid?.viewportFirstRow(
+      firstVisibleItemIndex = terminalListState.firstVisibleItemIndex,
+      isAtBottom = !terminalListState.canScrollForward,
+    ) ?: 0
   val rendererOverlayJson =
     visibleGrid?.let { androidRendererOverlayJson(it, selection, search, viewportFirstRow, viewportRowCount) }
 
@@ -5383,11 +5381,6 @@ private fun TerminalScreen(
 
   LaunchedEffect(gridCellWidthPx, terminalRowHeightPx, viewportWidthPx, viewportHeightPx) {
     reportViewportSize(viewportWidthPx, viewportHeightPx)
-  }
-
-  LaunchedEffect(keyboardOffsetPx) {
-    delay(TerminalKeyboardLayoutCommitDelayMs)
-    layoutKeyboardOffsetPx = keyboardOffsetPx
   }
 
   LaunchedEffect(Unit) {
@@ -5565,6 +5558,7 @@ private fun TerminalScreen(
   Column(
     Modifier
       .fillMaxSize()
+      .imePadding()
       .background(displaySettings.terminalTheme.background)
       .onPreviewKeyEvent { event ->
         if (event.type != KeyEventType.KeyDown) {
@@ -5636,8 +5630,7 @@ private fun TerminalScreen(
         Modifier
           .weight(1f)
           .fillMaxWidth()
-          .clickable { focusTerminalInput() }
-          .offset(y = -terminalLiftDp),
+          .clickable { focusTerminalInput() },
     ) {
       if (visibleGrid != null && rustSurfaceEnabled) {
         val surfaceHeightDp = with(density) { (viewportRowCount * terminalRowHeightPx).coerceAtLeast(1f).toDp() }
@@ -5784,8 +5777,7 @@ private fun TerminalScreen(
         Modifier
           .fillMaxWidth()
           .background(ShellowColors.PanelBackground)
-          .padding(horizontal = 10.dp, vertical = 3.dp)
-          .offset(y = -keyboardVisualDeltaDp),
+          .padding(horizontal = 10.dp, vertical = 3.dp),
       horizontalArrangement = Arrangement.spacedBy(6.dp),
       verticalAlignment = Alignment.CenterVertically,
     ) {
@@ -5906,8 +5898,7 @@ private fun TerminalScreen(
           .fillMaxWidth()
           .background(ShellowColors.PanelBackground)
           .horizontalScroll(rememberScrollState())
-          .padding(horizontal = 10.dp, vertical = 3.dp)
-          .offset(y = -keyboardVisualDeltaDp),
+          .padding(horizontal = 10.dp, vertical = 3.dp),
       horizontalArrangement = Arrangement.spacedBy(6.dp),
       verticalAlignment = Alignment.CenterVertically,
     ) {
@@ -5948,7 +5939,7 @@ private fun TerminalScreen(
       }
     }
     }
-    Spacer(Modifier.height(6.dp + keyboardLayoutOffsetDp).fillMaxWidth().background(ShellowColors.PanelBackground))
+    Spacer(Modifier.height(6.dp).fillMaxWidth().background(ShellowColors.PanelBackground))
   }
 
   pendingPaste?.let { paste ->
@@ -8425,10 +8416,14 @@ private fun TerminalSession.promptInputText(): String {
   return if (row.style == TerminalRowStyle.Prompt) row.text else ""
 }
 
-private fun TerminalGridSnapshot.viewportFirstRow(firstVisibleItemIndex: Int): Int {
+private fun TerminalGridSnapshot.viewportFirstRow(
+  firstVisibleItemIndex: Int,
+  isAtBottom: Boolean,
+): Int {
   if (activeScreen != TerminalScreenKind.Primary || lines.size <= rows) return 0
   val visibleRows = rows.toInt().coerceAtLeast(1)
   val maxFirstRow = (lines.size - visibleRows).coerceAtLeast(0)
+  if (isAtBottom) return maxFirstRow
   return firstVisibleItemIndex.coerceIn(0, maxFirstRow)
 }
 
