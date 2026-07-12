@@ -580,31 +580,6 @@ enum AuthenticationKind: String, CaseIterable, Identifiable, Codable {
     }
 }
 
-extension HostProfile {
-    static let samples: [HostProfile] = [
-        HostProfile(
-            name: "Staging",
-            host: "staging.example.com",
-            port: 22,
-            username: "deploy",
-            authentication: .privateKey,
-            launchKind: .terminal,
-            trustedHostKeySHA256: "SHA256:sample-staging-host-key",
-            lastConnected: .now.addingTimeInterval(-1_800)
-        ),
-        HostProfile(
-            name: "Workshop",
-            host: "shell.example.com",
-            port: 22,
-            username: "ops",
-            authentication: .password,
-            launchKind: .codex,
-            trustedHostKeySHA256: nil,
-            lastConnected: .now.addingTimeInterval(-86_400)
-        )
-    ]
-}
-
 enum HostProfileStore {
     private static let key = "shellow.hostProfiles.v1"
 

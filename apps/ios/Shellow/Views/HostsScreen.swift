@@ -13,9 +13,11 @@ struct HostsScreen: View {
     @State private var draftHost = ""
     @State private var draftPort = "22"
     @State private var draftUser = "root"
+    @State private var draftLaunchKind = ProfileLaunchKind.terminal
     @State private var isAddingProfile = false
     @State private var isManagingKeys = false
     @State private var selectedProfile: HostProfile?
+    @State private var profilePendingDeletion: HostProfile?
     private let secretStore = SSHSecretStore.shared
 
     var body: some View {
@@ -43,6 +45,9 @@ struct HostsScreen: View {
                             },
                             duplicate: {
                                 duplicateProfile(profile)
+                            },
+                            delete: {
+                                profilePendingDeletion = profile
                             }
                         )
                     }
@@ -99,6 +104,7 @@ struct HostsScreen: View {
                 draftHost: $draftHost,
                 draftPort: $draftPort,
                 draftUser: $draftUser,
+                draftLaunchKind: $draftLaunchKind,
                 addProfile: addProfile
             )
             .presentationDetents([.large])
@@ -108,6 +114,22 @@ struct HostsScreen: View {
                 credentials: $sshKeys
             )
             .presentationDetents([.large])
+        }
+        .alert("Delete this profile?", isPresented: Binding(
+            get: { profilePendingDeletion != nil },
+            set: { if !$0 { profilePendingDeletion = nil } }
+        )) {
+            Button("Cancel", role: .cancel) {
+                profilePendingDeletion = nil
+            }
+            Button("Delete", role: .destructive) {
+                if let profilePendingDeletion {
+                    deleteProfile(profilePendingDeletion)
+                }
+                profilePendingDeletion = nil
+            }
+        } message: {
+            Text("The saved profile and its profile-scoped credentials will be removed from this device.")
         }
     }
 
@@ -138,7 +160,7 @@ struct HostsScreen: View {
                 port: port,
                 username: user,
                 authentication: .automatic,
-                launchKind: .terminal,
+                launchKind: draftLaunchKind,
                 trustedHostKeySHA256: nil,
                 lastConnected: nil
             )
@@ -148,6 +170,7 @@ struct HostsScreen: View {
         draftHost = ""
         draftPort = "22"
         draftUser = "root"
+        draftLaunchKind = .terminal
     }
 
     private var validDraftPort: Int? {
@@ -369,10 +392,6 @@ private struct HostConnectionSheet: View {
                         Text("Use 1–48 ASCII letters, numbers, hyphens, or underscores; start with a letter or number.")
                             .font(.footnote)
                             .foregroundStyle(ShellowTheme.warning)
-                    } else if let capabilityWarning {
-                        Text(capabilityWarning)
-                            .font(.footnote)
-                            .foregroundStyle(ShellowTheme.warning)
                     }
                 }
             }
@@ -441,14 +460,6 @@ private struct HostConnectionSheet: View {
         PersistentTerminalConfiguration.suggestedName(profileName: name, host: host)
     }
 
-    private var capabilityWarning: String? {
-        guard
-            let capability = profile.capabilityReport?.capability(for: persistentTerminalBackend),
-            capability.supportLevel != .supported
-        else { return nil }
-        return "This host was last detected without full \(persistentTerminalBackend.displayTitle) support; you can still save and try it."
-    }
-
     private var configurationIsValid: Bool {
         serverRequirement == nil
             && (!usesPersistentTerminal
@@ -511,7 +522,6 @@ private struct PersistentTerminalCard: View {
     @Binding var backend: PersistentTerminalBackend
     @Binding var sessionName: String
     let suggestedName: String
-    let capability: RemoteComponentCapability?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -532,22 +542,6 @@ private struct PersistentTerminalCard: View {
                     }
                 }
                 .pickerStyle(.segmented)
-
-                if let capability {
-                    HStack(spacing: 7) {
-                        Circle()
-                            .fill(capability.supportLevel.statusColor)
-                            .frame(width: 7, height: 7)
-                        Text("Detected: \(capability.supportLevel.title)")
-                            .fontWeight(.semibold)
-                        if !capability.version.isEmpty {
-                            Text("· \(capability.version)")
-                                .foregroundStyle(.secondary)
-                                .lineLimit(1)
-                        }
-                    }
-                    .font(.caption)
-                }
 
                 TextField("Session name", text: $sessionName)
                     .textInputAutocapitalization(.never)
@@ -570,107 +564,6 @@ private struct PersistentTerminalCard: View {
             }
         }
         .font(.caption)
-        .padding(16)
-        .background(Color(.secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 16))
-    }
-}
-
-private struct HostCapabilityCard: View {
-    let report: RemoteHostCapabilityReport?
-    let isLoading: Bool
-    let errorMessage: String?
-    let canProbe: Bool
-    let refresh: () -> Void
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack(spacing: 10) {
-                Label("Target Capabilities", systemImage: "desktopcomputer")
-                    .font(.subheadline.weight(.semibold))
-
-                Spacer()
-
-                Button(action: refresh) {
-                    if isLoading {
-                        ProgressView()
-                            .controlSize(.small)
-                    } else {
-                        Image(systemName: "arrow.clockwise")
-                    }
-                }
-                .buttonStyle(.plain)
-                .disabled(!canProbe || isLoading)
-                .accessibilityLabel("Refresh target capabilities")
-            }
-
-            if let report {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text(report.system.displayTitle)
-                        .font(.subheadline.weight(.semibold))
-                    Text("\(report.system.architecture) · \(report.system.shellName) · \(report.system.kernelName) \(report.system.kernelRelease)")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(2)
-                }
-
-                Divider()
-
-                ForEach(report.components) { component in
-                    VStack(alignment: .leading, spacing: 5) {
-                        HStack(spacing: 8) {
-                            Circle()
-                                .fill(component.supportLevel.statusColor)
-                                .frame(width: 8, height: 8)
-                            Text(component.backend.displayTitle)
-                                .font(.subheadline.weight(.semibold))
-                            Spacer()
-                            Text(component.supportLevel.title)
-                                .font(.caption.weight(.semibold))
-                                .foregroundStyle(component.supportLevel.statusColor)
-                        }
-
-                        if !component.version.isEmpty {
-                            Text(component.version)
-                                .font(.caption.monospaced())
-                                .foregroundStyle(.secondary)
-                                .lineLimit(1)
-                        }
-
-                        Text(component.featureSummary)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-                }
-
-                Text(
-                    report.isStale
-                        ? "Detection is older than 24 hours. Refresh recommended."
-                        : "Checked \(report.detectedAt.formatted(date: .abbreviated, time: .shortened))"
-                )
-                .font(.caption2)
-                .foregroundStyle(report.isStale ? ShellowTheme.warning : ShellowTheme.muted)
-            } else if isLoading {
-                HStack(spacing: 10) {
-                    ProgressView()
-                        .controlSize(.small)
-                    Text("Detecting system and multiplexer support…")
-                        .foregroundStyle(.secondary)
-                }
-                .font(.caption)
-            } else if let errorMessage {
-                Label(errorMessage, systemImage: "exclamationmark.triangle")
-                    .font(.caption)
-                    .foregroundStyle(ShellowTheme.warning)
-            } else {
-                Text(
-                    canProbe
-                        ? "Tap refresh to inspect this host without opening an interactive terminal."
-                        : "Save a password or private key to enable read-only capability detection."
-                )
-                .font(.caption)
-                .foregroundStyle(.secondary)
-            }
-        }
         .padding(16)
         .background(Color(.secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 16))
     }
@@ -831,6 +724,7 @@ private struct NewHostProfileSheet: View {
     @Binding var draftHost: String
     @Binding var draftPort: String
     @Binding var draftUser: String
+    @Binding var draftLaunchKind: ProfileLaunchKind
     let addProfile: () -> Void
 
     @Environment(\.dismiss) private var dismiss
@@ -838,6 +732,15 @@ private struct NewHostProfileSheet: View {
     var body: some View {
         NavigationStack {
             Form {
+                Section("Open With") {
+                    Picker("Open With", selection: $draftLaunchKind) {
+                        ForEach(ProfileLaunchKind.allCases) { kind in
+                            Text(kind.title).tag(kind)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+                }
+
                 Section("Server Details") {
                     TextField("Name", text: $draftName)
                     TextField("Host", text: $draftHost)
@@ -851,7 +754,7 @@ private struct NewHostProfileSheet: View {
                 }
 
                 Section {
-                    Text(profileRequirement ?? "Only Host is required. New profiles use Terminal, Auto authentication, port 22, and user root.")
+                    Text(profileRequirement ?? "Only Host is required. Authentication defaults to Auto, with port 22 and user root.")
                         .font(.footnote)
                         .foregroundStyle(profileRequirement == nil ? .secondary : ShellowTheme.warning)
 
@@ -1238,6 +1141,7 @@ struct CodexScreen: View {
     @State private var showingSettings = false
     @State private var showingSessionSwitcher = false
     @State private var showingDirectoryPicker = false
+    @State private var showingUsageDetails = false
     @State private var settingsModel = ""
     @State private var settingsReasoningEffort = ""
     @State private var settingsServiceTier = ""
@@ -1255,7 +1159,6 @@ struct CodexScreen: View {
             codexHeader
             Divider()
             operationBanner
-            CodexUsageSummary(usage: snapshot.usage)
             if isShowingThread && snapshot.threadId != nil {
                 chatView
                 Divider()
@@ -1331,6 +1234,11 @@ struct CodexScreen: View {
                     )
                 }
             )
+        }
+        .sheet(isPresented: $showingUsageDetails) {
+            CodexUsageDetailsSheet(metrics: CodexUsageMetrics.values(for: snapshot.usage))
+                .presentationDetents([.medium, .large])
+                .presentationDragIndicator(.visible)
         }
         .sheet(isPresented: $showingSessionSwitcher) {
             CodexSessionSwitcherSheet(
@@ -1452,6 +1360,13 @@ struct CodexScreen: View {
                     .accessibilityLabel(snapshot.operation.label ?? "Codex operation running")
             }
 
+            if let metric = headerUsageMetric,
+               let progress = metric.progress {
+                CodexUsageRingButton(metric: metric, progress: progress) {
+                    showingUsageDetails = true
+                }
+            }
+
             Menu {
                 if let threadId = snapshot.threadId {
                     if let cursor = snapshot.threadDetail.turnsNextCursor,
@@ -1515,6 +1430,14 @@ struct CodexScreen: View {
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 10)
+    }
+
+    private var headerUsageMetric: CodexUsageMetricValue? {
+        let metrics = CodexUsageMetrics.values(for: snapshot.usage)
+        if isShowingThread, snapshot.threadId != nil {
+            return metrics.first { $0.id == "context" && $0.progress != nil }
+        }
+        return metrics.first { $0.title == "5h limit" && $0.progress != nil }
     }
 
     private var headerSubtitle: String {
@@ -1746,27 +1669,37 @@ struct CodexScreen: View {
     }
 
     private var projectHistoryView: some View {
-        VStack(spacing: 0) {
-            ScrollView {
-                LazyVStack(alignment: .leading, spacing: 18) {
-                    codexHomeSearchBar
-                    projectsSection
-                    recentConversationsSection
-                }
-                .padding(14)
+        ScrollView {
+            LazyVStack(alignment: .leading, spacing: 18) {
+                projectsSection
+                recentConversationsSection
             }
+            .padding(14)
+            .padding(.bottom, 64)
+        }
+        .safeAreaInset(edge: .bottom, spacing: 0) {
+            codexHomeSearchBar
+                .padding(.horizontal, 14)
+                .padding(.vertical, 10)
+                .background(.regularMaterial)
+                .overlay(alignment: .top) { Divider() }
         }
     }
 
     private var projectThreadsView: some View {
-        VStack(spacing: 0) {
-            ScrollView {
-                LazyVStack(alignment: .leading, spacing: 14) {
-                    projectSearchBar
-                    projectConversationsSection
-                }
-                .padding(14)
+        ScrollView {
+            LazyVStack(alignment: .leading, spacing: 14) {
+                projectConversationsSection
             }
+            .padding(14)
+            .padding(.bottom, 64)
+        }
+        .safeAreaInset(edge: .bottom, spacing: 0) {
+            projectSearchBar
+                .padding(.horizontal, 14)
+                .padding(.vertical, 10)
+                .background(.regularMaterial)
+                .overlay(alignment: .top) { Divider() }
         }
     }
 
@@ -1999,10 +1932,14 @@ struct CodexScreen: View {
     }
 
     private var composer: some View {
-        VStack(spacing: 4) {
-            if snapshot.turnActive {
-                CodexTurnStatusRow(onStop: onInterruptTurn)
-            }
+        VStack(alignment: .leading, spacing: 6) {
+            CodexComposerSettingsBar(
+                modelTitle: selectedModelTitle,
+                reasoningTitle: selectedReasoningTitle,
+                isFast: isFastMode,
+                approvalTitle: selectedApprovalTitle,
+                action: presentCodexSettings
+            )
 
             HStack(alignment: .bottom, spacing: 10) {
                 CodexMessageInput(
@@ -2010,6 +1947,17 @@ struct CodexScreen: View {
                     placeholder: snapshot.turnActive ? "Steer Codex" : "Message Codex",
                     isActiveTurn: snapshot.turnActive
                 )
+
+                if snapshot.turnActive {
+                    CodexActionIconButton(
+                        systemImage: "stop.fill",
+                        accessibilityLabel: "Interrupt Codex Turn",
+                        isEnabled: true,
+                        tint: .red
+                    ) {
+                        onInterruptTurn()
+                    }
+                }
 
                 if canSend {
                     CodexActionIconButton(
@@ -2029,17 +1977,27 @@ struct CodexScreen: View {
     }
 
     private var draftComposer: some View {
-        HStack(alignment: .bottom, spacing: 10) {
-            CodexMessageInput(text: $draft)
+        VStack(alignment: .leading, spacing: 6) {
+            CodexComposerSettingsBar(
+                modelTitle: selectedModelTitle,
+                reasoningTitle: selectedReasoningTitle,
+                isFast: isFastMode,
+                approvalTitle: selectedApprovalTitle,
+                action: presentCodexSettings
+            )
 
-            if canSendInitialDraft || isStartingDraftThread {
-                CodexActionIconButton(
-                    systemImage: "paperplane.fill",
-                    accessibilityLabel: "Send",
-                    isEnabled: canSendInitialDraft,
-                    isLoading: isStartingDraftThread
-                ) {
-                    Task { await sendInitialDraft() }
+            HStack(alignment: .bottom, spacing: 10) {
+                CodexMessageInput(text: $draft)
+
+                if canSendInitialDraft || isStartingDraftThread {
+                    CodexActionIconButton(
+                        systemImage: "paperplane.fill",
+                        accessibilityLabel: "Send",
+                        isEnabled: canSendInitialDraft,
+                        isLoading: isStartingDraftThread
+                    ) {
+                        Task { await sendInitialDraft() }
+                    }
                 }
             }
         }
@@ -2084,6 +2042,34 @@ struct CodexScreen: View {
             return "Default"
         }
         return modelOptions.first(where: { $0.id == model })?.name ?? model
+    }
+
+    private var selectedModelOption: CodexModelOption? {
+        guard let model = normalizeModel(snapshot.settings.model) else { return nil }
+        return modelOptions.first(where: { $0.id == model })
+    }
+
+    private var selectedReasoningTitle: String {
+        let effort = normalizeModel(snapshot.settings.reasoningEffort)
+            ?? selectedModelOption?.defaultReasoningEffort
+        guard let effort else { return "Default" }
+        return selectedModelOption?.reasoningEfforts.first(where: { $0.id == effort })?.name
+            ?? codexSettingDisplayName(effort)
+    }
+
+    private var isFastMode: Bool {
+        let tier = normalizeModel(snapshot.settings.serviceTier)
+            ?? selectedModelOption?.defaultServiceTier
+        return tier == "fast"
+    }
+
+    private var selectedApprovalTitle: String {
+        switch snapshot.settings.approvalPolicy {
+        case "untrusted": "Untrusted"
+        case "on-request": "On request"
+        case "never": "Never"
+        default: "Default"
+        }
     }
 
     private var settingsCanApply: Bool {
@@ -2633,6 +2619,7 @@ private struct CodexActionIconButton: View {
     let accessibilityLabel: String
     let isEnabled: Bool
     var isLoading = false
+    var tint: Color = ShellowTheme.accent
     let action: () -> Void
 
     var body: some View {
@@ -2647,7 +2634,7 @@ private struct CodexActionIconButton: View {
                 }
             }
             .frame(width: 34, height: 34)
-            .foregroundStyle(isEnabled ? ShellowTheme.accent : Color.secondary)
+            .foregroundStyle(isEnabled ? tint : Color.secondary)
             .background(Color(.tertiarySystemFill), in: RoundedRectangle(cornerRadius: 8))
             .contentShape(RoundedRectangle(cornerRadius: 8))
             .opacity(isEnabled ? 1 : 0.45)
@@ -2658,26 +2645,69 @@ private struct CodexActionIconButton: View {
     }
 }
 
-private struct CodexUsageSummary: View {
-    let usage: CodexUsageState
+private struct CodexComposerSettingsBar: View {
+    let modelTitle: String
+    let reasoningTitle: String
+    let isFast: Bool
+    let approvalTitle: String
+    let action: () -> Void
 
     var body: some View {
-        if !metrics.isEmpty {
-            ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 10) {
-                    ForEach(metrics) { metric in
-                        CodexUsageMetric(metric: metric)
-                    }
-                }
-                .padding(.horizontal, 14)
-                .padding(.vertical, 8)
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 6) {
+                CodexComposerSettingCapsule(
+                    systemImage: isFast ? "bolt.fill" : nil,
+                    text: "\(modelTitle) · \(reasoningTitle)",
+                    accessibilityLabel: "Model \(modelTitle), reasoning \(reasoningTitle)",
+                    action: action
+                )
+
+                CodexComposerSettingCapsule(
+                    systemImage: "shield",
+                    text: approvalTitle,
+                    accessibilityLabel: "Approval \(approvalTitle)",
+                    action: action
+                )
             }
-            .background(Color(.secondarySystemBackground).opacity(0.72))
-            .overlay(alignment: .bottom) { Divider() }
+            .padding(.horizontal, 1)
         }
     }
+}
 
-    private var metrics: [CodexUsageMetricValue] {
+private struct CodexComposerSettingCapsule: View {
+    let systemImage: String?
+    let text: String
+    let accessibilityLabel: String
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 5) {
+                if let systemImage {
+                    Image(systemName: systemImage)
+                        .font(.caption2.weight(.semibold))
+                }
+                Text(text)
+                    .font(.caption.weight(.medium))
+                    .lineLimit(1)
+            }
+            .foregroundStyle(.secondary)
+            .padding(.horizontal, 10)
+            .frame(height: 28)
+            .background(Color(.tertiarySystemFill), in: Capsule())
+            .overlay {
+                Capsule()
+                    .stroke(Color.primary.opacity(0.08), lineWidth: 1)
+            }
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(accessibilityLabel)
+        .accessibilityHint("Opens Codex settings")
+    }
+}
+
+private enum CodexUsageMetrics {
+    static func values(for usage: CodexUsageState) -> [CodexUsageMetricValue] {
         var values: [CodexUsageMetricValue] = []
 
         if let thread = usage.thread {
@@ -2690,8 +2720,8 @@ private struct CodexUsageSummary: View {
             values.append(CodexUsageMetricValue(
                 id: "context",
                 title: "Context",
-                value: window.map { "\(Self.compactCount(used)) / \(Self.compactCount($0))" }
-                    ?? Self.compactCount(used),
+                value: window.map { "\(compactCount(used)) / \(compactCount($0))" }
+                    ?? compactCount(used),
                 detail: progress.map { "\(Int(($0 * 100).rounded()))% used" } ?? "Latest turn",
                 progress: progress
             ))
@@ -2699,10 +2729,10 @@ private struct CodexUsageSummary: View {
 
         if let limits = usage.rateLimits {
             if let primary = limits.primary {
-                values.append(Self.rateLimitMetric(primary, fallbackTitle: "Primary limit", id: "primary"))
+                values.append(rateLimitMetric(primary, fallbackTitle: "Primary limit", id: "primary"))
             }
             if let secondary = limits.secondary {
-                values.append(Self.rateLimitMetric(secondary, fallbackTitle: "Secondary limit", id: "secondary"))
+                values.append(rateLimitMetric(secondary, fallbackTitle: "Secondary limit", id: "secondary"))
             }
             if let credits = limits.credits,
                credits.unlimited || credits.balance != nil {
@@ -2719,7 +2749,7 @@ private struct CodexUsageSummary: View {
                     id: "spend",
                     title: "Spend limit",
                     value: "\(spend.used) / \(spend.limit)",
-                    detail: Self.resetLabel(spend.resetsAt),
+                    detail: resetLabel(spend.resetsAt),
                     progress: Double(100 - min(spend.remainingPercent, 100)) / 100
                 ))
             }
@@ -2774,6 +2804,37 @@ private struct CodexUsageSummary: View {
     }()
 }
 
+private struct CodexUsageRingButton: View {
+    let metric: CodexUsageMetricValue
+    let progress: Double
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            ZStack {
+                Circle()
+                    .stroke(Color.secondary.opacity(0.2), lineWidth: 2)
+                Circle()
+                    .trim(from: 0, to: min(max(progress, 0), 1))
+                    .stroke(
+                        progress >= 0.9 ? ShellowTheme.warning : ShellowTheme.accent,
+                        style: StrokeStyle(lineWidth: 2, lineCap: .round)
+                    )
+                    .rotationEffect(.degrees(-90))
+                Text(metric.id == "context" ? "C" : "5h")
+                    .font(.system(size: 8, weight: .semibold, design: .rounded))
+                    .foregroundStyle(.secondary)
+            }
+            .frame(width: 25, height: 25)
+            .frame(width: 34, height: 34)
+            .contentShape(Circle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("\(metric.title), \(metric.detail). Show usage details")
+        .accessibilityValue("\(Int((progress * 100).rounded()))% used")
+    }
+}
+
 private struct CodexUsageMetricValue: Identifiable {
     let id: String
     let title: String
@@ -2782,56 +2843,51 @@ private struct CodexUsageMetricValue: Identifiable {
     let progress: Double?
 }
 
-private struct CodexUsageMetric: View {
-    let metric: CodexUsageMetricValue
+private struct CodexUsageDetailsSheet: View {
+    @Environment(\.dismiss) private var dismiss
+
+    let metrics: [CodexUsageMetricValue]
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 3) {
-            Text(metric.title)
-                .font(.caption2)
-                .foregroundStyle(.secondary)
-            Text(metric.value)
-                .font(.caption.weight(.semibold))
-                .foregroundStyle(.primary)
-                .monospacedDigit()
-            if let progress = metric.progress {
-                ProgressView(value: progress)
-                    .tint(progress >= 0.9 ? ShellowTheme.warning : ShellowTheme.accent)
-                    .frame(width: 104)
+        NavigationStack {
+            List(metrics) { metric in
+                CodexUsageMetricRow(metric: metric)
             }
-            Text(metric.detail)
-                .font(.caption2)
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
+            .navigationTitle("Usage")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Done") { dismiss() }
+                }
+            }
         }
-        .frame(minWidth: 112, alignment: .leading)
-        .accessibilityElement(children: .combine)
     }
 }
 
-private struct CodexTurnStatusRow: View {
-    let onStop: () -> Void
+private struct CodexUsageMetricRow: View {
+    let metric: CodexUsageMetricValue
 
     var body: some View {
-        HStack(spacing: 8) {
-            ProgressView()
-                .controlSize(.mini)
-            Text("Working")
-                .font(.caption2)
-                .foregroundStyle(.secondary)
-            Spacer()
-            Button(action: onStop) {
-                Text("Stop")
-                    .font(.caption2.weight(.semibold))
-                    .foregroundStyle(.red)
-                    .frame(minWidth: 44, minHeight: 44)
+        VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                Text(metric.title)
+                    .foregroundStyle(.secondary)
+                Spacer()
+                Text(metric.value)
+                    .fontWeight(.semibold)
+                    .monospacedDigit()
             }
-            .buttonStyle(.plain)
-            .accessibilityLabel("Interrupt Codex Turn")
+            .font(.subheadline)
+            if let progress = metric.progress {
+                ProgressView(value: progress)
+                    .tint(progress >= 0.9 ? ShellowTheme.warning : ShellowTheme.accent)
+            }
+            Text(metric.detail)
+                .font(.caption)
+                .foregroundStyle(.secondary)
         }
-        .padding(.horizontal, 4)
-        .padding(.vertical, 1)
-        .accessibilityAddTraits(.updatesFrequently)
+        .padding(.vertical, 3)
+        .accessibilityElement(children: .combine)
     }
 }
 
@@ -4403,6 +4459,14 @@ private func normalizeModel(_ value: String?) -> String? {
     return value
 }
 
+private func codexSettingDisplayName(_ value: String) -> String {
+    value
+        .replacingOccurrences(of: "-", with: " ")
+        .split(separator: " ")
+        .map { $0.prefix(1).uppercased() + $0.dropFirst() }
+        .joined(separator: " ")
+}
+
 private func lastPathComponent(_ path: String) -> String {
     let trimmed = path.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
     return trimmed.split(separator: "/").last.map(String.init) ?? path
@@ -4445,11 +4509,11 @@ private struct HostProfileRow: View {
     let open: () -> Void
     let edit: () -> Void
     let duplicate: () -> Void
+    let delete: () -> Void
 
     var body: some View {
-        HStack(spacing: 10) {
-            Button(action: open) {
-                HStack(spacing: 12) {
+        Button(action: open) {
+            HStack(spacing: 12) {
                     Image(systemName: profile.resolvedLaunchKind.systemImage)
                         .font(.system(size: 16, weight: .semibold))
                         .foregroundStyle(ShellowTheme.accent)
@@ -4462,14 +4526,6 @@ private struct HostProfileRow: View {
                     Text("\(profile.resolvedLaunchKind.title) · \(profile.endpoint)")
                         .font(.caption)
                         .foregroundStyle(.secondary)
-                    if let report = profile.capabilityReport {
-                        Label(
-                            "\(report.system.familyTitle) · \(report.system.architecture)",
-                            systemImage: "desktopcomputer"
-                        )
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                    }
                     if let persistentTerminal = profile.persistentTerminal {
                         Label(
                             "\(persistentTerminal.backend.compactTitle) · \(persistentTerminal.name)",
@@ -4482,16 +4538,13 @@ private struct HostProfileRow: View {
 
                 Spacer()
 
-                Image(systemName: "arrow.right")
+                Image(systemName: "chevron.right")
                     .font(.caption.weight(.semibold))
-                    .foregroundStyle(ShellowTheme.accent)
-                }
-                .padding(.vertical, 6)
-                .contentShape(Rectangle())
+                    .foregroundStyle(.tertiary)
             }
-            .buttonStyle(.plain)
-
-            Menu {
+            .padding(.vertical, 6)
+            .contentShape(Rectangle())
+            .contextMenu {
                 Button(action: edit) {
                     Label("Edit", systemImage: "pencil")
                 }
@@ -4499,22 +4552,20 @@ private struct HostProfileRow: View {
                 Button(action: duplicate) {
                     Label("Duplicate", systemImage: "square.on.square")
                 }
-            } label: {
-                Image(systemName: "ellipsis")
-                    .font(.system(size: 14, weight: .semibold))
-                    .frame(width: 34, height: 34)
-                    .background(Color(.tertiarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 9))
+
+                Button(role: .destructive, action: delete) {
+                    Label("Delete", systemImage: "trash")
+                }
             }
-            .buttonStyle(.plain)
-            .foregroundStyle(.secondary)
-            .accessibilityLabel("Actions for \(profile.name)")
         }
+        .buttonStyle(.plain)
+        .accessibilityHint("Opens the profile. Touch and hold for profile actions.")
     }
 }
 
 #Preview {
     HostsScreen(
-        profiles: .constant(HostProfile.samples),
+        profiles: .constant([]),
         sshKeys: .constant([]),
         onOpenSettings: {},
         connectTerminal: { _ in },

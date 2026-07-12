@@ -30,6 +30,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
@@ -60,12 +61,15 @@ import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Slider
 import androidx.compose.material3.SliderDefaults
+import androidx.compose.material3.Surface as MaterialSurface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TextField
@@ -117,9 +121,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.semantics.contentDescription
-import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.Role
-import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.role
 import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.semantics.semantics
@@ -452,9 +454,9 @@ private fun HostProfile.matchesProfileIdentity(other: HostProfile): Boolean =
 @Composable
 fun ShellowApp() {
   val core = remember { ShellowCoreSession() }
+  val scope = rememberCoroutineScope()
   val context = LocalContext.current
   val secretStore = remember { SSHSecretStore(context) }
-  val scope = rememberCoroutineScope()
   val initialDisplaySettings = remember(context) { loadDisplaySettings(context) }
   var displaySettings by remember { mutableStateOf(initialDisplaySettings) }
   val profiles =
@@ -1329,11 +1331,6 @@ fun ShellowApp() {
           profiles.removeAll { it.id == profile.id }
           saveHostProfiles(context, profiles)
         },
-        onProbeCapabilities = { profile ->
-          val outcome = probeWithStoredCredential(profile)
-          applyCapabilityOutcome(profile, outcome)
-          outcome
-        },
         onAddKey = { credential ->
           sshKeys.add(credential)
           saveSSHKeyCredentials(context, sshKeys)
@@ -1658,6 +1655,7 @@ fun ShellowApp() {
   }
 }
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun CodexScreen(
   snapshot: CodexSnapshot,
@@ -1696,6 +1694,7 @@ private fun CodexScreen(
   var showSettings by remember { mutableStateOf(false) }
   var showSessionSwitcher by remember { mutableStateOf(false) }
   var showDirectoryPicker by remember { mutableStateOf(false) }
+  var showUsageDetails by remember { mutableStateOf(false) }
   var settingsModel by remember { mutableStateOf("") }
   var settingsReasoningEffort by remember { mutableStateOf("") }
   var settingsServiceTier by remember { mutableStateOf("") }
@@ -1734,6 +1733,22 @@ private fun CodexScreen(
     remember(snapshot.settings.availableModels, snapshot.settings.model) {
       codexModelPickerOptions(snapshot.settings.availableModels, snapshot.settings.model.orEmpty())
     }
+  val selectedModelOption = modelOptions.firstOrNull { it.id == snapshot.settings.model }
+  val selectedModelTitle = selectedModelOption?.name ?: snapshot.settings.model?.takeIf { it.isNotBlank() } ?: "Default"
+  val selectedReasoningId =
+    snapshot.settings.reasoningEffort?.takeIf { it.isNotBlank() }
+      ?: selectedModelOption?.defaultReasoningEffort
+  val selectedReasoningTitle =
+    selectedModelOption
+      ?.reasoningEfforts
+      ?.firstOrNull { it.id == selectedReasoningId }
+      ?.name
+      ?: selectedReasoningId?.let(::codexSettingDisplayName)
+      ?: "Default"
+  val selectedServiceTier =
+    snapshot.settings.serviceTier?.takeIf { it.isNotBlank() }
+      ?: selectedModelOption?.defaultServiceTier
+  val selectedApprovalTitle = codexApprovalDisplayName(snapshot.settings.approvalPolicy)
   val settingsCanApply =
     settingsModel.trim() != snapshot.settings.model.orEmpty().trim() ||
       settingsReasoningEffort != snapshot.settings.reasoningEffort.orEmpty() ||
@@ -1756,6 +1771,13 @@ private fun CodexScreen(
           if (none { it.id == thread.id }) add(thread)
         }
       }
+    }
+  val usageMetrics = remember(snapshot.usage) { codexUsageMetrics(snapshot.usage) }
+  val headerUsageMetric =
+    if (isShowingThread && snapshot.threadId != null) {
+      usageMetrics.firstOrNull { it.id == "context" && it.progress != null }
+    } else {
+      usageMetrics.firstOrNull { it.title == "5h limit" && it.progress != null }
     }
   val visibleChatMessages =
     remember(snapshot.messages) {
@@ -1928,6 +1950,19 @@ private fun CodexScreen(
     )
   }
 
+  if (showUsageDetails) {
+    ModalBottomSheet(
+      onDismissRequest = { showUsageDetails = false },
+      containerColor = ShellowColors.PanelBackground,
+      contentColor = ShellowColors.TerminalText,
+    ) {
+      CodexUsageDetails(
+        metrics = usageMetrics,
+        modifier = Modifier.navigationBarsPadding(),
+      )
+    }
+  }
+
   if (showSettings) {
     CodexSettingsDialog(
       model = settingsModel,
@@ -2094,6 +2129,12 @@ private fun CodexScreen(
             overflow = TextOverflow.Ellipsis,
           )
         }
+        headerUsageMetric?.let { metric ->
+          CodexUsageRingButton(
+            metric = metric,
+            onClick = { showUsageDetails = true },
+          )
+        }
         Box {
           OverflowMenuButton(
             contentDescription = "Codex Actions",
@@ -2191,8 +2232,6 @@ private fun CodexScreen(
         modifier = Modifier.padding(horizontal = 14.dp),
       )
     }
-
-    CodexUsageSummary(snapshot.usage)
 
     if (!isShowingThread || snapshot.threadId == null) {
       val refreshCurrentHistory = {
@@ -2333,6 +2372,11 @@ private fun CodexScreen(
             selectedPath = selectedPath,
             draft = draft,
             onDraftChange = { draft = it },
+            modelTitle = selectedModelTitle,
+            reasoningTitle = selectedReasoningTitle,
+            isFast = selectedServiceTier == "fast",
+            approvalTitle = selectedApprovalTitle,
+            onOpenSettings = showCodexSettings,
             canSend = canSendInitialDraft,
             isStarting = isStartingDraftThread,
             onSend = sendInitialDraft,
@@ -2393,9 +2437,13 @@ private fun CodexScreen(
             .padding(horizontal = 12.dp, vertical = 8.dp),
         verticalArrangement = Arrangement.spacedBy(4.dp),
       ) {
-        if (snapshot.turnActive) {
-          CodexTurnStatusRow(onStop = onInterruptTurn)
-        }
+        CodexComposerSettingsBar(
+          modelTitle = selectedModelTitle,
+          reasoningTitle = selectedReasoningTitle,
+          isFast = selectedServiceTier == "fast",
+          approvalTitle = selectedApprovalTitle,
+          onClick = showCodexSettings,
+        )
 
         Row(
           verticalAlignment = Alignment.Bottom,
@@ -2408,6 +2456,9 @@ private fun CodexScreen(
             isActiveTurn = snapshot.turnActive,
             modifier = Modifier.weight(1f),
           )
+          if (snapshot.turnActive) {
+            CodexStopIconButton(onClick = onInterruptTurn)
+          }
           if (canSend) {
             TextButton(
               onClick = {
@@ -2437,41 +2488,84 @@ private data class CodexUsageMetricValue(
 )
 
 @Composable
-private fun CodexUsageSummary(usage: CodexUsageState) {
-  val metrics = remember(usage) { codexUsageMetrics(usage) }
-  if (metrics.isEmpty()) return
-
-  Row(
+private fun CodexUsageRingButton(
+  metric: CodexUsageMetricValue,
+  onClick: () -> Unit,
+) {
+  val progress = metric.progress?.coerceIn(0f, 1f) ?: return
+  IconButton(
+    onClick = onClick,
     modifier =
       Modifier
-        .fillMaxWidth()
-        .horizontalScroll(rememberScrollState())
-        .background(ShellowColors.PanelBackground.copy(alpha = 0.72f))
-        .padding(horizontal = 14.dp, vertical = 8.dp),
-    horizontalArrangement = Arrangement.spacedBy(10.dp),
+        .size(36.dp)
+        .semantics {
+          contentDescription = "${metric.title}, ${metric.detail}. Show usage details"
+          stateDescription = "${(progress * 100).roundToInt()}% used"
+        },
   ) {
-    metrics.forEach { metric ->
+    Box(contentAlignment = Alignment.Center) {
+      CircularProgressIndicator(
+        progress = { progress },
+        modifier = Modifier.size(25.dp),
+        color = if (progress >= 0.9f) ShellowColors.Warning else ShellowColors.Accent,
+        trackColor = ShellowColors.KeyBackground,
+        strokeWidth = 2.dp,
+      )
+      Text(
+        if (metric.id == "context") "C" else "5h",
+        color = ShellowColors.TerminalMuted,
+        fontSize = 8.sp,
+        fontWeight = FontWeight.SemiBold,
+      )
+    }
+  }
+}
+
+@Composable
+private fun CodexUsageDetails(
+  metrics: List<CodexUsageMetricValue>,
+  modifier: Modifier = Modifier,
+) {
+  Column(
+    modifier =
+      modifier
+        .fillMaxWidth()
+        .verticalScroll(rememberScrollState())
+        .padding(start = 20.dp, end = 20.dp, bottom = 28.dp),
+  ) {
+    Text(
+      "Usage",
+      color = ShellowColors.TerminalText,
+      style = MaterialTheme.typography.titleMedium,
+      modifier = Modifier.padding(bottom = 10.dp),
+    )
+    metrics.forEachIndexed { index, metric ->
+      if (index > 0) PanelDivider()
       Column(
-        modifier = Modifier.width(116.dp).semantics(mergeDescendants = true) {},
-        verticalArrangement = Arrangement.spacedBy(3.dp),
+        modifier = Modifier.fillMaxWidth().padding(vertical = 12.dp).semantics(mergeDescendants = true) {},
+        verticalArrangement = Arrangement.spacedBy(5.dp),
       ) {
-        Text(
-          metric.title,
-          color = ShellowColors.TerminalMuted,
-          style = MaterialTheme.typography.labelSmall,
-          maxLines = 1,
-        )
-        Text(
-          metric.value,
-          color = ShellowColors.TerminalText,
-          style = MaterialTheme.typography.labelMedium,
-          fontWeight = FontWeight.SemiBold,
-          maxLines = 1,
-        )
+        Row(
+          modifier = Modifier.fillMaxWidth(),
+          horizontalArrangement = Arrangement.SpaceBetween,
+          verticalAlignment = Alignment.CenterVertically,
+        ) {
+          Text(
+            metric.title,
+            color = ShellowColors.TerminalMuted,
+            style = MaterialTheme.typography.bodyMedium,
+          )
+          Text(
+            metric.value,
+            color = ShellowColors.TerminalText,
+            style = MaterialTheme.typography.bodyMedium,
+            fontWeight = FontWeight.SemiBold,
+          )
+        }
         metric.progress?.let { progress ->
           LinearProgressIndicator(
             progress = { progress },
-            modifier = Modifier.width(104.dp).height(3.dp),
+            modifier = Modifier.fillMaxWidth().height(3.dp),
             color = if (progress >= 0.9f) ShellowColors.Warning else ShellowColors.Accent,
             trackColor = ShellowColors.KeyBackground,
           )
@@ -2480,8 +2574,6 @@ private fun CodexUsageSummary(usage: CodexUsageState) {
           metric.detail,
           color = ShellowColors.TerminalMuted,
           style = MaterialTheme.typography.labelSmall,
-          maxLines = 1,
-          overflow = TextOverflow.Ellipsis,
         )
       }
     }
@@ -2667,22 +2759,12 @@ private fun CodexProjectHistoryPanel(
         matchesHomeSearch(thread.cwd, homeSearchTerm)
     }
 
-  Column(modifier = modifier.fillMaxWidth()) {
+  Box(modifier = modifier.fillMaxWidth()) {
     LazyColumn(
-      modifier = Modifier.weight(1f).fillMaxWidth().padding(horizontal = 12.dp),
+      modifier = Modifier.fillMaxSize().padding(horizontal = 12.dp),
+      contentPadding = PaddingValues(bottom = 76.dp),
       verticalArrangement = Arrangement.spacedBy(18.dp),
     ) {
-      item("home-search") {
-        CodexSearchBarRow(
-          searchValue = historySearch,
-          onSearchValueChange = onHistorySearchChange,
-          searchPlaceholder = "Search projects or sessions",
-          onSearch = onRefreshHistory,
-          newConversationEnabled = snapshot.status == CodexStatus.Connected,
-          onNewConversation = onStartThread,
-        )
-      }
-
       item("projects") {
         CodexProjectsSection(
           snapshot = snapshot,
@@ -2716,6 +2798,16 @@ private fun CodexProjectHistoryPanel(
         )
       }
     }
+
+    CodexFloatingSearchBar(
+      searchValue = historySearch,
+      onSearchValueChange = onHistorySearchChange,
+      searchPlaceholder = "Search projects or sessions",
+      onSearch = onRefreshHistory,
+      newConversationEnabled = snapshot.status == CodexStatus.Connected,
+      onNewConversation = onStartThread,
+      modifier = Modifier.align(Alignment.BottomCenter),
+    )
   }
 }
 
@@ -2747,22 +2839,12 @@ private fun CodexProjectThreadsPanel(
         matchesHomeSearch(thread.cwd, homeSearchTerm)
     }
 
-  Column(modifier = modifier.fillMaxWidth()) {
+  Box(modifier = modifier.fillMaxWidth()) {
     LazyColumn(
-      modifier = Modifier.weight(1f).fillMaxWidth().padding(horizontal = 12.dp),
+      modifier = Modifier.fillMaxSize().padding(horizontal = 12.dp),
+      contentPadding = PaddingValues(bottom = 76.dp),
       verticalArrangement = Arrangement.spacedBy(10.dp),
     ) {
-      item("project-search") {
-        CodexSearchBarRow(
-          searchValue = historySearch,
-          onSearchValueChange = onHistorySearchChange,
-          searchPlaceholder = "Search this project",
-          onSearch = onRefreshHistory,
-          newConversationEnabled = selectedPath.isNotBlank(),
-          onNewConversation = onStartThread,
-        )
-      }
-
       item("project-conversations-header") {
         CodexSectionHeader(title = if (showArchivedThreads) "Archived Conversations" else "Conversations")
       }
@@ -2821,6 +2903,16 @@ private fun CodexProjectThreadsPanel(
         }
       }
     }
+
+    CodexFloatingSearchBar(
+      searchValue = historySearch,
+      onSearchValueChange = onHistorySearchChange,
+      searchPlaceholder = "Search this project",
+      onSearch = onRefreshHistory,
+      newConversationEnabled = selectedPath.isNotBlank(),
+      onNewConversation = onStartThread,
+      modifier = Modifier.align(Alignment.BottomCenter),
+    )
   }
 }
 
@@ -2885,6 +2977,11 @@ private fun CodexDraftChatPanel(
   selectedPath: String,
   draft: String,
   onDraftChange: (String) -> Unit,
+  modelTitle: String,
+  reasoningTitle: String,
+  isFast: Boolean,
+  approvalTitle: String,
+  onOpenSettings: () -> Unit,
   canSend: Boolean,
   isStarting: Boolean,
   onSend: () -> Unit,
@@ -2898,24 +2995,36 @@ private fun CodexDraftChatPanel(
       modifier = Modifier.weight(1f).fillMaxWidth(),
     )
 
-    Row(
+    Column(
       modifier =
         Modifier
           .fillMaxWidth()
           .imePadding()
           .background(ShellowColors.PanelBackground)
           .padding(12.dp),
-      verticalAlignment = Alignment.Bottom,
-      horizontalArrangement = Arrangement.spacedBy(8.dp),
+      verticalArrangement = Arrangement.spacedBy(6.dp),
     ) {
-      CodexMessageInput(
-        value = draft,
-        onValueChange = onDraftChange,
-        modifier = Modifier.weight(1f),
+      CodexComposerSettingsBar(
+        modelTitle = modelTitle,
+        reasoningTitle = reasoningTitle,
+        isFast = isFast,
+        approvalTitle = approvalTitle,
+        onClick = onOpenSettings,
       )
-      if (canSend || isStarting) {
-        TextButton(onClick = onSend, enabled = canSend) {
-          Text(if (isStarting) "Starting" else "Send", fontWeight = FontWeight.SemiBold)
+
+      Row(
+        verticalAlignment = Alignment.Bottom,
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+      ) {
+        CodexMessageInput(
+          value = draft,
+          onValueChange = onDraftChange,
+          modifier = Modifier.weight(1f),
+        )
+        if (canSend || isStarting) {
+          TextButton(onClick = onSend, enabled = canSend) {
+            Text(if (isStarting) "Starting" else "Send", fontWeight = FontWeight.SemiBold)
+          }
         }
       }
     }
@@ -3230,6 +3339,97 @@ private fun CodexMessageInput(
 }
 
 @Composable
+private fun CodexComposerSettingsBar(
+  modelTitle: String,
+  reasoningTitle: String,
+  isFast: Boolean,
+  approvalTitle: String,
+  onClick: () -> Unit,
+) {
+  Row(
+    modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+    horizontalArrangement = Arrangement.spacedBy(6.dp),
+    verticalAlignment = Alignment.CenterVertically,
+  ) {
+    CodexComposerSettingCapsule(
+      text = "$modelTitle · $reasoningTitle",
+      leadingText = if (isFast) "⚡︎" else null,
+      contentDescription = "Model $modelTitle, reasoning $reasoningTitle",
+      onClick = onClick,
+    )
+    CodexComposerSettingCapsule(
+      text = "Approval · $approvalTitle",
+      leadingText = null,
+      contentDescription = "Approval $approvalTitle",
+      onClick = onClick,
+    )
+  }
+}
+
+@Composable
+private fun CodexComposerSettingCapsule(
+  text: String,
+  leadingText: String?,
+  contentDescription: String,
+  onClick: () -> Unit,
+) {
+  Row(
+    modifier =
+      Modifier
+        .height(28.dp)
+        .background(ShellowColors.KeyBackground, RoundedCornerShape(14.dp))
+        .border(
+          1.dp,
+          ShellowColors.TerminalText.copy(alpha = 0.08f),
+          RoundedCornerShape(14.dp),
+        )
+        .clickable(onClick = onClick)
+        .semantics {
+          this.contentDescription = contentDescription
+          role = Role.Button
+        }
+        .padding(horizontal = 10.dp),
+    horizontalArrangement = Arrangement.spacedBy(5.dp),
+    verticalAlignment = Alignment.CenterVertically,
+  ) {
+    leadingText?.let {
+      Text(
+        it,
+        color = ShellowColors.TerminalMuted,
+        style = MaterialTheme.typography.labelSmall,
+        fontWeight = FontWeight.SemiBold,
+      )
+    }
+    Text(
+      text,
+      color = ShellowColors.TerminalMuted,
+      style = MaterialTheme.typography.labelMedium,
+      fontWeight = FontWeight.Medium,
+      maxLines = 1,
+    )
+  }
+}
+
+@Composable
+private fun CodexStopIconButton(onClick: () -> Unit) {
+  IconButton(
+    onClick = onClick,
+    modifier =
+      Modifier
+        .size(40.dp)
+        .background(ShellowColors.KeyBackground, RoundedCornerShape(8.dp))
+        .semantics { contentDescription = "Interrupt Codex Turn" },
+  ) {
+    Box(
+      modifier =
+        Modifier
+          .size(12.dp)
+          .background(ShellowColors.Warning, RoundedCornerShape(2.dp)),
+    )
+  }
+}
+
+@Composable
 private fun CodexSearchBarRow(
   searchValue: String,
   onSearchValueChange: (String) -> Unit,
@@ -3254,6 +3454,36 @@ private fun CodexSearchBarRow(
       enabled = newConversationEnabled,
       onClick = onNewConversation,
     )
+  }
+}
+
+@Composable
+private fun CodexFloatingSearchBar(
+  searchValue: String,
+  onSearchValueChange: (String) -> Unit,
+  searchPlaceholder: String,
+  onSearch: () -> Unit,
+  newConversationEnabled: Boolean,
+  onNewConversation: () -> Unit,
+  modifier: Modifier = Modifier,
+) {
+  MaterialSurface(
+    modifier = modifier.fillMaxWidth().imePadding(),
+    color = ShellowColors.PanelBackground,
+    shadowElevation = 6.dp,
+  ) {
+    Box(
+      modifier = Modifier.fillMaxWidth().navigationBarsPadding().padding(horizontal = 12.dp, vertical = 10.dp),
+    ) {
+      CodexSearchBarRow(
+        searchValue = searchValue,
+        onSearchValueChange = onSearchValueChange,
+        searchPlaceholder = searchPlaceholder,
+        onSearch = onSearch,
+        newConversationEnabled = newConversationEnabled,
+        onNewConversation = onNewConversation,
+      )
+    }
   }
 }
 
@@ -3311,32 +3541,6 @@ private fun CodexInlineStatusRow(
 }
 
 @Composable
-private fun CodexTurnStatusRow(onStop: () -> Unit) {
-  Row(
-    modifier = Modifier.fillMaxWidth().padding(horizontal = 4.dp, vertical = 1.dp).semantics {
-      liveRegion = LiveRegionMode.Polite
-    },
-    horizontalArrangement = Arrangement.spacedBy(6.dp),
-    verticalAlignment = Alignment.CenterVertically,
-  ) {
-    CircularProgressIndicator(
-      modifier = Modifier.size(13.dp),
-      strokeWidth = 2.dp,
-      color = ShellowColors.TerminalMuted,
-    )
-    Text(
-      "Working",
-      color = ShellowColors.TerminalMuted,
-      modifier = Modifier.weight(1f),
-      style = MaterialTheme.typography.labelSmall,
-    )
-    TextButton(onClick = onStop, modifier = Modifier.semantics { contentDescription = "Interrupt Codex Turn" }) {
-      Text("Stop", color = ShellowColors.Warning, style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.SemiBold)
-    }
-  }
-}
-
-@Composable
 private fun CodexInlineTextField(
   value: String,
   onValueChange: (String) -> Unit,
@@ -3350,7 +3554,7 @@ private fun CodexInlineTextField(
     onValueChange = onValueChange,
     modifier =
       modifier
-        .heightIn(min = 40.dp)
+        .height(48.dp)
         .background(ShellowColors.KeyBackground, RoundedCornerShape(8.dp))
         .padding(horizontal = 10.dp, vertical = 8.dp)
         .semantics { contentDescription = placeholder },
@@ -3416,6 +3620,7 @@ private fun CodexNewConversationButton(
     enabled = enabled,
     modifier =
       Modifier
+        .size(48.dp)
         .background(
           ShellowColors.KeyBackground,
           RoundedCornerShape(8.dp),
@@ -4206,6 +4411,21 @@ private fun mergeProjects(vararg groups: List<String>): List<String> {
 
 private fun lastPathComponent(path: String): String =
   path.trim('/').split('/').lastOrNull()?.takeIf { it.isNotBlank() } ?: path
+
+private fun codexSettingDisplayName(value: String): String =
+  value
+    .replace('-', ' ')
+    .split(' ')
+    .filter { it.isNotBlank() }
+    .joinToString(" ") { word -> word.replaceFirstChar { it.uppercase() } }
+
+private fun codexApprovalDisplayName(value: String?): String =
+  when (value) {
+    "untrusted" -> "Untrusted"
+    "on-request" -> "On request"
+    "never" -> "Never"
+    else -> "Default"
+  }
 
 private fun codexCompactPath(path: String): String {
   val trimmed = path.trim()
@@ -6713,7 +6933,6 @@ private fun HostsScreen(
   onAddProfile: (HostProfile) -> Unit,
   onUpdateProfile: (HostProfile) -> Unit,
   onDeleteProfile: (HostProfile) -> Unit,
-  onProbeCapabilities: suspend (HostProfile) -> RemoteHostProbeOutcome,
   onAddKey: (SSHKeyCredential) -> Unit,
   onDeleteKey: (SSHKeyCredential) -> Unit,
   onConnectTerminal: (HostProfile) -> Unit,
@@ -6723,6 +6942,7 @@ private fun HostsScreen(
   var addingProfile by remember { mutableStateOf(false) }
   var managingKeys by remember { mutableStateOf(false) }
   var selectedProfile by remember { mutableStateOf<HostProfile?>(null) }
+  var profilePendingDeletion by remember { mutableStateOf<HostProfile?>(null) }
   var manageMenuExpanded by remember { mutableStateOf(false) }
 
   LazyColumn(
@@ -6803,6 +7023,7 @@ private fun HostsScreen(
               onDuplicate = {
                 onAddProfile(profile.duplicated(profiles.map { it.name }))
               },
+              onDelete = { profilePendingDeletion = profile },
             )
             if (index < profiles.lastIndex) {
               PanelDivider()
@@ -6845,8 +7066,28 @@ private fun HostsScreen(
         selectedProfile = null
         onDeleteProfile(profile)
       },
-      onProbeCapabilities = onProbeCapabilities,
       onDismiss = { selectedProfile = null },
+    )
+  }
+
+  profilePendingDeletion?.let { profile ->
+    AlertDialog(
+      onDismissRequest = { profilePendingDeletion = null },
+      title = { Text("Delete this profile?") },
+      text = { Text("The saved profile and its profile-scoped credentials will be removed from this device.") },
+      confirmButton = {
+        TextButton(
+          onClick = {
+            profilePendingDeletion = null
+            onDeleteProfile(profile)
+          },
+        ) {
+          Text("Delete", color = MaterialTheme.colorScheme.error)
+        }
+      },
+      dismissButton = {
+        TextButton(onClick = { profilePendingDeletion = null }) { Text("Cancel") }
+      },
     )
   }
 }
@@ -6884,6 +7125,7 @@ private fun HostProfileRow(
   onOpen: () -> Unit,
   onEdit: () -> Unit,
   onDuplicate: () -> Unit,
+  onDelete: () -> Unit,
 ) {
   var actionsExpanded by remember(profile.id) { mutableStateOf(false) }
 
@@ -6891,12 +7133,16 @@ private fun HostProfileRow(
     modifier =
       Modifier
         .fillMaxWidth()
+        .combinedClickable(
+          onClick = onOpen,
+          onLongClick = { actionsExpanded = true },
+        )
         .padding(horizontal = 14.dp, vertical = 12.dp),
     verticalAlignment = Alignment.CenterVertically,
     horizontalArrangement = Arrangement.spacedBy(12.dp),
   ) {
     Row(
-      modifier = Modifier.weight(1f).clickable(onClick = onOpen),
+      modifier = Modifier.weight(1f),
       verticalAlignment = Alignment.CenterVertically,
       horizontalArrangement = Arrangement.spacedBy(12.dp),
     ) {
@@ -6927,15 +7173,9 @@ private fun HostProfileRow(
           )
         }
       }
-      Text("Open", color = ShellowColors.Accent, style = MaterialTheme.typography.labelMedium)
+      Text("›", color = ShellowColors.TerminalMuted, style = MaterialTheme.typography.titleLarge)
     }
     Box {
-      TextButton(
-        onClick = { actionsExpanded = true },
-        modifier = Modifier.semantics { contentDescription = "Actions for ${profile.name}" },
-      ) {
-        Text("...", color = ShellowColors.TerminalMuted, style = MaterialTheme.typography.labelMedium)
-      }
       DropdownMenu(
         expanded = actionsExpanded,
         onDismissRequest = { actionsExpanded = false },
@@ -6954,6 +7194,13 @@ private fun HostProfileRow(
             onDuplicate()
           },
         )
+        DropdownMenuItem(
+          text = { Text("Delete", color = MaterialTheme.colorScheme.error) },
+          onClick = {
+            actionsExpanded = false
+            onDelete()
+          },
+        )
       }
     }
   }
@@ -6965,7 +7212,6 @@ private fun HostConnectionDialog(
   sshKeys: List<SSHKeyCredential>,
   onSaveProfile: (HostProfile) -> Unit,
   onDeleteProfile: () -> Unit,
-  onProbeCapabilities: suspend (HostProfile) -> RemoteHostProbeOutcome,
   onDismiss: () -> Unit,
 ) {
   var selectedTab by remember(profile.id) { mutableStateOf(ProfileEditorTab.Connection) }
@@ -6991,11 +7237,7 @@ private fun HostConnectionDialog(
   val normalizedUser = username.trim().ifEmpty { "root" }
   val generatedName = "$normalizedUser@$normalizedHost:${parsedPort ?: 22}"
   val normalizedName = name.trim().ifEmpty { generatedName }
-  var detectedReport by remember(profile.id) { mutableStateOf(profile.capabilityReport) }
-  var probeInProgress by remember(profile.id) { mutableStateOf(false) }
-  var probeError by remember(profile.id) { mutableStateOf<String?>(null) }
   var confirmingDelete by remember(profile.id) { mutableStateOf(false) }
-  val scope = rememberCoroutineScope()
   val validatedPersistentName = PersistentTerminalConfiguration.validatedName(persistentName)
   val endpointChanged = normalizedHost != profile.host || parsedPort != profile.port || normalizedUser != profile.username
   val workingProfile =
@@ -7145,15 +7387,6 @@ private fun HostConnectionDialog(
               )
               if (validatedPersistentName == null) {
                 Text("Use 1–48 ASCII letters, numbers, - or _.", color = ShellowColors.Warning, style = MaterialTheme.typography.labelSmall)
-              } else {
-                val capability = profile.capabilityReport?.capability(persistentBackend)
-                if (capability != null && capability.supportLevel != RemoteComponentSupportLevel.Supported) {
-                  Text(
-                    "This host was last detected without full ${persistentBackend.displayTitle} support; you can still save and try it.",
-                    color = ShellowColors.Warning,
-                    style = MaterialTheme.typography.labelSmall,
-                  )
-                }
               }
             }
           }
@@ -7193,21 +7426,6 @@ private fun HostConnectionDialog(
             style = MaterialTheme.typography.labelSmall,
           )
         }
-        RemoteCapabilityCard(
-          report = detectedReport,
-          inProgress = probeInProgress,
-          errorMessage = probeError,
-          onRefresh = {
-            scope.launch {
-              probeInProgress = true
-              probeError = null
-              val outcome = onProbeCapabilities(workingProfile)
-              detectedReport = outcome.report
-              probeError = outcome.errorMessage
-              probeInProgress = false
-            }
-          },
-        )
         TextButton(onClick = { confirmingDelete = true }) {
           Text("Delete profile", color = MaterialTheme.colorScheme.error)
         }
@@ -7288,59 +7506,6 @@ private fun ConnectionModeOption(
 }
 
 @Composable
-private fun RemoteCapabilityCard(
-  report: xyz.zinglix.shellow.core.RemoteHostCapabilityReport?,
-  inProgress: Boolean,
-  errorMessage: String?,
-  onRefresh: suspend () -> Unit,
-) {
-  val scope = rememberCoroutineScope()
-  Column(
-    modifier =
-      Modifier
-        .fillMaxWidth()
-        .background(ShellowColors.KeyBackground.copy(alpha = 0.38f), RoundedCornerShape(8.dp))
-        .padding(12.dp),
-    verticalArrangement = Arrangement.spacedBy(8.dp),
-  ) {
-    Row(verticalAlignment = Alignment.CenterVertically) {
-      Text("Target capabilities", modifier = Modifier.weight(1f), color = ShellowColors.TerminalText, fontWeight = FontWeight.SemiBold)
-      if (inProgress) {
-        CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
-      } else {
-        TextButton(onClick = { scope.launch { onRefresh() } }) { Text("Refresh") }
-      }
-    }
-    if (report != null) {
-      Text(
-        "${report.system.displayTitle} · ${report.system.architecture} · ${report.system.shellName}",
-        color = ShellowColors.TerminalMuted,
-        style = MaterialTheme.typography.labelSmall,
-      )
-      report.components.forEach { component ->
-        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-          Text(component.backend.compactTitle, modifier = Modifier.weight(1f), color = ShellowColors.TerminalText, style = MaterialTheme.typography.bodySmall)
-          Text(
-            listOf(component.supportLevel.title, component.version).filter { it.isNotBlank() }.joinToString(" · "),
-            color =
-              if (component.supportLevel == RemoteComponentSupportLevel.Supported) ShellowColors.Success
-              else ShellowColors.Warning,
-            style = MaterialTheme.typography.labelSmall,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-          )
-        }
-      }
-      Text("Kernel ${report.system.kernelRelease}", color = ShellowColors.TerminalMuted, style = MaterialTheme.typography.labelSmall)
-    } else if (inProgress) {
-      Text("Detecting the target system and terminal components…", color = ShellowColors.TerminalMuted, style = MaterialTheme.typography.labelSmall)
-    } else {
-      Text(errorMessage ?: "No capability report yet.", color = ShellowColors.TerminalMuted, style = MaterialTheme.typography.labelSmall)
-    }
-  }
-}
-
-@Composable
 private fun AddHostDialog(
   onDismiss: () -> Unit,
   onAdd: (HostProfile) -> Unit,
@@ -7349,6 +7514,7 @@ private fun AddHostDialog(
   var host by remember { mutableStateOf("") }
   var port by remember { mutableStateOf("22") }
   var username by remember { mutableStateOf("root") }
+  var launchKind by remember { mutableStateOf(ProfileLaunchKind.Terminal) }
   val parsedPort = port.toIntOrNull()
   val normalizedHost = host.trim()
   val normalizedUser = username.trim().ifEmpty { "root" }
@@ -7376,6 +7542,16 @@ private fun AddHostDialog(
             .verticalScroll(rememberScrollState()),
         verticalArrangement = Arrangement.spacedBy(10.dp),
       ) {
+        Text("Open with", color = ShellowColors.TerminalText, fontWeight = FontWeight.SemiBold)
+        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+          ProfileLaunchKind.entries.forEach { kind ->
+            AuthenticationChoice(
+              title = if (kind == ProfileLaunchKind.Claude) "Claude" else kind.title,
+              selected = launchKind == kind,
+              modifier = Modifier.weight(1f),
+            ) { launchKind = kind }
+          }
+        }
         OutlinedTextField(
           value = name,
           onValueChange = { name = it },
@@ -7409,7 +7585,7 @@ private fun AddHostDialog(
           Text(it, color = ShellowColors.Warning, style = MaterialTheme.typography.labelSmall)
         } ?: Text(
           if (name.isBlank() && normalizedHost.isNotEmpty()) "Generated name: $generatedName"
-          else "Only Host is required. New profiles use Terminal and Auto authentication.",
+          else "Only Host is required. Authentication defaults to Auto.",
           color = ShellowColors.TerminalMuted,
           style = MaterialTheme.typography.labelSmall,
         )
@@ -7426,7 +7602,7 @@ private fun AddHostDialog(
               port = parsedPort ?: 22,
               username = normalizedUser,
               authentication = AuthenticationKind.Automatic,
-              launchKind = ProfileLaunchKind.Terminal,
+              launchKind = launchKind,
               trustedHostKeySha256 = null,
             ),
           )
