@@ -794,19 +794,43 @@ fun ShellowApp() {
     )
   }
 
+  suspend fun waitForTerminalConnectionResult(): TerminalSession {
+    val deadline = System.currentTimeMillis() + 8_000
+    var current = session
+    while (current.state == ConnectionState.Connecting && System.currentTimeMillis() < deadline) {
+      delay(200)
+      current = withContext(Dispatchers.IO) { core.pollLiveShell() }
+      updateSession(current)
+    }
+    return current
+  }
+
+  suspend fun sendTerminalStartupCommandWhenConnected(startupCommand: String): TerminalSession {
+    val command = startupCommand.trim()
+    if (command.isEmpty()) return session
+
+    val connected = waitForTerminalConnectionResult()
+    if (connected.state != ConnectionState.Connected) return connected
+
+    // The SSH channel can report connected just before the login banner and
+    // first prompt finish rendering. Let that initial output settle so the
+    // multiplexer attach command is entered at a clean prompt.
+    delay(450)
+    val settled = withContext(Dispatchers.IO) { core.pollLiveShell() }
+    updateSession(settled)
+    if (settled.state != ConnectionState.Connected) return settled
+
+    val started = withContext(Dispatchers.IO) { core.sendTerminalInput("$command\r") }
+    updateSession(started)
+    return started
+  }
+
   fun connectPasswordShell(profile: HostProfile, password: String, startupCommand: String) {
     session = TerminalSession.connecting(profile)
     navigateTo(AppScreen.Terminal)
     scope.launch {
       updateSession(withContext(Dispatchers.IO) { core.startPasswordShell(profile, password) })
-      val command = startupCommand.trim()
-      if (command.isNotEmpty() && session.state != ConnectionState.Disconnected) {
-        delay(450)
-        updateSession(withContext(Dispatchers.IO) { core.pollLiveShell() })
-      }
-      if (command.isNotEmpty() && session.state != ConnectionState.Disconnected) {
-        updateSession(withContext(Dispatchers.IO) { core.sendTerminalInput("$command\r") })
-      }
+      sendTerminalStartupCommandWhenConnected(startupCommand)
       if (profile.capabilityReport?.isStale != false) {
         applyCapabilityOutcome(profile, probeWithPassword(profile, password))
       }
@@ -823,14 +847,7 @@ fun ShellowApp() {
     navigateTo(AppScreen.Terminal)
     scope.launch {
       updateSession(withContext(Dispatchers.IO) { core.startPrivateKeyShell(profile, privateKeyPem, passphrase) })
-      val command = startupCommand.trim()
-      if (command.isNotEmpty() && session.state != ConnectionState.Disconnected) {
-        delay(450)
-        updateSession(withContext(Dispatchers.IO) { core.pollLiveShell() })
-      }
-      if (command.isNotEmpty() && session.state != ConnectionState.Disconnected) {
-        updateSession(withContext(Dispatchers.IO) { core.sendTerminalInput("$command\r") })
-      }
+      sendTerminalStartupCommandWhenConnected(startupCommand)
       if (profile.capabilityReport?.isStale != false) {
         applyCapabilityOutcome(profile, probeWithPrivateKey(profile, privateKeyPem, passphrase))
       }
@@ -933,17 +950,6 @@ fun ShellowApp() {
       }
     }
 
-  suspend fun waitForTerminalConnectionResult(): TerminalSession {
-    val deadline = System.currentTimeMillis() + 8_000
-    var current = session
-    while (current.state == ConnectionState.Connecting && System.currentTimeMillis() < deadline) {
-      delay(200)
-      current = withContext(Dispatchers.IO) { core.pollLiveShell() }
-      updateSession(current)
-    }
-    return current
-  }
-
   suspend fun waitForCodexConnectionResult(): CodexSnapshot {
     val deadline = System.currentTimeMillis() + 10_000
     var current = codexSnapshot
@@ -1024,11 +1030,7 @@ fun ShellowApp() {
 
       val result = waitForTerminalConnectionResult()
       if (result.state == ConnectionState.Connected) {
-        val command = profile.terminalStartupCommand.trim()
-        if (command.isNotEmpty()) {
-          delay(450)
-          updateSession(withContext(Dispatchers.IO) { core.sendTerminalInput("$command\r") })
-        }
+        sendTerminalStartupCommandWhenConnected(profile.terminalStartupCommand)
         if (profile.capabilityReport?.isStale != false) {
           applyCapabilityOutcome(profile, probeWithPrivateKey(profile, key.privateKeyPem, key.passphrase))
         }
@@ -5530,13 +5532,13 @@ private fun TerminalScreen(
           }
 
           remainderY += available.y
-          val threshold = terminalRowHeightPx.coerceAtLeast(1f)
-          val tickCount = (abs(remainderY) / threshold).toInt().coerceAtMost(6)
+          val usesMouseWheel = scrollGrid.mouseReporting && scrollGrid.sgrMouse
+          val threshold = (terminalRowHeightPx * if (usesMouseWheel) 1f else 6f).coerceAtLeast(1f)
+          val tickCount = (abs(remainderY) / threshold).toInt().coerceAtMost(if (usesMouseWheel) 6 else 1)
           if (tickCount > 0) {
             val direction = if (remainderY > 0) TerminalScrollDirection.Up else TerminalScrollDirection.Down
             val translationSign = if (direction == TerminalScrollDirection.Up) 1f else -1f
             remainderY -= translationSign * tickCount * threshold
-            val usesMouseWheel = scrollGrid.mouseReporting && scrollGrid.sgrMouse
             sendTerminalScrollInput(
               scrollGrid.scrollInputSequence(
                 direction = direction,
@@ -5782,9 +5784,9 @@ private fun TerminalScreen(
         Modifier
           .fillMaxWidth()
           .background(ShellowColors.PanelBackground)
-          .padding(horizontal = 12.dp, vertical = 8.dp)
+          .padding(horizontal = 10.dp, vertical = 3.dp)
           .offset(y = -keyboardVisualDeltaDp),
-      horizontalArrangement = Arrangement.spacedBy(8.dp),
+      horizontalArrangement = Arrangement.spacedBy(6.dp),
       verticalAlignment = Alignment.CenterVertically,
     ) {
       Box {
@@ -5904,9 +5906,9 @@ private fun TerminalScreen(
           .fillMaxWidth()
           .background(ShellowColors.PanelBackground)
           .horizontalScroll(rememberScrollState())
-          .padding(horizontal = 12.dp, vertical = 6.dp)
+          .padding(horizontal = 10.dp, vertical = 3.dp)
           .offset(y = -keyboardVisualDeltaDp),
-      horizontalArrangement = Arrangement.spacedBy(8.dp),
+      horizontalArrangement = Arrangement.spacedBy(6.dp),
       verticalAlignment = Alignment.CenterVertically,
     ) {
       TerminalKey("Esc") { sendToolbarInput("\u001B") }
@@ -6305,7 +6307,7 @@ private fun TerminalDirectionKeyStrip(
   sendInput: (String) -> Unit,
 ) {
   Row(
-    horizontalArrangement = Arrangement.spacedBy(6.dp),
+    horizontalArrangement = Arrangement.spacedBy(5.dp),
     verticalAlignment = Alignment.CenterVertically,
   ) {
     TerminalCompactButton("↑", width = 34.dp, accessibilityLabel = "Arrow Up") {
@@ -6350,8 +6352,8 @@ private fun TerminalCompactButton(
   Box(
     modifier =
       Modifier
-        .width(width.coerceAtLeast(48.dp))
-        .height(48.dp)
+        .width(width.coerceAtLeast(42.dp))
+        .height(36.dp)
         .background(
           if (active) ShellowColors.Accent else ShellowColors.KeyBackground,
           RoundedCornerShape(8.dp),
@@ -6372,17 +6374,17 @@ private fun TerminalCompactButton(
 
 private fun terminalToolbarButtonWidth(label: String): androidx.compose.ui.unit.Dp =
   when {
-    label.length >= 8 -> 74.dp
-    label.length >= 6 -> 64.dp
-    label.length >= 5 -> 56.dp
-    else -> 48.dp
+    label.length >= 8 -> 68.dp
+    label.length >= 6 -> 58.dp
+    label.length >= 5 -> 52.dp
+    else -> 42.dp
   }
 
 private fun terminalKeyWidth(label: String): androidx.compose.ui.unit.Dp =
   when {
-    label.length >= 5 -> 54.dp
-    label.length >= 4 -> 48.dp
-    else -> 42.dp
+    label.length >= 5 -> 50.dp
+    label.length >= 4 -> 44.dp
+    else -> 38.dp
   }
 
 @Composable
@@ -7426,15 +7428,19 @@ private fun HostConnectionDialog(
             style = MaterialTheme.typography.labelSmall,
           )
         }
-        TextButton(onClick = { confirmingDelete = true }) {
-          Text("Delete profile", color = MaterialTheme.colorScheme.error)
-        }
       }
     },
     confirmButton = {
       TextButton(enabled = configurationValid, onClick = { onSaveProfile(workingProfile) }) { Text("Save") }
     },
-    dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
+    dismissButton = {
+      Row {
+        TextButton(onClick = { confirmingDelete = true }) {
+          Text("Delete", color = MaterialTheme.colorScheme.error)
+        }
+        TextButton(onClick = onDismiss) { Text("Cancel") }
+      }
+    },
   )
   if (confirmingDelete) {
     AlertDialog(

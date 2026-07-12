@@ -26,11 +26,11 @@ class TerminalScrollInputTest {
   }
 
   @Test
-  fun fallbackScroll_entersBackendModeOnceThenSendsArrowKeys() {
+  fun fallbackScroll_entersBackendModeOnceThenSendsPageKeys() {
     val grid = grid(mouseReporting = false, sgrMouse = false)
 
     assertEquals(
-      "\u0001[\u001B[B\u001B[B",
+      "\u0001[\u0006\u0006",
       grid.scrollInputSequence(
         direction = TerminalScrollDirection.Down,
         count = 2,
@@ -39,7 +39,7 @@ class TerminalScrollInputTest {
       ),
     )
     assertEquals(
-      "\u001B[A",
+      "\u0002",
       grid.scrollInputSequence(
         direction = TerminalScrollDirection.Up,
         count = 1,
@@ -47,6 +47,30 @@ class TerminalScrollInputTest {
         enterScrollMode = false,
       ),
     )
+  }
+
+  @Test
+  fun fallbackScroll_usesEachPersistentBackendPrefixWithoutArrowKeys() {
+    val grid = grid(mouseReporting = false, sgrMouse = false)
+
+    val expectedPrefixes =
+      mapOf(
+        PersistentTerminalBackend.Tmux to "\u0002[",
+        PersistentTerminalBackend.Screen to "\u0001[",
+        PersistentTerminalBackend.Zellij to "\u0013",
+      )
+
+    expectedPrefixes.forEach { (backend, prefix) ->
+      val payload =
+        grid.scrollInputSequence(
+          direction = TerminalScrollDirection.Up,
+          count = 1,
+          backend = backend,
+          enterScrollMode = true,
+        )
+      assertEquals(prefix + "\u0002", payload)
+      assertEquals(false, payload.contains("\u001B[A") || payload.contains("\u001B[B"))
+    }
   }
 
   private fun grid(mouseReporting: Boolean, sgrMouse: Boolean) =

@@ -2,10 +2,10 @@ package xyz.zinglix.shellow.core
 
 enum class TerminalScrollDirection(
   val wheelButtonCode: Int,
-  val arrowSequence: String,
+  val pageScrollSequence: String,
 ) {
-  Up(64, "\u001B[A"),
-  Down(65, "\u001B[B"),
+  Up(64, "\u0002"),
+  Down(65, "\u0006"),
 }
 
 fun TerminalGridSnapshot.scrollInputSequence(
@@ -22,5 +22,7 @@ fun TerminalGridSnapshot.scrollInputSequence(
   }
 
   val modePrefix = if (enterScrollMode) backend?.scrollModeSequence.orEmpty() else ""
-  return modePrefix + direction.arrowSequence.repeat(eventCount)
+  // Alternate-screen programs own their scrollback. Ctrl-B/Ctrl-F move the
+  // viewport in tmux, screen, and Zellij without moving a copy-mode cursor.
+  return modePrefix + direction.pageScrollSequence.repeat(eventCount)
 }

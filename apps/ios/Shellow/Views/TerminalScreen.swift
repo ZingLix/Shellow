@@ -1345,13 +1345,13 @@ private struct TerminalViewport: View {
         alternateScrollLastTranslationY = translationY
         alternateScrollRemainderY += deltaY
 
-        let threshold = max(1, rowHeight)
-        let tickCount = min(6, Int(abs(alternateScrollRemainderY) / threshold))
+        let usesMouseWheel = grid.mouseReporting && grid.sgrMouse
+        let threshold = max(1, rowHeight * (usesMouseWheel ? 1 : 6))
+        let tickCount = min(usesMouseWheel ? 6 : 1, Int(abs(alternateScrollRemainderY) / threshold))
         guard tickCount > 0 else { return }
 
         let direction: TerminalScrollDirection = alternateScrollRemainderY > 0 ? .up : .down
         alternateScrollRemainderY -= direction.translationSign * CGFloat(tickCount) * threshold
-        let usesMouseWheel = grid.mouseReporting && grid.sgrMouse
         let payload = grid.scrollInputSequence(
             direction: direction,
             count: tickCount,
@@ -2191,7 +2191,7 @@ private enum TerminalChromeMetrics {
     }
 
     static func bottomReserve(showKeyboardToolbar: Bool) -> CGFloat {
-        showKeyboardToolbar ? 104 : 58
+        showKeyboardToolbar ? 86 : 48
     }
 }
 
@@ -2217,7 +2217,7 @@ private struct TerminalControlsPanel: View {
     let sendInput: (String) -> Void
 
     var body: some View {
-        VStack(spacing: 8) {
+        VStack(spacing: 6) {
             TerminalInputBar(
                 isSearchVisible: $isSearchVisible,
                 isAltArmed: $isAltArmed,
@@ -2247,8 +2247,8 @@ private struct TerminalControlsPanel: View {
                 )
             }
         }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 10)
+        .padding(.horizontal, 10)
+        .padding(.vertical, 6)
         .background(ShellowTheme.panelBackground.opacity(0.97))
         .overlay(alignment: .top) {
             Rectangle()
@@ -2279,7 +2279,7 @@ private struct TerminalInputBar: View {
     let sendInput: (String) -> Void
 
     var body: some View {
-        HStack(spacing: 10) {
+        HStack(spacing: 6) {
             Menu {
                 Button(role: .destructive) {
                     onClearTerminal()
@@ -2334,8 +2334,8 @@ private struct TerminalInputBar: View {
                 }
             } label: {
                 Image(systemName: "ellipsis.circle")
-                    .font(.system(size: 15, weight: .semibold))
-                    .frame(width: 44, height: 44)
+                    .font(.system(size: 14, weight: .semibold))
+                    .frame(width: 38, height: 36)
             }
             .buttonStyle(.plain)
             .foregroundStyle(ShellowTheme.terminalText)
@@ -2759,7 +2759,7 @@ private struct TerminalDirectionKeyStrip: View {
     let sendInput: (String) -> Void
 
     var body: some View {
-        HStack(spacing: 6) {
+        HStack(spacing: 5) {
             TerminalIconButton(
                 systemName: "arrow.up",
                 accessibilityLabel: "Arrow Up"
@@ -2798,8 +2798,8 @@ private struct TerminalIconButton: View {
     var body: some View {
         Button(action: action) {
             Image(systemName: systemName)
-                .font(.system(size: 15, weight: .semibold))
-                .frame(width: 44, height: 44)
+                .font(.system(size: 14, weight: .semibold))
+                .frame(width: 38, height: 36)
         }
         .buttonStyle(.plain)
         .foregroundStyle(foreground)
@@ -2836,7 +2836,7 @@ private struct TerminalKeyboardToolbar: View {
 
     var body: some View {
         ScrollView(.horizontal) {
-            HStack(spacing: 8) {
+            HStack(spacing: 6) {
                 TerminalKeyButton("Esc") { sendInput("\u{1B}") }
                 TerminalKeyButton("Tab") { sendInput("\t") }
                 TerminalKeyButton("Ctrl", isActive: isCtrlArmed) {
@@ -2918,8 +2918,8 @@ private struct TerminalKeyboardToolbarDivider: View {
     var body: some View {
         Rectangle()
             .fill(ShellowTheme.keyBackground)
-            .frame(width: 1, height: 24)
-            .padding(.horizontal, 2)
+            .frame(width: 1, height: 20)
+            .padding(.horizontal, 1)
     }
 }
 
@@ -2994,7 +2994,7 @@ private struct TerminalKeyButton: View {
         Button(action: action) {
             Text(title)
                 .font(.caption.weight(.semibold))
-                .frame(width: keyWidth, height: 44)
+                .frame(width: keyWidth, height: 36)
         }
         .buttonStyle(.plain)
         .background(isActive ? ShellowTheme.accent : ShellowTheme.keyBackground, in: RoundedRectangle(cornerRadius: 8))
@@ -3002,7 +3002,7 @@ private struct TerminalKeyButton: View {
     }
 
     private var keyWidth: CGFloat {
-        title.count > 3 ? 54 : 42
+        title.count > 3 ? 48 : 38
     }
 }
 
@@ -3013,8 +3013,8 @@ private struct TerminalIconKey: View {
     var body: some View {
         Button(action: action) {
             Image(systemName: systemName)
-                .font(.system(size: 14, weight: .semibold))
-                .frame(width: 44, height: 44)
+                .font(.system(size: 13, weight: .semibold))
+                .frame(width: 38, height: 36)
         }
         .buttonStyle(.plain)
         .background(ShellowTheme.keyBackground, in: RoundedRectangle(cornerRadius: 8))
@@ -3543,10 +3543,10 @@ private enum TerminalScrollDirection {
         }
     }
 
-    var arrowSequence: String {
+    var pageScrollSequence: String {
         switch self {
-        case .up: "\u{1B}[A"
-        case .down: "\u{1B}[B"
+        case .up: "\u{2}"
+        case .down: "\u{6}"
         }
     }
 }
@@ -3589,7 +3589,11 @@ private extension TerminalGridSnapshot {
         }
 
         let modePrefix = enterScrollMode ? backend?.scrollModeSequence ?? "" : ""
-        return modePrefix + String(repeating: direction.arrowSequence, count: count)
+        // Alternate-screen programs own their scrollback. Enter the configured
+        // multiplexer scroll mode and move its viewport by pages. Ctrl-B and
+        // Ctrl-F are shared by tmux, screen, and Zellij scroll modes and avoid
+        // turning a swipe into visible copy-mode cursor movement.
+        return modePrefix + String(repeating: direction.pageScrollSequence, count: count)
     }
 }
 
