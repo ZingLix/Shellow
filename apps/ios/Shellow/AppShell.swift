@@ -1505,7 +1505,7 @@ struct AppShell: View {
                 CodexMessage(
                     id: "preview-assistant",
                     role: .assistant,
-                    text: "Context and account limits are available above this conversation.",
+                    text: "Context and account limits are available from the usage ring in the header.",
                     kind: .finalAnswer
                 )
             ]
