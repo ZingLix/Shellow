@@ -27,6 +27,7 @@ import { Iphone } from "./components/Iphone.jsx";
 const TESTFLIGHT = "https://testflight.apple.com/join/EFnQTH4T";
 const PLAY = "https://play.google.com/apps/testing/xyz.zinglix.shellow";
 const GITHUB = "https://github.com/ZingLix/Shellow";
+const asset = (path) => `${import.meta.env.BASE_URL}${path.replace(/^\//, "")}`;
 const RELEASES = "https://github.com/ZingLix/Shellow/releases";
 
 function ScrollProgress() {
@@ -52,7 +53,7 @@ function ScrollProgress() {
 function Brand({ compact = false }) {
   return (
     <span className="brand">
-      <img src="/shellow-icon.png" alt="" className="brand-icon" />
+      <img src={asset("shellow-icon.png")} alt="" className="brand-icon" />
       {!compact && <span>Shellow</span>}
     </span>
   );
@@ -104,7 +105,7 @@ function StoreButtons({ compact = false }) {
 function Hero() {
   return (
     <section id="top" className="hero section-dark">
-      <img className="hero-icon-field" src="/shellow-icon.png" alt="" aria-hidden="true" />
+      <img className="hero-icon-field" src={asset("shellow-icon.png")} alt="" aria-hidden="true" />
       <div className="hero-rule" />
       <div className="container hero-grid">
         <BlurFade className="hero-copy">
@@ -128,10 +129,10 @@ function Hero() {
 
         <BlurFade delay={0.12} direction="left" className="hero-devices">
           <div className="hero-device hero-device-terminal">
-            <Iphone src="/screens/ios-terminal.jpg" />
+            <Iphone src={asset("screens/ios-terminal.jpg")} />
           </div>
           <div className="hero-device hero-device-hosts">
-            <Iphone src="/screens/ios-hosts.jpg" />
+            <Iphone src={asset("screens/ios-hosts.jpg")} />
           </div>
         </BlurFade>
       </div>
@@ -247,7 +248,7 @@ function Performance() {
         </BlurFade>
 
         <BlurFade delay={0.12} direction="left" className="terminal-shot-shell">
-          <img src="/screens/ios-terminal.jpg" alt="Shellow terminal running on iOS Simulator with sanitized demo data" />
+          <img src={asset("screens/ios-terminal.jpg")} alt="Shellow terminal running on iOS Simulator with sanitized demo data" />
           <BorderBeam colorFrom="#1c9f70" colorTo="#75dbab" duration={8} size={100} />
         </BlurFade>
       </div>
@@ -281,7 +282,7 @@ function Agents() {
         <div className="agents-grid">
           <BlurFade delay={0.08} className="agents-visual">
             <div className="agents-phone">
-              <Iphone src="/screens/ios-hosts.jpg" frame="light" />
+              <Iphone src={asset("screens/ios-hosts.jpg")} frame="light" />
             </div>
             <div className="agent-path" aria-label="Direct SSH architecture">
               <span>Phone</span><ArrowRight /><span>SSH</span><ArrowRight /><span>Your machine</span>
